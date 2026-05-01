@@ -1,0 +1,44 @@
+// Type::method - chamada estatica (sem instancia).
+//
+// Funcoes em `impl Tipo { ... }` que NAO recebem `self` como
+// primeiro arg sao chamadas via `Tipo::nome(args)`.
+
+import "std/io";
+
+struct Point {
+    x: int,
+    y: int,
+}
+
+impl Point {
+    // construtor: nao tem self -> chama como Point::make
+    // (`new` eh keyword em Glide, entao usa-se outro nome)
+    fn make(x: int, y: int) -> Point {
+        return Point { x: x, y: y };
+    }
+
+    fn origin() -> Point {
+        return Point { x: 0, y: 0 };
+    }
+
+    // metodo de instancia: tem self -> chama como p.distance_sq()
+    fn distance_sq(self: Point, other: Point) -> int {
+        let dx: int = self.x - other.x;
+        let dy: int = self.y - other.y;
+        return dx * dx + dy * dy;
+    }
+}
+
+fn main() -> int {
+    let p: Point = Point::make(3, 4);
+    let o: Point = Point::origin();
+
+    println!("p =", p.x, p.y);
+    println!("o =", o.x, o.y);
+
+    // Mesmo metodo, duas formas:
+    println!("via UFCS:  ", p.distance_sq(o));
+    println!("via static:", Point::distance_sq(p, o));
+
+    return 0;
+}

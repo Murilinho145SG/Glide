@@ -83,4 +83,7 @@
 ] @operator
 
 [ "{" "}" "(" ")" "[" "]" ] @punctuation.bracket
-[ ";" "," ":" "." ] @punctuation.delimiter
+[ ";" "," ":" "." "::" ] @punctuation.delimiter
+
+(path_expr type: (identifier) @type)
+(path_expr member: (identifier) @function)

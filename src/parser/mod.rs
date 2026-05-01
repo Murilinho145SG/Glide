@@ -630,7 +630,11 @@ impl Parser {
             }
             TokenKind::Identifier(name) => {
                 self.advance();
-                if matches!(self.current.token, TokenKind::Operator(Operator::Bang))
+                if self.at_op(Operator::DoubleColon) {
+                    self.advance();
+                    let method = self.expect_ident()?;
+                    ExprKind::Ident(format!("{}_{}", name, method))
+                } else if matches!(self.current.token, TokenKind::Operator(Operator::Bang))
                     && matches!(self.peek.token, TokenKind::Operator(Operator::LParen))
                 {
                     self.advance(); // '!'

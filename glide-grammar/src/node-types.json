@@ -76,6 +76,10 @@
           "named": true
         },
         {
+          "type": "path_expr",
+          "named": true
+        },
+        {
           "type": "postfix_expr",
           "named": true
         },
@@ -172,6 +176,10 @@
         },
         {
           "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "path_expr",
           "named": true
         },
         {
@@ -272,6 +280,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -361,6 +373,10 @@
           },
           {
             "type": "parenthesized",
+            "named": true
+          },
+          {
+            "type": "path_expr",
             "named": true
           },
           {
@@ -508,6 +524,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -601,6 +621,10 @@
           },
           {
             "type": "parenthesized",
+            "named": true
+          },
+          {
+            "type": "path_expr",
             "named": true
           },
           {
@@ -769,6 +793,10 @@
           },
           {
             "type": "parenthesized",
+            "named": true
+          },
+          {
+            "type": "path_expr",
             "named": true
           },
           {
@@ -943,6 +971,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -1040,6 +1072,10 @@
         },
         {
           "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "path_expr",
           "named": true
         },
         {
@@ -1197,6 +1233,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -1299,6 +1339,10 @@
         },
         {
           "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "path_expr",
           "named": true
         },
         {
@@ -1465,6 +1509,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -1566,6 +1614,10 @@
           },
           {
             "type": "parenthesized",
+            "named": true
+          },
+          {
+            "type": "path_expr",
             "named": true
           },
           {
@@ -1681,6 +1733,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -1773,6 +1829,10 @@
         },
         {
           "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "path_expr",
           "named": true
         },
         {
@@ -1905,6 +1965,10 @@
           },
           {
             "type": "parenthesized",
+            "named": true
+          },
+          {
+            "type": "path_expr",
             "named": true
           },
           {
@@ -2078,6 +2142,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -2157,6 +2225,10 @@
           },
           {
             "type": "parenthesized",
+            "named": true
+          },
+          {
+            "type": "path_expr",
             "named": true
           },
           {
@@ -2354,6 +2426,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -2465,6 +2541,10 @@
           "named": true
         },
         {
+          "type": "path_expr",
+          "named": true
+        },
+        {
           "type": "postfix_expr",
           "named": true
         },
@@ -2559,6 +2639,10 @@
           },
           {
             "type": "parenthesized",
+            "named": true
+          },
+          {
+            "type": "path_expr",
             "named": true
           },
           {
@@ -2748,6 +2832,10 @@
           "named": true
         },
         {
+          "type": "path_expr",
+          "named": true
+        },
+        {
           "type": "postfix_expr",
           "named": true
         },
@@ -2768,6 +2856,32 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "path_expr",
+    "named": true,
+    "fields": {
+      "member": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -2873,6 +2987,10 @@
           "named": true
         },
         {
+          "type": "path_expr",
+          "named": true
+        },
+        {
           "type": "postfix_expr",
           "named": true
         },
@@ -2965,6 +3083,10 @@
         },
         {
           "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "path_expr",
           "named": true
         },
         {
@@ -3127,6 +3249,10 @@
         },
         {
           "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "path_expr",
           "named": true
         },
         {
@@ -3299,6 +3425,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -3447,6 +3577,10 @@
             "named": true
           },
           {
+            "type": "path_expr",
+            "named": true
+          },
+          {
             "type": "postfix_expr",
             "named": true
           },
@@ -3554,6 +3688,10 @@
           },
           {
             "type": "parenthesized",
+            "named": true
+          },
+          {
+            "type": "path_expr",
             "named": true
           },
           {
@@ -3670,6 +3808,10 @@
   },
   {
     "type": ":",
+    "named": false
+  },
+  {
+    "type": "::",
     "named": false
   },
   {

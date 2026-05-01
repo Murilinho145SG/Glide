@@ -2042,6 +2042,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "path_expr"
+        },
+        {
+          "type": "SYMBOL",
           "name": "struct_literal"
         },
         {
@@ -2081,6 +2085,35 @@
           "name": "null_literal"
         }
       ]
+    },
+    "path_expr": {
+      "type": "PREC",
+      "value": 20,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "FIELD",
+            "name": "type",
+            "content": {
+              "type": "SYMBOL",
+              "name": "identifier"
+            }
+          },
+          {
+            "type": "STRING",
+            "value": "::"
+          },
+          {
+            "type": "FIELD",
+            "name": "member",
+            "content": {
+              "type": "SYMBOL",
+              "name": "identifier"
+            }
+          }
+        ]
+      }
     },
     "macro_call": {
       "type": "PREC",

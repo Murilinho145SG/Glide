@@ -62,6 +62,7 @@ pub enum Operator {
     Dot,
     Semicolon,
     Colon,
+    DoubleColon,
     QuestionMark,
 
     // arrows
@@ -124,6 +125,7 @@ impl Operator {
             Operator::Dot           => ".",
             Operator::Semicolon     => ";",
             Operator::Colon         => ":",
+            Operator::DoubleColon   => "::",
             Operator::QuestionMark  => "?",
 
             Operator::Arrow         => "->",
@@ -185,6 +187,7 @@ impl Operator {
             "."  => Some(Operator::Dot),
             ";"  => Some(Operator::Semicolon),
             ":"  => Some(Operator::Colon),
+            "::" => Some(Operator::DoubleColon),
             "?"  => Some(Operator::QuestionMark),
 
             "->" => Some(Operator::Arrow),

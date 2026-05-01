@@ -212,7 +212,14 @@ impl Lexer {
             ';' => TokenKind::Operator(Operator::Semicolon),
             ',' => TokenKind::Operator(Operator::Comma),
             '.' => TokenKind::Operator(Operator::Dot),
-            ':' => TokenKind::Operator(Operator::Colon),
+            ':' => {
+                if self.peek_char() == ':' {
+                    self.read_char();
+                    TokenKind::Operator(Operator::DoubleColon)
+                } else {
+                    TokenKind::Operator(Operator::Colon)
+                }
+            }
             '?' => TokenKind::Operator(Operator::QuestionMark),
             '(' => TokenKind::Operator(Operator::LParen),
             ')' => TokenKind::Operator(Operator::RParen),

@@ -313,6 +313,7 @@ module.exports = grammar({
       $.parenthesized,
       $.array_literal,
       $.macro_call,
+      $.path_expr,
       $.struct_literal,
       $.new_expr,
       $.sizeof_expr,
@@ -324,6 +325,12 @@ module.exports = grammar({
       $.bool_literal,
       $.null_literal,
     ),
+
+    path_expr: $ => prec(20, seq(
+      field('type', $.identifier),
+      '::',
+      field('member', $.identifier),
+    )),
 
     macro_call: $ => prec(20, seq(
       field('name', $.identifier),
