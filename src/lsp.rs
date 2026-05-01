@@ -14,6 +14,7 @@ struct DocumentState {
     text: String,
     program: Option<Program>,
     index: SymbolIndex,
+    imported_modules: HashSet<String>,
 }
 
 pub struct Backend {
@@ -34,12 +35,17 @@ impl Backend {
             .to_file_path()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-        let (diagnostics, program, index) = analyze(&source, base_dir.as_deref());
+        let analysis = analyze(&source, base_dir.as_deref());
         self.docs.lock().unwrap().insert(
             uri.clone(),
-            DocumentState { text: source, program, index },
+            DocumentState {
+                text: source,
+                program: analysis.program,
+                index: analysis.index,
+                imported_modules: analysis.imported_modules,
+            },
         );
-        self.client.publish_diagnostics(uri, diagnostics, None).await;
+        self.client.publish_diagnostics(uri, analysis.diagnostics, None).await;
     }
 }
 
@@ -213,10 +219,15 @@ impl LanguageServer for Backend {
         let line_text = doc.text.lines().nth(line_idx).unwrap_or("");
         let prefix: String = line_text.chars().take(col_idx).collect();
 
-        let items = if let Some((obj_name, obj_col)) = parse_member_access(&prefix) {
-            field_completions(&doc.index, obj_name, obj_col, line_idx + 1)
+        let items = if let Some(ctx) = parse_member_access(&prefix) {
+            field_completions(
+                &doc.index,
+                ctx,
+                line_idx + 1,
+                &doc.imported_modules,
+            )
         } else {
-            symbol_completions(&doc.index)
+            symbol_completions(&doc.index, &doc.imported_modules)
         };
 
         Ok(Some(CompletionResponse::Array(items)))
@@ -227,48 +238,74 @@ impl LanguageServer for Backend {
     }
 }
 
-fn analyze(
-    source: &str,
-    base_dir: Option<&Path>,
-) -> (Vec<Diagnostic>, Option<Program>, SymbolIndex) {
+struct Analysis {
+    diagnostics: Vec<Diagnostic>,
+    program: Option<Program>,
+    index: SymbolIndex,
+    imported_modules: HashSet<String>,
+}
+
+fn analyze(source: &str, base_dir: Option<&Path>) -> Analysis {
     let mut parser = GlideParser::new(source);
     let parsed = parser.parse_program();
-    match parsed {
-        Err(e) => (
-            vec![make_diagnostic(e.line, e.column, &e.message)],
-            None,
-            SymbolIndex::default(),
-        ),
-        Ok(program) => {
-            let mut typer = Typer::new();
+    let program = match parsed {
+        Err(e) => {
+            return Analysis {
+                diagnostics: vec![make_diagnostic(e.line, e.column, &e.message)],
+                program: None,
+                index: SymbolIndex::default(),
+                imported_modules: HashSet::new(),
+            };
+        }
+        Ok(p) => p,
+    };
 
-            if let Some(dir) = base_dir {
-                let mut loaded = HashSet::new();
-                for stmt in &program {
-                    if let StmtKind::Import(p) = &stmt.kind {
-                        if let Some(target) = resolve_import(dir, p) {
-                            preload_imports(&target, &mut loaded, &mut typer);
-                        }
-                    }
-                }
-            }
+    let mut typer = Typer::new();
+    let mut imported_modules: HashSet<String> = HashSet::new();
 
-            let (result, index) = typer.check(program);
-            match result {
-                Ok(p) => (Vec::new(), Some(p), index),
-                Err(errors) => {
-                    let diags: Vec<_> = errors
-                        .iter()
-                        .map(|e| make_diagnostic(e.line, e.column, &e.message))
-                        .collect();
-                    (diags, None, index)
+    for stmt in &program {
+        if let StmtKind::Import(p) = &stmt.kind {
+            imported_modules.insert(p.clone());
+        }
+    }
+
+    if let Some(dir) = base_dir {
+        let mut loaded = HashSet::new();
+
+        for (path, module_name) in discover_std_files(dir) {
+            preload_module(&path, Some(module_name), &mut loaded, &mut typer);
+        }
+
+        for stmt in &program {
+            if let StmtKind::Import(p) = &stmt.kind {
+                if let Some(target) = resolve_import(dir, p) {
+                    preload_module(&target, Some(p.clone()), &mut loaded, &mut typer);
                 }
             }
         }
     }
+
+    let (result, index) = typer.check(program);
+    let (diagnostics, program) = match result {
+        Ok(p) => (Vec::new(), Some(p)),
+        Err(errors) => {
+            let diags: Vec<_> = errors
+                .iter()
+                .map(|e| make_diagnostic(e.line, e.column, &e.message))
+                .collect();
+            (diags, None)
+        }
+    };
+
+    Analysis { diagnostics, program, index, imported_modules }
 }
 
-fn preload_imports(path: &Path, loaded: &mut HashSet<PathBuf>, typer: &mut Typer) {
+fn preload_module(
+    path: &Path,
+    module: Option<String>,
+    loaded: &mut HashSet<PathBuf>,
+    typer: &mut Typer,
+) {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !loaded.insert(canon) {
         return;
@@ -281,11 +318,41 @@ fn preload_imports(path: &Path, loaded: &mut HashSet<PathBuf>, typer: &mut Typer
     for stmt in &program {
         if let StmtKind::Import(p) = &stmt.kind {
             if let Some(target) = resolve_import(&dir, p) {
-                preload_imports(&target, loaded, typer);
+                preload_module(&target, Some(p.clone()), loaded, typer);
             }
         }
     }
-    typer.pre_register(&program);
+    typer.pre_register_module(&program, module);
+}
+
+fn discover_std_files(start_dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut out = Vec::new();
+    for ancestor in start_dir.ancestors() {
+        let std_dir = ancestor.join("std");
+        if std_dir.is_dir() {
+            walk_glide_files(ancestor, &std_dir, &mut out);
+            break;
+        }
+    }
+    out
+}
+
+fn walk_glide_files(workspace_root: &Path, dir: &Path, out: &mut Vec<(PathBuf, String)>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            walk_glide_files(workspace_root, &path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("glide") {
+            if let Ok(rel) = path.strip_prefix(workspace_root) {
+                let module = rel
+                    .with_extension("")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((path.clone(), module));
+            }
+        }
+    }
 }
 
 fn resolve_import(base_dir: &Path, import_path: &str) -> Option<PathBuf> {
@@ -334,14 +401,27 @@ fn decl_at(index: &SymbolIndex, line: usize, col: usize) -> Option<&DeclInfo> {
     None
 }
 
-fn parse_member_access(prefix: &str) -> Option<(String, usize)> {
+enum MemberContext {
+    Ident { col: usize },
+    Literal(Type),
+}
+
+fn parse_member_access(prefix: &str) -> Option<MemberContext> {
     let trimmed = prefix.trim_end();
     if !trimmed.ends_with('.') {
         return None;
     }
-    let before_dot = &trimmed[..trimmed.len() - 1];
-    let mut end = before_dot.len();
+    let before_dot = trimmed[..trimmed.len() - 1].trim_end();
+
+    if before_dot.ends_with('"') {
+        return Some(MemberContext::Literal(Type::Named("string".into())));
+    }
+    if before_dot.ends_with('\'') {
+        return Some(MemberContext::Literal(Type::Named("char".into())));
+    }
+
     let bytes = before_dot.as_bytes();
+    let mut end = before_dot.len();
     while end > 0 {
         let c = bytes[end - 1] as char;
         if c.is_alphanumeric() || c == '_' {
@@ -353,25 +433,37 @@ fn parse_member_access(prefix: &str) -> Option<(String, usize)> {
     if end == before_dot.len() {
         return None;
     }
-    let name = before_dot[end..].to_string();
+    let name = &before_dot[end..];
+
+    if name == "true" || name == "false" {
+        return Some(MemberContext::Literal(Type::Named("bool".into())));
+    }
+    if name.chars().all(|c| c.is_ascii_digit()) {
+        return Some(MemberContext::Literal(Type::Named("int".into())));
+    }
+
     let col = before_dot[..end].chars().count() + 1;
-    Some((name, col))
+    Some(MemberContext::Ident { col })
 }
 
 fn field_completions(
     index: &SymbolIndex,
-    _obj_name: String,
-    obj_col: usize,
+    ctx: MemberContext,
     line: usize,
+    imported: &HashSet<String>,
 ) -> Vec<CompletionItem> {
-    let Some(r) = index.ref_at(line, obj_col) else {
-        return Vec::new();
+    let ty = match ctx {
+        MemberContext::Ident { col } => match index.ref_at(line, col) {
+            Some(r) => r.ty.clone(),
+            None => return Vec::new(),
+        },
+        MemberContext::Literal(t) => t,
     };
 
     let mut items = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    if let Some(s_name) = struct_from_type(&r.ty) {
+    if let Some(s_name) = struct_from_type(&ty) {
         if let Some(fields) = index.structs.get(&s_name) {
             for f in fields {
                 if seen.insert(f.name.clone()) {
@@ -386,8 +478,8 @@ fn field_completions(
         }
     }
 
-    let full_prefix = r.ty.mangle();
-    let stripped = method_type_prefix_for_completion(&r.ty);
+    let full_prefix = ty.mangle();
+    let stripped = method_type_prefix_for_completion(&ty);
 
     let prefixes: Vec<String> = {
         let mut v = Vec::new();
@@ -409,12 +501,7 @@ fn field_completions(
         for prefix in &prefixes {
             if let Some(rest) = d.name.strip_prefix(prefix.as_str()) {
                 if !rest.is_empty() && seen.insert(rest.to_string()) {
-                    items.push(CompletionItem {
-                        label: rest.to_string(),
-                        kind: Some(CompletionItemKind::METHOD),
-                        detail: Some(d.detail.clone()),
-                        ..Default::default()
-                    });
+                    items.push(method_completion(rest, &d.detail, d.module.as_deref(), imported));
                 }
                 break;
             }
@@ -422,6 +509,39 @@ fn field_completions(
     }
 
     items
+}
+
+fn method_completion(
+    name: &str,
+    detail: &str,
+    module: Option<&str>,
+    imported: &HashSet<String>,
+) -> CompletionItem {
+    let needs_import = module
+        .filter(|m| !imported.contains(*m))
+        .map(str::to_string);
+
+    let display_detail = match (module, &needs_import) {
+        (Some(m), Some(_)) => format!("{}  (auto-import \"{}\")", detail, m),
+        (Some(m), None) => format!("{}  (from \"{}\")", detail, m),
+        _ => detail.to_string(),
+    };
+
+    let additional_edits = needs_import.as_ref().map(|m| vec![TextEdit {
+        range: Range {
+            start: Position { line: 0, character: 0 },
+            end: Position { line: 0, character: 0 },
+        },
+        new_text: format!("import \"{}\";\n", m),
+    }]);
+
+    CompletionItem {
+        label: name.into(),
+        kind: Some(CompletionItemKind::METHOD),
+        detail: Some(display_detail),
+        additional_text_edits: additional_edits,
+        ..Default::default()
+    }
 }
 
 fn struct_from_type(ty: &Type) -> Option<String> {
@@ -443,7 +563,7 @@ fn method_type_prefix_for_completion(ty: &Type) -> Option<String> {
     }
 }
 
-fn symbol_completions(index: &SymbolIndex) -> Vec<CompletionItem> {
+fn symbol_completions(index: &SymbolIndex, imported: &HashSet<String>) -> Vec<CompletionItem> {
     let mut items = Vec::new();
 
     for kw in KEYWORDS {
@@ -460,7 +580,12 @@ fn symbol_completions(index: &SymbolIndex) -> Vec<CompletionItem> {
             ..Default::default()
         });
     }
+
+    let mut seen_globals: HashSet<String> = HashSet::new();
     for d in &index.decls {
+        if d.name.starts_with("__glide_") || d.name.contains('_') && d.module.is_some() {
+            // skip mangled stdlib + impl methods at the top level (only show via member access)
+        }
         let kind = match d.kind {
             DeclKind::Fn => CompletionItemKind::FUNCTION,
             DeclKind::Struct => CompletionItemKind::STRUCT,
@@ -468,14 +593,43 @@ fn symbol_completions(index: &SymbolIndex) -> Vec<CompletionItem> {
             DeclKind::Let => CompletionItemKind::VARIABLE,
             DeclKind::Param => CompletionItemKind::VARIABLE,
         };
-        if matches!(d.kind, DeclKind::Fn | DeclKind::Struct | DeclKind::Const) {
-            items.push(CompletionItem {
-                label: d.name.clone(),
-                kind: Some(kind),
-                detail: Some(d.detail.clone()),
-                ..Default::default()
-            });
+        if !matches!(d.kind, DeclKind::Fn | DeclKind::Struct | DeclKind::Const) {
+            continue;
         }
+        if d.name.starts_with("__glide_") {
+            continue;
+        }
+        if d.name.contains('_') && d.module.is_some() && matches!(d.kind, DeclKind::Fn) {
+            // looks like an impl method (e.g. string_blue) — skip in top-level completion
+            continue;
+        }
+        if !seen_globals.insert(d.name.clone()) {
+            continue;
+        }
+        let needs_import = d.module.as_deref()
+            .filter(|m| !imported.contains(*m))
+            .map(str::to_string);
+
+        let display_detail = match (&d.module, &needs_import) {
+            (Some(m), Some(_)) => format!("{}  (auto-import \"{}\")", d.detail, m),
+            (Some(m), None) => format!("{}  (from \"{}\")", d.detail, m),
+            _ => d.detail.clone(),
+        };
+        let additional_edits = needs_import.as_ref().map(|m| vec![TextEdit {
+            range: Range {
+                start: Position { line: 0, character: 0 },
+                end: Position { line: 0, character: 0 },
+            },
+            new_text: format!("import \"{}\";\n", m),
+        }]);
+
+        items.push(CompletionItem {
+            label: d.name.clone(),
+            kind: Some(kind),
+            detail: Some(display_detail),
+            additional_text_edits: additional_edits,
+            ..Default::default()
+        });
     }
     items
 }

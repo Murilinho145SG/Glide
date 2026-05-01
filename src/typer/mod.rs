@@ -64,6 +64,7 @@ pub struct DeclInfo {
     pub kind: DeclKind,
     pub ty: Option<Type>,
     pub detail: String,
+    pub module: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +105,7 @@ pub struct Typer {
     current_pos: Pos,
     errors: Vec<TypeError>,
     index: SymbolIndex,
+    current_module: Option<String>,
 }
 
 impl Default for Typer {
@@ -122,10 +124,18 @@ impl Typer {
             current_pos: Pos::default(),
             errors: Vec::new(),
             index: SymbolIndex::default(),
+            current_module: None,
         };
         t.register_builtins();
         t.register_stdlib();
         t
+    }
+
+    pub fn pre_register_module(&mut self, program: &Program, module: Option<String>) {
+        let saved = self.current_module.take();
+        self.current_module = module;
+        self.pre_register(program);
+        self.current_module = saved;
     }
 
     fn register_builtins(&mut self) {
@@ -165,6 +175,7 @@ impl Typer {
                 kind: DeclKind::Fn,
                 ty: ret.clone(),
                 detail: format_fn_detail(name, &params, ret.as_ref()),
+                module: None,
             });
         }
     }
@@ -180,6 +191,7 @@ impl Typer {
     }
 
     fn pre_register_stmt(&mut self, stmt: &Stmt) {
+        let module = self.current_module.clone();
         match &stmt.kind {
             StmtKind::Struct { name, fields } => {
                 self.structs.insert(
@@ -193,6 +205,7 @@ impl Typer {
                     kind: DeclKind::Struct,
                     ty: None,
                     detail: format_struct_detail(name, fields),
+                    module: module.clone(),
                 });
                 for f in fields {
                     self.index.decls.push(DeclInfo {
@@ -201,6 +214,7 @@ impl Typer {
                         kind: DeclKind::Struct,
                         ty: Some(f.ty.clone()),
                         detail: format!("{}.{}: {}", name, f.name, type_name(&f.ty)),
+                        module: module.clone(),
                     });
                 }
             }
@@ -217,6 +231,7 @@ impl Typer {
                     kind: DeclKind::Fn,
                     ty: ret_type.clone(),
                     detail: format_fn_detail(name, params, ret_type.as_ref()),
+                    module: module.clone(),
                 });
             }
             StmtKind::Impl { target, methods, .. } => {
@@ -236,6 +251,7 @@ impl Typer {
                             kind: DeclKind::Fn,
                             ty: ret_type.clone(),
                             detail: format_fn_detail(&mangled, params, ret_type.as_ref()),
+                            module: module.clone(),
                         });
                     }
                 }
@@ -324,6 +340,7 @@ impl Typer {
                 kind: DeclKind::Param,
                 ty: Some(p.ty.clone()),
                 detail: format!("{}: {}", p.name, type_name(&p.ty)),
+                module: None,
             });
         }
         self.current_ret = ret_type.clone();
@@ -544,6 +561,7 @@ impl Typer {
             kind: DeclKind::Let,
             ty: Some(ty.clone()),
             detail: format!("let {}: {}", name, type_name(ty)),
+            module: None,
         });
     }
 
@@ -554,6 +572,7 @@ impl Typer {
             kind: DeclKind::Const,
             ty: Some(ty.clone()),
             detail: format!("const {}: {}", name, type_name(ty)),
+            module: None,
         });
     }
 
