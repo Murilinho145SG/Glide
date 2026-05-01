@@ -2,19 +2,22 @@ import "std/io";
 
 fn main() -> int {
     let nums: *int = [10, 20, 30, 40, 50];
-    nums.print(5);
+    println(nums.to_string(5));
 
     let names: *string = ["alelo", "tectec", "world"];
-    names.print(3);
+    println(names.to_string(3));
 
     let pis: *float = [3.14, 2.71, 1.41];
-    pis.print(3);
+    println(pis.to_string(3));
 
     let sum: int = 0;
     for let i: int = 0; i < 5; i++ {
         sum += nums[i];
     }
-    print_int(sum);
+    println(sum.to_string());
+
+    println("hello");
+    println(true.to_string());
 
     return 0;
 }
