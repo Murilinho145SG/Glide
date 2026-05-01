@@ -219,15 +219,18 @@ impl LanguageServer for Backend {
         let line_text = doc.text.lines().nth(line_idx).unwrap_or("");
         let prefix: String = line_text.chars().take(col_idx).collect();
 
+        let import_anchor = compute_import_anchor(&doc.text);
+
         let items = if let Some(ctx) = parse_member_access(&prefix) {
             field_completions(
                 &doc.index,
                 ctx,
                 line_idx + 1,
                 &doc.imported_modules,
+                &import_anchor,
             )
         } else {
-            symbol_completions(&doc.index, &doc.imported_modules)
+            symbol_completions(&doc.index, &doc.imported_modules, &import_anchor)
         };
 
         Ok(Some(CompletionResponse::Array(items)))
@@ -406,8 +409,68 @@ enum MemberContext {
     Literal(Type),
 }
 
+struct ImportAnchor {
+    line: u32,
+    leading_blank: bool,
+    trailing_blank: bool,
+}
+
+impl ImportAnchor {
+    fn text_edit_for(&self, module: &str) -> TextEdit {
+        let mut text = String::new();
+        if self.leading_blank {
+            text.push('\n');
+        }
+        text.push_str(&format!("import \"{}\";\n", module));
+        if self.trailing_blank {
+            text.push('\n');
+        }
+        TextEdit {
+            range: Range {
+                start: Position { line: self.line, character: 0 },
+                end: Position { line: self.line, character: 0 },
+            },
+            new_text: text,
+        }
+    }
+}
+
+fn compute_import_anchor(text: &str) -> ImportAnchor {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut last_import: Option<usize> = None;
+    for (i, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("import ") {
+            last_import = Some(i);
+        } else if last_import.is_some() && !line.trim().is_empty() {
+            break;
+        }
+    }
+
+    if let Some(idx) = last_import {
+        return ImportAnchor {
+            line: (idx + 1) as u32,
+            leading_blank: false,
+            trailing_blank: false,
+        };
+    }
+
+    let next_non_blank = lines
+        .iter()
+        .position(|l| !l.trim().is_empty());
+
+    let trailing_blank = next_non_blank
+        .map(|i| !lines.get(i).map_or(true, |l| l.trim().is_empty()))
+        .unwrap_or(false);
+
+    ImportAnchor {
+        line: 0,
+        leading_blank: false,
+        trailing_blank,
+    }
+}
+
 fn parse_member_access(prefix: &str) -> Option<MemberContext> {
-    let trimmed = prefix.trim_end();
+    let trimmed = prefix.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
     if !trimmed.ends_with('.') {
         return None;
     }
@@ -451,6 +514,7 @@ fn field_completions(
     ctx: MemberContext,
     line: usize,
     imported: &HashSet<String>,
+    import_anchor: &ImportAnchor,
 ) -> Vec<CompletionItem> {
     let ty = match ctx {
         MemberContext::Ident { col } => match index.ref_at(line, col) {
@@ -501,7 +565,13 @@ fn field_completions(
         for prefix in &prefixes {
             if let Some(rest) = d.name.strip_prefix(prefix.as_str()) {
                 if !rest.is_empty() && seen.insert(rest.to_string()) {
-                    items.push(method_completion(rest, &d.detail, d.module.as_deref(), imported));
+                    items.push(method_completion(
+                        rest,
+                        &d.detail,
+                        d.module.as_deref(),
+                        imported,
+                        import_anchor,
+                    ));
                 }
                 break;
             }
@@ -516,6 +586,7 @@ fn method_completion(
     detail: &str,
     module: Option<&str>,
     imported: &HashSet<String>,
+    import_anchor: &ImportAnchor,
 ) -> CompletionItem {
     let needs_import = module
         .filter(|m| !imported.contains(*m))
@@ -527,13 +598,9 @@ fn method_completion(
         _ => detail.to_string(),
     };
 
-    let additional_edits = needs_import.as_ref().map(|m| vec![TextEdit {
-        range: Range {
-            start: Position { line: 0, character: 0 },
-            end: Position { line: 0, character: 0 },
-        },
-        new_text: format!("import \"{}\";\n", m),
-    }]);
+    let additional_edits = needs_import
+        .as_ref()
+        .map(|m| vec![import_anchor.text_edit_for(m)]);
 
     CompletionItem {
         label: name.into(),
@@ -563,7 +630,11 @@ fn method_type_prefix_for_completion(ty: &Type) -> Option<String> {
     }
 }
 
-fn symbol_completions(index: &SymbolIndex, imported: &HashSet<String>) -> Vec<CompletionItem> {
+fn symbol_completions(
+    index: &SymbolIndex,
+    imported: &HashSet<String>,
+    import_anchor: &ImportAnchor,
+) -> Vec<CompletionItem> {
     let mut items = Vec::new();
 
     for kw in KEYWORDS {
@@ -615,13 +686,9 @@ fn symbol_completions(index: &SymbolIndex, imported: &HashSet<String>) -> Vec<Co
             (Some(m), None) => format!("{}  (from \"{}\")", d.detail, m),
             _ => d.detail.clone(),
         };
-        let additional_edits = needs_import.as_ref().map(|m| vec![TextEdit {
-            range: Range {
-                start: Position { line: 0, character: 0 },
-                end: Position { line: 0, character: 0 },
-            },
-            new_text: format!("import \"{}\";\n", m),
-        }]);
+        let additional_edits = needs_import
+            .as_ref()
+            .map(|m| vec![import_anchor.text_edit_for(m)]);
 
         items.push(CompletionItem {
             label: d.name.clone(),
@@ -636,6 +703,7 @@ fn symbol_completions(index: &SymbolIndex, imported: &HashSet<String>) -> Vec<Co
 
 const KEYWORDS: &[&str] = &[
     "fn", "let", "const", "struct",
+    "interface", "impl", "import",
     "if", "else", "while", "for",
     "break", "continue", "return",
     "spawn", "chan",
