@@ -236,15 +236,12 @@ impl LanguageServer for Backend {
         let line_idx = pos.line as usize;
         let col_idx = pos.character as usize;
         let line_text = doc.text.lines().nth(line_idx).unwrap_or("");
-        let prefix: String = line_text.chars().take(col_idx).collect();
-
         let import_anchor = compute_import_anchor(&doc.text);
 
-        let items = if let Some(ctx) = parse_member_access(&prefix) {
-            field_completions(
+        let items = if let Some(ty) = detect_method_target(line_text, line_idx + 1, col_idx + 1, &doc.index) {
+            method_completions_for_type(
                 &doc.index,
-                ctx,
-                line_idx + 1,
+                &ty,
                 &doc.imported_modules,
                 &import_anchor,
             )
@@ -575,6 +572,158 @@ fn compute_import_anchor(text: &str) -> ImportAnchor {
     }
 }
 
+fn detect_method_target(
+    line_text: &str,
+    line: usize,
+    cursor_col: usize,
+    index: &SymbolIndex,
+) -> Option<Type> {
+    let chars: Vec<char> = line_text.chars().collect();
+    let cursor = cursor_col.saturating_sub(1).min(chars.len());
+
+    let mut end = cursor;
+    while end > 0 && (chars[end - 1].is_alphanumeric() || chars[end - 1] == '_') {
+        end -= 1;
+    }
+    while end > 0 && chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    if end == 0 || chars[end - 1] != '.' {
+        return None;
+    }
+
+    let dot_pos = end - 1;
+    resolve_type_before_dot(&chars, dot_pos, index, line)
+}
+
+fn resolve_type_before_dot(
+    chars: &[char],
+    dot_pos: usize,
+    index: &SymbolIndex,
+    line: usize,
+) -> Option<Type> {
+    let mut end = dot_pos;
+    while end > 0 && chars[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    if end == 0 {
+        return None;
+    }
+
+    let last = chars[end - 1];
+
+    if last == '"' {
+        return Some(Type::Named("string".into()));
+    }
+    if last == '\'' {
+        return Some(Type::Named("char".into()));
+    }
+    if last == ')' {
+        return resolve_call_chain(chars, end, index, line);
+    }
+    if last.is_alphanumeric() || last == '_' {
+        let mut start = end;
+        while start > 0 && (chars[start - 1].is_alphanumeric() || chars[start - 1] == '_') {
+            start -= 1;
+        }
+        let ident: String = chars[start..end].iter().collect();
+        if ident == "true" || ident == "false" {
+            return Some(Type::Named("bool".into()));
+        }
+        if ident.chars().all(|c| c.is_ascii_digit()) {
+            return Some(Type::Named("int".into()));
+        }
+        if ident == "null" {
+            return Some(Type::Pointer(Box::new(Type::Named("__null__".into()))));
+        }
+        let col = start + 1;
+        if let Some(r) = index.ref_at(line, col) {
+            return Some(r.ty.clone());
+        }
+        return None;
+    }
+
+    None
+}
+
+fn resolve_call_chain(
+    chars: &[char],
+    paren_close_after: usize,
+    index: &SymbolIndex,
+    line: usize,
+) -> Option<Type> {
+    if paren_close_after == 0 || chars[paren_close_after - 1] != ')' {
+        return None;
+    }
+    let mut depth: i32 = 1;
+    let mut p = paren_close_after - 1;
+    while p > 0 {
+        p -= 1;
+        match chars[p] {
+            ')' => depth += 1,
+            '(' => {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            '"' => {
+                while p > 0 && chars[p - 1] != '"' {
+                    p -= 1;
+                }
+                if p > 0 {
+                    p -= 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+
+    let mut name_end = p;
+    while name_end > 0 && chars[name_end - 1].is_whitespace() {
+        name_end -= 1;
+    }
+    let mut name_start = name_end;
+    while name_start > 0
+        && (chars[name_start - 1].is_alphanumeric() || chars[name_start - 1] == '_')
+    {
+        name_start -= 1;
+    }
+    if name_start == name_end {
+        return None;
+    }
+    let method_name: String = chars[name_start..name_end].iter().collect();
+
+    let mut q = name_start;
+    while q > 0 && chars[q - 1].is_whitespace() {
+        q -= 1;
+    }
+
+    if q > 0 && chars[q - 1] == '.' {
+        let receiver_ty = resolve_type_before_dot(chars, q - 1, index, line)?;
+        let prefixes = method_lookup_prefixes(&receiver_ty);
+        for prefix in &prefixes {
+            let target = format!("{}{}", prefix, method_name);
+            for d in &index.decls {
+                if d.name == target {
+                    return d.ty.clone();
+                }
+            }
+        }
+        return None;
+    }
+
+    for d in &index.decls {
+        if d.name == method_name && matches!(d.kind, DeclKind::Fn) {
+            return d.ty.clone();
+        }
+    }
+    None
+}
+
 fn parse_member_access(prefix: &str) -> Option<MemberContext> {
     let trimmed = prefix.trim_end_matches(|c: char| c.is_alphanumeric() || c == '_');
     if !trimmed.ends_with('.') {
@@ -615,25 +764,16 @@ fn parse_member_access(prefix: &str) -> Option<MemberContext> {
     Some(MemberContext::Ident { col })
 }
 
-fn field_completions(
+fn method_completions_for_type(
     index: &SymbolIndex,
-    ctx: MemberContext,
-    line: usize,
+    ty: &Type,
     imported: &HashSet<String>,
     import_anchor: &ImportAnchor,
 ) -> Vec<CompletionItem> {
-    let ty = match ctx {
-        MemberContext::Ident { col } => match index.ref_at(line, col) {
-            Some(r) => r.ty.clone(),
-            None => return Vec::new(),
-        },
-        MemberContext::Literal(t) => t,
-    };
-
     let mut items = Vec::new();
     let mut seen: HashSet<String> = HashSet::new();
 
-    if let Some(s_name) = struct_from_type(&ty) {
+    if let Some(s_name) = struct_from_type(ty) {
         if let Some(fields) = index.structs.get(&s_name) {
             for f in fields {
                 if seen.insert(f.name.clone()) {
@@ -649,7 +789,7 @@ fn field_completions(
     }
 
     let full_prefix = ty.mangle();
-    let stripped = method_type_prefix_for_completion(&ty);
+    let stripped = method_type_prefix_for_completion(ty);
 
     let prefixes: Vec<String> = {
         let mut v = Vec::new();
