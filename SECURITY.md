@@ -1,6 +1,6 @@
 # Security Policy
 
-The security of Javascomp is a priority. We appreciate the efforts of security researchers and developers who work to improve the integrity of this project.
+The security of Glide is a priority. We appreciate the efforts of security researchers and developers who work to improve the integrity of this project.
 
 ## Supported Versions
 

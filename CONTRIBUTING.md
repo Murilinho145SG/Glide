@@ -1,6 +1,6 @@
 # Contributing Guide
 
-Thank you for considering contributing to Javascomp! The goal of this project is to create a safer and friendlier JavaScript compiler. Any help is welcome, whether it's fixing bugs, improving documentation, or proposing new features.
+Thank you for considering contributing to Glide! The goal of this project is to build a small, statically typed systems language with manual memory management and Go-style concurrency. Any help is welcome, whether it's fixing bugs, improving documentation, or proposing new features.
 
 ## How to Contribute
 

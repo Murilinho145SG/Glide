@@ -1,34 +1,68 @@
-# Javascomp
+# Glide
 
-**Javascomp** is a modern JavaScript compiler designed to offer a superior development experience with a focus on robust static typing and ease of learning for beginners.
+A small statically typed systems language. Pointers, no GC, Go-style channels.
+The compiler is written in Rust and transpiles to C.
 
-Unlike traditional runtimes (like Node.js or Deno) or transpiled supersets (like TypeScript), Javascomp aims to be a **truly compiled language**, bringing performance and safety from the build stage.
+```glide
+struct Point {
+    x: int,
+    y: int,
+}
 
-## 🚀 Goals
+fn translate(p: *Point, dx: int, dy: int) {
+    p->x += dx;
+    p->y += dy;
+}
 
-- **True Compilation**: Transform JavaScript-style code into efficient binaries or optimized bytecode, without relying on a heavy interpreted runtime.
-- **Strong & Static Typing**: A type system that helps prevent common errors before the code even runs, without excessive configuration complexity.
-- **Beginner Friendly**: Clear, educational, and helpful error messages. The compiler "talks" to you to explain what went wrong and how to fix it.
-- **Performance**: Written in Rust to ensure speed and memory safety during the compilation process.
+fn worker(c: chan<int>) {
+    send(c, 42);
+}
 
-## 🛠️ Current State
+fn main() -> int {
+    let p: *Point = new Point { x: 3, y: 4 };
+    translate(p, 10, 20);
+    printf("(%d, %d)\n", p->x, p->y);
+    free(p);
 
-The project is in the early stages of development. The current structure includes a basic lexer implemented in Rust.
-
-## 📦 Installation and Usage
-
-*(Installation instructions will be added soon)*
-
-To run the current development environment (requires Rust installed):
-
-```bash
-cargo run
+    let c: chan<int> = make_chan(1);
+    spawn worker(c);
+    printf("got %d\n", recv(c));
+    return 0;
+}
 ```
 
-## 🤝 Contributing
+## Build
 
-Contributions are very welcome! If you want to help build a friendlier and more powerful language, check out our [Contribution Guide](CONTRIBUTING.md).
+Requires Rust and a C compiler (`gcc` or `clang`) on `PATH`.
 
-## 📄 License
+```bash
+cargo install --path .
+```
 
-This project is open source and licensed under the [MIT License](LICENSE).
+## Use
+
+```bash
+glide build hello.glide -o hello
+./hello
+
+glide run hello.glide          # build to a tempfile and run
+glide emit hello.glide         # print the generated C
+glide fmt hello.glide          # pretty-print to stdout
+glide fmt hello.glide --write  # rewrite the file in place
+glide lsp                      # start the LSP server on stdio
+```
+
+Programs that use `chan` / `spawn` get linked with `-lpthread` automatically.
+
+## Editor
+
+The `zed-extension/` directory has a Zed extension that wires the LSP and a
+Tree-sitter grammar. See `zed-extension/README.md`.
+
+## Examples
+
+`examples/*.glide` covers each language feature end-to-end.
+
+## License
+
+MIT.
