@@ -152,11 +152,19 @@ impl Typer {
 
     fn register_stdlib(&mut self) {
         for (name, params, ret) in stdlib_signatures() {
-            self.fns.insert(format!("__glide_{}", name), FnSig {
-                params,
-                ret_type: ret,
+            let full = format!("__glide_{}", name);
+            self.fns.insert(full.clone(), FnSig {
+                params: params.clone(),
+                ret_type: ret.clone(),
                 variadic: false,
                 decl_pos: None,
+            });
+            self.index.decls.push(DeclInfo {
+                pos: Pos::default(),
+                name: full,
+                kind: DeclKind::Fn,
+                ty: ret.clone(),
+                detail: format_fn_detail(name, &params, ret.as_ref()),
             });
         }
     }
@@ -165,71 +173,79 @@ impl Typer {
         matches!(name, "make_chan" | "send" | "recv" | "close")
     }
 
-    pub fn check(mut self, program: Program) -> (Result<Program, Vec<TypeError>>, SymbolIndex) {
-        for stmt in &program {
-            match &stmt.kind {
-                StmtKind::Struct { name, fields } => {
-                    self.structs.insert(
-                        name.clone(),
-                        StructInfo { fields: fields.clone(), decl_pos: stmt.pos },
-                    );
-                    self.index.structs.insert(name.clone(), fields.clone());
+    pub fn pre_register(&mut self, program: &Program) {
+        for stmt in program {
+            self.pre_register_stmt(stmt);
+        }
+    }
+
+    fn pre_register_stmt(&mut self, stmt: &Stmt) {
+        match &stmt.kind {
+            StmtKind::Struct { name, fields } => {
+                self.structs.insert(
+                    name.clone(),
+                    StructInfo { fields: fields.clone(), decl_pos: stmt.pos },
+                );
+                self.index.structs.insert(name.clone(), fields.clone());
+                self.index.decls.push(DeclInfo {
+                    pos: stmt.pos,
+                    name: name.clone(),
+                    kind: DeclKind::Struct,
+                    ty: None,
+                    detail: format_struct_detail(name, fields),
+                });
+                for f in fields {
                     self.index.decls.push(DeclInfo {
-                        pos: stmt.pos,
-                        name: name.clone(),
+                        pos: f.pos,
+                        name: f.name.clone(),
                         kind: DeclKind::Struct,
-                        ty: None,
-                        detail: format_struct_detail(name, fields),
+                        ty: Some(f.ty.clone()),
+                        detail: format!("{}.{}: {}", name, f.name, type_name(&f.ty)),
                     });
-                    for f in fields {
+                }
+            }
+            StmtKind::Fn { name, params, ret_type, .. } => {
+                self.fns.insert(name.clone(), FnSig {
+                    params: params.clone(),
+                    ret_type: ret_type.clone(),
+                    variadic: false,
+                    decl_pos: Some(stmt.pos),
+                });
+                self.index.decls.push(DeclInfo {
+                    pos: stmt.pos,
+                    name: name.clone(),
+                    kind: DeclKind::Fn,
+                    ty: ret_type.clone(),
+                    detail: format_fn_detail(name, params, ret_type.as_ref()),
+                });
+            }
+            StmtKind::Impl { target, methods, .. } => {
+                let prefix = target.mangle();
+                for m in methods {
+                    if let StmtKind::Fn { name, params, ret_type, .. } = &m.kind {
+                        let mangled = format!("{}_{}", prefix, name);
+                        self.fns.insert(mangled.clone(), FnSig {
+                            params: params.clone(),
+                            ret_type: ret_type.clone(),
+                            variadic: false,
+                            decl_pos: Some(m.pos),
+                        });
                         self.index.decls.push(DeclInfo {
-                            pos: f.pos,
-                            name: f.name.clone(),
-                            kind: DeclKind::Struct,
-                            ty: Some(f.ty.clone()),
-                            detail: format!("{}.{}: {}", name, f.name, type_name(&f.ty)),
+                            pos: m.pos,
+                            name: name.clone(),
+                            kind: DeclKind::Fn,
+                            ty: ret_type.clone(),
+                            detail: format_fn_detail(&mangled, params, ret_type.as_ref()),
                         });
                     }
                 }
-                StmtKind::Fn { name, params, ret_type, .. } => {
-                    self.fns.insert(name.clone(), FnSig {
-                        params: params.clone(),
-                        ret_type: ret_type.clone(),
-                        variadic: false,
-                        decl_pos: Some(stmt.pos),
-                    });
-                    self.index.decls.push(DeclInfo {
-                        pos: stmt.pos,
-                        name: name.clone(),
-                        kind: DeclKind::Fn,
-                        ty: ret_type.clone(),
-                        detail: format_fn_detail(name, params, ret_type.as_ref()),
-                    });
-                }
-                StmtKind::Impl { target, methods, .. } => {
-                    let prefix = target.mangle();
-                    for m in methods {
-                        if let StmtKind::Fn { name, params, ret_type, .. } = &m.kind {
-                            let mangled = format!("{}_{}", prefix, name);
-                            self.fns.insert(mangled.clone(), FnSig {
-                                params: params.clone(),
-                                ret_type: ret_type.clone(),
-                                variadic: false,
-                                decl_pos: Some(m.pos),
-                            });
-                            self.index.decls.push(DeclInfo {
-                                pos: m.pos,
-                                name: name.clone(),
-                                kind: DeclKind::Fn,
-                                ty: ret_type.clone(),
-                                detail: format_fn_detail(&mangled, params, ret_type.as_ref()),
-                            });
-                        }
-                    }
-                }
-                _ => {}
             }
+            _ => {}
         }
+    }
+
+    pub fn check(mut self, program: Program) -> (Result<Program, Vec<TypeError>>, SymbolIndex) {
+        self.pre_register(&program);
 
         let mut new_program = Vec::with_capacity(program.len());
         for stmt in program {

@@ -1,9 +1,10 @@
-use crate::ast::Program;
+use crate::ast::{Program, StmtKind};
 use crate::fmt as glide_fmt;
 use crate::parser::Parser as GlideParser;
 use crate::typer::{type_name, DeclInfo, DeclKind, RefKind, SymbolIndex, Typer};
 use crate::types::Type;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::*;
@@ -29,7 +30,11 @@ impl Backend {
     }
 
     async fn refresh(&self, uri: Url, source: String) {
-        let (diagnostics, program, index) = analyze(&source);
+        let base_dir = uri
+            .to_file_path()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let (diagnostics, program, index) = analyze(&source, base_dir.as_deref());
         self.docs.lock().unwrap().insert(
             uri.clone(),
             DocumentState { text: source, program, index },
@@ -222,7 +227,10 @@ impl LanguageServer for Backend {
     }
 }
 
-fn analyze(source: &str) -> (Vec<Diagnostic>, Option<Program>, SymbolIndex) {
+fn analyze(
+    source: &str,
+    base_dir: Option<&Path>,
+) -> (Vec<Diagnostic>, Option<Program>, SymbolIndex) {
     let mut parser = GlideParser::new(source);
     let parsed = parser.parse_program();
     match parsed {
@@ -232,7 +240,19 @@ fn analyze(source: &str) -> (Vec<Diagnostic>, Option<Program>, SymbolIndex) {
             SymbolIndex::default(),
         ),
         Ok(program) => {
-            let typer = Typer::new();
+            let mut typer = Typer::new();
+
+            if let Some(dir) = base_dir {
+                let mut loaded = HashSet::new();
+                for stmt in &program {
+                    if let StmtKind::Import(p) = &stmt.kind {
+                        if let Some(target) = resolve_import(dir, p) {
+                            preload_imports(&target, &mut loaded, &mut typer);
+                        }
+                    }
+                }
+            }
+
             let (result, index) = typer.check(program);
             match result {
                 Ok(p) => (Vec::new(), Some(p), index),
@@ -246,6 +266,60 @@ fn analyze(source: &str) -> (Vec<Diagnostic>, Option<Program>, SymbolIndex) {
             }
         }
     }
+}
+
+fn preload_imports(path: &Path, loaded: &mut HashSet<PathBuf>, typer: &mut Typer) {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !loaded.insert(canon) {
+        return;
+    }
+    let Ok(source) = std::fs::read_to_string(path) else { return };
+    let mut parser = GlideParser::new(&source);
+    let Ok(program) = parser.parse_program() else { return };
+
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    for stmt in &program {
+        if let StmtKind::Import(p) = &stmt.kind {
+            if let Some(target) = resolve_import(&dir, p) {
+                preload_imports(&target, loaded, typer);
+            }
+        }
+    }
+    typer.pre_register(&program);
+}
+
+fn resolve_import(base_dir: &Path, import_path: &str) -> Option<PathBuf> {
+    let p = Path::new(import_path);
+    if p.is_absolute() {
+        return Some(p.to_path_buf());
+    }
+    let direct = base_dir.join(p);
+    if direct.is_file() {
+        return Some(direct);
+    }
+    let with_ext = direct.with_extension("glide");
+    if with_ext.is_file() {
+        return Some(with_ext);
+    }
+    let mod_file = direct.join("mod.glide");
+    if mod_file.is_file() {
+        return Some(mod_file);
+    }
+    for ancestor in base_dir.ancestors() {
+        let std_dir = ancestor.join("std");
+        if !std_dir.is_dir() {
+            continue;
+        }
+        let candidate = ancestor.join(p);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        let with_ext = candidate.with_extension("glide");
+        if with_ext.is_file() {
+            return Some(with_ext);
+        }
+    }
+    None
 }
 
 fn decl_at(index: &SymbolIndex, line: usize, col: usize) -> Option<&DeclInfo> {
@@ -286,33 +360,68 @@ fn parse_member_access(prefix: &str) -> Option<(String, usize)> {
 
 fn field_completions(
     index: &SymbolIndex,
-    obj_name: String,
+    _obj_name: String,
     obj_col: usize,
     line: usize,
 ) -> Vec<CompletionItem> {
-    let mut struct_name: Option<String> = None;
+    let Some(r) = index.ref_at(line, obj_col) else {
+        return Vec::new();
+    };
 
-    if let Some(r) = index.ref_at(line, obj_col) {
-        struct_name = struct_from_type(&r.ty);
+    let mut items = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    if let Some(s_name) = struct_from_type(&r.ty) {
+        if let Some(fields) = index.structs.get(&s_name) {
+            for f in fields {
+                if seen.insert(f.name.clone()) {
+                    items.push(CompletionItem {
+                        label: f.name.clone(),
+                        kind: Some(CompletionItemKind::FIELD),
+                        detail: Some(type_name(&f.ty)),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
     }
 
-    let Some(s_name) = struct_name else {
-        let _ = obj_name;
-        return Vec::new();
-    };
-    let Some(fields) = index.structs.get(&s_name) else {
-        return Vec::new();
+    let full_prefix = r.ty.mangle();
+    let stripped = method_type_prefix_for_completion(&r.ty);
+
+    let prefixes: Vec<String> = {
+        let mut v = Vec::new();
+        v.push(format!("__glide_{}_", full_prefix));
+        v.push(format!("{}_", full_prefix));
+        if let Some(p) = &stripped {
+            if p != &full_prefix {
+                v.push(format!("__glide_{}_", p));
+                v.push(format!("{}_", p));
+            }
+        }
+        v
     };
 
-    fields
-        .iter()
-        .map(|f| CompletionItem {
-            label: f.name.clone(),
-            kind: Some(CompletionItemKind::FIELD),
-            detail: Some(type_name(&f.ty)),
-            ..Default::default()
-        })
-        .collect()
+    for d in &index.decls {
+        if !matches!(d.kind, DeclKind::Fn) {
+            continue;
+        }
+        for prefix in &prefixes {
+            if let Some(rest) = d.name.strip_prefix(prefix.as_str()) {
+                if !rest.is_empty() && seen.insert(rest.to_string()) {
+                    items.push(CompletionItem {
+                        label: rest.to_string(),
+                        kind: Some(CompletionItemKind::METHOD),
+                        detail: Some(d.detail.clone()),
+                        ..Default::default()
+                    });
+                }
+                break;
+            }
+        }
+    }
+
+    items
 }
 
 fn struct_from_type(ty: &Type) -> Option<String> {
@@ -323,6 +432,14 @@ fn struct_from_type(ty: &Type) -> Option<String> {
         },
         Type::Pointer(inner) => struct_from_type(inner),
         Type::Chan(_) => None,
+    }
+}
+
+fn method_type_prefix_for_completion(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Named(n) => Some(n.clone()),
+        Type::Pointer(inner) => method_type_prefix_for_completion(inner),
+        Type::Chan(_) => Some("chan".into()),
     }
 }
 
