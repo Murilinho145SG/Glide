@@ -733,7 +733,14 @@ impl Typer {
                             error_ty()
                         }
                     },
-                    UnaryOp::AddrOf => Type::Pointer(Box::new(inner_ty.clone())),
+                    UnaryOp::AddrOf => {
+                        if !is_lvalue(&inner_new) {
+                            self.error(
+                                "cannot take the address of a non-lvalue (assign it to a `let` first)".into(),
+                            );
+                        }
+                        Type::Pointer(Box::new(inner_ty.clone()))
+                    }
                     UnaryOp::PostInc | UnaryOp::PostDec => inner_ty.clone(),
                 };
                 (ExprKind::Unary(op, Box::new(inner_new)), result_ty)
