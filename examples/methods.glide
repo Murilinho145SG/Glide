@@ -23,19 +23,19 @@ fn main() -> int {
     let neg: int = (0 - 7).abs();
     printf("(-7).abs() = %d\n", neg);
 
-    let greet: string = "alelo";
-    printf("len = %d\n", greet.len());
+    let text: string = "example";
+    printf("len = %d\n", text.len());
 
-    let same: bool = greet.eq("alelo");
+    let same: bool = text.eq("example");
     printf("eq = %s\n", same.to_string());
 
-    let c: char = greet.at(0);
+    let c: char = text.at(0);
     printf("first char code = %d\n", c.to_int());
     printf("is_alpha = %s\n", c.is_alpha().to_string());
 
     let p1: Point = Point { x: 0, y: 0 };
     let p2: Point = Point { x: 3, y: 4 };
-    printf("distance^2 = %d\n", (&p1).distance(&p2));
+    printf("distance^2 = %d\n", p1.distance(&p2));
 
     return 0;
 }

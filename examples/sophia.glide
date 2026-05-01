@@ -1,0 +1,7 @@
+import "std/color";
+
+fn main() -> int {
+    let text: string = "example".blue();
+    printf("%s\n", text);
+    return 0;
+}

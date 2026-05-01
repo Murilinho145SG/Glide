@@ -1,9 +1,9 @@
-// Arrays + loop.
+// Arrays and loops.
 //
-// `[a, b, c]` é um array literal. O tipo é `*T` (ponteiro pra elemento).
-// Glide não rastreia o tamanho — você passa `n` quando precisa.
+// `[a, b, c]` is an array literal. The type is `*T` (pointer to element).
+// Glide doesn't track length, so you carry `n` yourself.
 //
-// `arr[i]` indexa.
+// `arr[i]` indexes.
 
 fn main() -> int {
     let nums: *int = [10, 20, 30, 40, 50];

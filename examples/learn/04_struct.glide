@@ -1,7 +1,7 @@
-// Structs e métodos via UFCS.
+// Structs and methods via UFCS.
 //
-// Para chamar uma função como método (`p.distance(q)`), basta
-// nomear ela `<NomeDoTipo>_<metodo>` e o primeiro arg ser do tipo certo.
+// To call a function as a method (`p.distance(q)`), name it
+// `<TypeName>_<method>` and make the first arg the right type.
 
 struct Point {
     x: int,
@@ -26,8 +26,8 @@ fn main() -> int {
     printf("dist^2 = %d\n", origin.distance_sq(p));
 
     let q: Point = Point { x: 1, y: 1 };
-    (&q).translate(5, 5);
-    printf("q apos translate = (%d, %d)\n", q.x, q.y);
+    q.translate(5, 5);
+    printf("q after translate = (%d, %d)\n", q.x, q.y);
 
     return 0;
 }

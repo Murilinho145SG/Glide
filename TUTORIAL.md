@@ -1,6 +1,6 @@
 # Glide tutorial
 
-Goes from zero to real programs. Each section's code runs as-is with `glide run <file>.glide`.
+From zero to a real program. Each section's code runs as-is with `glide run <file>.glide`.
 
 For the full list of features and what's missing, see `LANGUAGE.md`. For working on the compiler itself, see `DEVELOPING.md`.
 
@@ -15,7 +15,7 @@ fn main() -> int {
 }
 ```
 
-Every program needs `fn main`. Returns int (process exit code). `printf` is the libc one, format strings work the same way.
+Every program needs `fn main`. Returns int (process exit code). `printf` is the libc one, format strings work the same.
 
 ---
 
@@ -25,19 +25,19 @@ Every program needs `fn main`. Returns int (process exit code). `printf` is the 
 fn main() -> int {
     let n: int = 42;
     let pi: float = 3.14;
-    let name: string = "alelo";
+    let name: string = "Glide";
     let ok: bool = true;
     let c: char = 'a';
 
-    let inferred = 100;        // type comes from value (int here)
-    const MAX: int = 1_000_000; // const is immutable
+    let inferred = 100;          // type comes from the value (int)
+    const MAX: int = 1_000_000;  // const is immutable
 
     printf("%d %f %s\n", n, pi, name);
     return 0;
 }
 ```
 
-`let` is mutable, `const` isn't. Underscores in numbers are just visual.
+`let` is mutable, `const` isn't. Underscores in numbers are visual only.
 
 ---
 
@@ -49,7 +49,7 @@ fn add(a: int, b: int) -> int {
 }
 
 fn greet(name: string) {
-    printf("hi, %s\n", name);
+    printf("hello, %s\n", name);
 }
 
 fn main() -> int {
@@ -60,11 +60,11 @@ fn main() -> int {
 }
 ```
 
-`-> Type` for the return type. Omit it if the function returns nothing.
+`-> Type` for the return. Omit it when the function returns nothing.
 
 ---
 
-## 4. If / while / for
+## 4. if / while / for
 
 ```glide
 fn main() -> int {
@@ -92,22 +92,22 @@ fn main() -> int {
 }
 ```
 
-No parentheses around conditions. Body always braced.
+No parentheses around conditions. Body is always braced.
 
 ---
 
 ## 5. Pointers and memory
 
-Glide doesn't have a garbage collector. You allocate with `malloc` and free with `free`.
+Glide has no garbage collector. You allocate with `malloc` and free with `free`.
 
 ```glide
-fn use_pointer(p: *int) {
-    *p += 100;          // dereference and assign
+fn add_offset(p: *int) {
+    *p += 100;
 }
 
 fn main() -> int {
     let x: int = 5;
-    use_pointer(&x);    // pass address of x
+    add_offset(&x);
     printf("%d\n", x);  // 105
 
     let p: *int = malloc(sizeof(int)) as *int;
@@ -120,7 +120,7 @@ fn main() -> int {
 ```
 
 `*T` is "pointer to T". `&x` takes the address. `*p` reads/writes through it.
-`sizeof` gives byte size. `as` is a cast.
+`sizeof` returns the size in bytes. `as` is a cast.
 
 ---
 
@@ -144,74 +144,82 @@ fn main() -> int {
 }
 ```
 
-`new T { ... }` is `malloc + struct init` in one go. Returns `*T`.
+`new T { ... }` is `malloc + struct init` in one expression. Returns `*T`.
 
 `a.x` works on values; `a->x` works on pointers. Glide also auto-derefs `.` on pointers, so `h.x` works too.
 
 ---
 
-## 7. Methods (UFCS)
+## 7. Methods (UFCS and impl)
 
-Any free function whose first parameter is `T` can be called as a method on a `T`:
+Any free function whose first parameter is `T` can be called as a method on a `T`. Three styles:
+
+**Style 1 — free function with name convention:**
 
 ```glide
-struct Point {
-    x: int,
-    y: int,
-}
-
-fn Point_distance_sq(a: Point, b: Point) -> int {
+fn Point_distance(a: Point, b: Point) -> int {
     let dx: int = a.x - b.x;
     let dy: int = a.y - b.y;
     return dx * dx + dy * dy;
 }
 
-fn main() -> int {
-    let p: Point = Point { x: 0, y: 0 };
-    let q: Point = Point { x: 3, y: 4 };
-    printf("%d\n", p.distance_sq(q));   // 25
-    return 0;
-}
+let p: Point = Point { x: 0, y: 0 };
+let q: Point = Point { x: 3, y: 4 };
+printf("%d\n", p.distance(q));   // 25
 ```
 
-The naming convention `<TypeName>_<method>` is what enables `p.distance_sq(...)`. Same for primitives:
+**Style 2 — `impl Type` block:**
 
 ```glide
-let s: string = 42.to_string();         // calls int_to_string
-printf("len = %d\n", s.len());          // calls string_len
-let upper: string = "hi".concat(" world");  // calls string_concat
-```
+impl Point {
+    fn distance(self: Point, other: Point) -> int {
+        let dx: int = self.x - other.x;
+        let dy: int = self.y - other.y;
+        return dx * dx + dy * dy;
+    }
 
-You can chain: `c.is_alpha().to_string()`, `name.concat(" :)").len()`.
+    fn translate(self: *Point, dx: int, dy: int) {
+        self->x += dx;
+        self->y += dy;
+    }
 
----
-
-## 8. Interfaces
-
-Interfaces are like Rust traits. They declare methods. Then you `impl` for any type, including native ones.
-
-```glide
-interface Greet {
-    fn shout(self: string) -> string;
-}
-
-impl Greet for string {
-    fn shout(self: string) -> string {
-        return self.concat("!!!");
+    // no self: associated function
+    fn origin() -> Point {
+        return Point { x: 0, y: 0 };
     }
 }
 
-fn main() -> int {
-    printf("%s\n", "hello".shout());   // hello!!!
-    return 0;
+let p: Point = Point::origin();
+p.distance(Point::origin());
+```
+
+**Style 3 — interface + impl** (trait-like):
+
+```glide
+interface Show {
+    fn show(self: Point);
+}
+
+impl Show for Point {
+    fn show(self: Point) {
+        printf("(%d, %d)\n", self.x, self.y);
+    }
 }
 ```
 
-`impl Color for string` in `std/color.glide` is what gives you `"x".blue()`, `"y".red()`, etc.
+Built-in primitives already come with stdlib methods:
+
+```glide
+let s: string = 42.to_string();
+printf("len = %d\n", s.len());
+let upper: string = "hello".concat(" world");
+```
+
+Chaining works: `c.is_alpha().to_string()`, `name.concat(" ok").len()`.
 
 ---
 
-## 9. Arrays
+## 8. Arrays
 
 `[1, 2, 3]` is an array literal. Type is `*T`. Glide doesn't track length, so you carry it yourself.
 
@@ -220,46 +228,60 @@ import "std/io";
 
 fn main() -> int {
     let nums: *int = [10, 20, 30, 40, 50];
-    println(nums.to_string(5));   // [10, 20, 30, 40, 50]
+    println!(nums.to_string(5));   // [10, 20, 30, 40, 50]
 
     let sum: int = 0;
     for let i: int = 0; i < 5; i++ {
         sum += nums[i];
     }
-    println(sum.to_string());     // 150
+    println!(sum.to_string());     // 150
 
     return 0;
 }
 ```
 
-`std/io` has print/println and array-to-string helpers.
+---
+
+## 9. println! and print! macros
+
+Take any number of args of any type. The compiler picks the right format spec for each.
+
+```glide
+let name: string = "Maria";
+let age: int = 30;
+
+println!(name, age, 3.14, true);          // Maria 30 3.14 true
+println!("age squared:", age * age);
+```
+
+`println!` adds `\n`. `print!` doesn't.
 
 ---
 
 ## 10. Concurrency
 
-Glide has Go-style channels and a `spawn` keyword that runs a function in a thread. Channels are typed and bounded.
+Glide has typed channels (Go-style) and a `spawn` keyword that runs a function in a thread.
 
 ```glide
 fn worker(out: chan<int>) {
-    send(out, 42);
-    close(out);
+    out.send(42);
+    out.close();
 }
 
 fn main() -> int {
     let c: chan<int> = make_chan(1);
     spawn worker(c);
 
-    let v: int = recv(c);
+    let v: int = c.recv();
     printf("got %d\n", v);
 
     return 0;
 }
 ```
 
-`make_chan(N)` makes a channel with capacity `N`. `send`/`recv`/`close` are the operations. Channels block when full / empty. `close` wakes everyone.
+`make_chan(N)` makes a channel with capacity `N`. `send` / `recv` / `close` are the operations; can be called as methods (`c.send(x)`) or as free functions (`send(c, x)`). Channels block on full / empty. `close` wakes everyone.
 
-`make_chan` only works directly inside `let c: chan<T> = make_chan(...)` (with the explicit type annotation).
+`make_chan` only works as the initializer of a `let` or `const` with an explicit `chan<T>` annotation.
 
 ---
 
@@ -286,7 +308,7 @@ fn main() -> int {
 }
 ```
 
-For the LSP completion, methods from any file under `std/` show up automatically and offer to auto-import on accept.
+In the LSP, methods from any file under `std/` show up automatically and offer to auto-import on accept.
 
 ---
 
@@ -308,12 +330,12 @@ fn print_task(t: *Task) {
     if t->done {
         mark = "[x]".green();
     }
-    println(mark.concat(" ").concat(t->name));
+    println!(mark.concat(" ").concat(t->name));
 }
 
 fn main() -> int {
-    let a: Task = Task { name: "write tutorial",      done: true };
-    let b: Task = Task { name: "add generics",        done: false };
+    let a: Task = Task { name: "write tutorial", done: true  };
+    let b: Task = Task { name: "add generics",   done: false };
     let c: Task = Task { name: "build a real project", done: false };
 
     print_task(&a);
@@ -324,20 +346,20 @@ fn main() -> int {
 }
 ```
 
-Save this as `examples/todo.glide` and run with `glide run examples/todo.glide`.
+Save as `examples/todo.glide`, run with `glide run examples/todo.glide`.
 
 ---
 
-## What to learn next
+## What to study next
 
-The compiler-side things you'll bump into when growing your own programs:
+Practical limits you'll hit, which point at what to add:
 
-- **String building is awkward** because there's no string interpolation and no formatter beyond `printf`. You'll lean on `concat` chains and `to_string`. A real `format!`-equivalent in stdlib is the obvious next stdlib win.
-- **Arrays don't track length.** Wrapping `*T + len` in a struct gives you a real "list". Add `push`/`get`/`len` methods on it. Once you have that, real programs feel much better.
-- **No generics yet**, so the list above is per-element-type (`IntList`, `StringList`, ...). Generics is the biggest language feature you don't have. Adding it is a real project.
-- **No errors / Result type.** Today fns either return a value or you crash. Pattern match would help.
-- **No closures**, so you can't pass a function to a fn that takes a behavior. Indirect calls would unlock callbacks and higher-order stuff.
+- **Building strings is awkward** because there's no interpolation and `printf` is the only formatter. You end up with `concat` chains plus `to_string`. A `format!` in stdlib is the obvious next quick win.
+- **Arrays don't track length.** Wrapping `*T + len` in a struct gives you a real "list". Add `push`/`get`/`len` methods. Once that exists, real programs feel much better.
+- **No generics yet**, so that list above is per element type (`IntList`, `StringList`, ...). Generics is the biggest language feature still missing. Adding it is a real project.
+- **No Result/Option or pattern matching.** Today functions either return a value or crash. Pattern matching would help.
+- **No closures**, so you can't pass behavior as an argument. Indirect calls would unlock callbacks and higher-order functions.
 
-`LANGUAGE.md` has the full list of what's missing. `DEVELOPING.md` shows how to add new things to the compiler itself when you decide what to tackle.
+`LANGUAGE.md` has the full gap list. `DEVELOPING.md` shows how to add things to the compiler when you decide what to tackle.
 
-Best way to actually learn the language: write something small in it that you'd otherwise write in Go or Rust. A wc clone, a tiny key-value store, a maze generator. You'll discover exactly what hurts and what's pleasant, and your priorities will sort themselves out.
+The best way to actually learn the language is to write something small in Glide that you'd otherwise write in another language. A simple `wc`, an in-memory KV store, a password generator. You'll discover exactly what hurts and what's pleasant, and your priorities will sort themselves out.

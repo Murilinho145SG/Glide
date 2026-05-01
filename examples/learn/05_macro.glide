@@ -1,25 +1,25 @@
-// Macros println! e print!.
+// println! and print! macros.
 //
-// Aceitam qualquer mistura de tipos. Glide gera o printf com
-// format spec certo pra cada um.
+// Accept any mix of types. The compiler builds the right printf
+// format spec for each one.
 
 fn main() -> int {
-    let nome: string = "alelo";
-    let idade: int = 21;
-    let altura: float = 1.75;
-    let estuda: bool = true;
+    let name: string = "Maria";
+    let age: int = 30;
+    let height: float = 1.72;
+    let active: bool = true;
 
-    println!(nome, idade, altura, estuda);
-    println!("idade ao quadrado:", idade * idade);
+    println!(name, age, height, active);
+    println!("age squared:", age * age);
 
-    print!("contagem: ");
-    for let i: int = 1; i <= 5; i++ {
+    print!("countdown: ");
+    for let i: int = 5; i >= 1; i-- {
         print!(i, " ");
     }
-    println!("fim");
+    println!("done");
 
-    let saudacao: string = "ola, ".concat(nome);
-    println!(saudacao);
+    let greeting: string = "hello, ".concat(name);
+    println!(greeting);
 
     return 0;
 }

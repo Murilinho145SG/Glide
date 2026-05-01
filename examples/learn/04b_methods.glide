@@ -1,22 +1,22 @@
-// 3 formas de adicionar metodos a uma struct.
+// 3 ways to add methods to a struct.
 //
-// Todas usam UFCS: a chamada `obj.metodo(args)` vira `metodo(obj, args)`.
-// O typer escolhe a funcao certa pelo nome mangled.
+// All use UFCS: `obj.method(args)` becomes `method(obj, args)`.
+// The typer picks the function by mangled name.
 
 struct Point {
     x: int,
     y: int,
 }
 
-// FORMA 1: free function com nome `<Tipo>_<metodo>`.
-// O typer trata como metodo automaticamente.
+// STYLE 1: free function with `<Type>_<method>` name.
+// The typer treats it as a method automatically.
 fn Point_show(p: *Point) {
     printf("(%d, %d)\n", p->x, p->y);
 }
 
-// FORMA 2: bloco `impl <Tipo> { ... }`.
-// Internamente vira a mesma coisa que a forma 1.
-// Mais idiomatico, agrupa os metodos da struct juntos.
+// STYLE 2: `impl <Type> { ... }` block.
+// Internally the same as style 1. More idiomatic, groups the type's
+// methods together.
 impl Point {
     fn distance_sq(a: Point, b: Point) -> int {
         let dx: int = a.x - b.x;
@@ -35,8 +35,8 @@ impl Point {
     }
 }
 
-// FORMA 3: interface + impl. Util quando varios tipos compartilham
-// um conjunto de operacoes (estilo trait do Rust).
+// STYLE 3: interface + impl. Useful when many types share a set
+// of operations (Rust trait style).
 interface Origin {
     fn is_origin(self: Point) -> bool;
 }
@@ -49,17 +49,17 @@ impl Origin for Point {
 
 fn main() -> int {
     let p: Point = Point { x: 3, y: 4 };
-    p.show();                                   // forma 1 (auto &)
-    printf("dist^2 = %d\n", p.distance_sq(Point { x: 0, y: 0 }));  // forma 2
+    p.show();                                        // style 1 (auto &)
+    printf("dist^2 = %d\n", p.distance_sq(Point { x: 0, y: 0 }));  // style 2
 
     let q: Point = Point { x: 1, y: 1 };
-    q.translate(10, 20);                        // auto-toma endereco
+    q.translate(10, 20);                             // auto &
     q.scale(2);
     q.show();
 
     let zero: Point = Point { x: 0, y: 0 };
-    if zero.is_origin() {                       // forma 3
-        printf("zero esta na origem\n");
+    if zero.is_origin() {                            // style 3
+        printf("zero is at the origin\n");
     }
 
     return 0;

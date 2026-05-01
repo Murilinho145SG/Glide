@@ -1,31 +1,31 @@
-struct Point {
-    x: int,
-    y: int,
-}
+// struct Point {
+//     x: int,
+//     y: int,
+// }
 
-fn add(a: int, b: int) -> int {
-    return a + b;
-}
+// fn add(a: int, b: int) -> int {
+//     return a + b;
+// }
 
-fn main() -> int {
-    // 1. wrong-typed initializer
-    let n: int = "not an int";
+// fn main() -> int {
+//     // 1. wrong-typed initializer
+//     let n: int = "not an int";
 
-    // 2. condition is not bool
-    if 5 + 3 {
-        return 0;
-    }
+//     // 2. condition is not bool
+//     if 5 + 3 {
+//         return 0;
+//     }
 
-    // 3. wrong arg count
-    add(1);
+//     // 3. wrong arg count
+//     add(1);
 
-    // 4. wrong arg type
-    add(1, "two");
+//     // 4. wrong arg type
+//     add(1, "two");
 
-    // 5. unknown field
-    let p: Point = Point { x: 1, y: 2 };
-    let z: int = p.zoo;
+//     // 5. unknown field
+//     let p: Point = Point { x: 1, y: 2 };
+//     let z: int = p.zoo;
 
-    // 6. unknown name
-    return mystery_fn();
-}
+//     // 6. unknown name
+//     return mystery_fn();
+// }
