@@ -1258,16 +1258,6 @@
           }
         ]
       }
-    },
-    "children": {
-      "multiple": false,
-      "required": false,
-      "types": [
-        {
-          "type": "visibility",
-          "named": true
-        }
-      ]
     }
   },
   {
@@ -1430,16 +1420,6 @@
           }
         ]
       }
-    },
-    "children": {
-      "multiple": false,
-      "required": false,
-      "types": [
-        {
-          "type": "visibility",
-          "named": true
-        }
-      ]
     }
   },
   {
@@ -3339,10 +3319,6 @@
         {
           "type": "struct_field",
           "named": true
-        },
-        {
-          "type": "visibility",
-          "named": true
         }
       ]
     }
@@ -4008,6 +3984,10 @@
     "named": true
   },
   {
+    "type": "pub",
+    "named": false
+  },
+  {
     "type": "return",
     "named": false
   },
@@ -4030,10 +4010,6 @@
   {
     "type": "true",
     "named": false
-  },
-  {
-    "type": "visibility",
-    "named": true
   },
   {
     "type": "while",

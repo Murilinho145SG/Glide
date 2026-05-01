@@ -43,10 +43,6 @@
         }
       ]
     },
-    "visibility": {
-      "type": "STRING",
-      "value": "pub"
-    },
     "import_stmt": {
       "type": "SEQ",
       "members": [
@@ -109,8 +105,8 @@
           "type": "CHOICE",
           "members": [
             {
-              "type": "SYMBOL",
-              "name": "visibility"
+              "type": "STRING",
+              "value": "pub"
             },
             {
               "type": "BLANK"
@@ -262,8 +258,8 @@
           "type": "CHOICE",
           "members": [
             {
-              "type": "SYMBOL",
-              "name": "visibility"
+              "type": "STRING",
+              "value": "pub"
             },
             {
               "type": "BLANK"
@@ -640,8 +636,8 @@
           "type": "CHOICE",
           "members": [
             {
-              "type": "SYMBOL",
-              "name": "visibility"
+              "type": "STRING",
+              "value": "pub"
             },
             {
               "type": "BLANK"
