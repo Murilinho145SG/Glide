@@ -1042,6 +1042,29 @@ impl Typer {
             }
         };
 
+        if let Some(first_param) = sig.params.first() {
+            if let Type::Pointer(inner) = &first_param.ty {
+                if **inner == arg_tys[0] && !matches!(arg_tys[0], Type::Pointer(_)) {
+                    let obj = new_args.remove(0);
+                    let obj_pos_inner = obj.pos;
+                    let inner_ty = arg_tys[0].clone();
+                    let wrapped = if is_lvalue(&obj) {
+                        Expr::new(
+                            ExprKind::Unary(UnaryOp::AddrOf, Box::new(obj)),
+                            obj_pos_inner,
+                        )
+                    } else {
+                        Expr::new(
+                            ExprKind::AddrOfTemp { value: Box::new(obj), ty: inner_ty.clone() },
+                            obj_pos_inner,
+                        )
+                    };
+                    new_args.insert(0, wrapped);
+                    arg_tys[0] = Type::Pointer(Box::new(inner_ty));
+                }
+            }
+        }
+
         if sig.params.len() != new_args.len() {
             self.error(format!(
                 "method `{}`: expected {} argument(s), got {}",
