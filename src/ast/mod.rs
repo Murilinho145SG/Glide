@@ -103,6 +103,11 @@ pub enum ExprKind {
         name: String,
         args: Vec<Expr>,
     },
+
+    Path {
+        ty: String,
+        member: String,
+    },
 }
 
 impl Expr {

@@ -125,9 +125,15 @@ impl Formatter {
                 self.emit_simple_stmt(s);
             }
             StmtKind::Import(p) => {
-                self.write("import \"");
-                self.write(&format_string(p));
-                self.write("\";\n");
+                self.write("import ");
+                if is_path_like(p) {
+                    self.write(&p.replace('/', "::"));
+                } else {
+                    self.write("\"");
+                    self.write(&format_string(p));
+                    self.write("\"");
+                }
+                self.write(";\n");
             }
             StmtKind::Interface { name, methods } => {
                 self.write_indent();
@@ -488,6 +494,12 @@ impl Formatter {
                 }
                 self.write(")");
             }
+
+            ExprKind::Path { ty, member } => {
+                self.write(ty);
+                self.write("::");
+                self.write(member);
+            }
         }
     }
 
@@ -525,6 +537,22 @@ impl Formatter {
 
 fn has_nested_struct(e: &Expr) -> bool {
     matches!(&e.kind, ExprKind::StructLit { .. } | ExprKind::New { .. })
+}
+
+fn is_path_like(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    s.split('/').all(|seg| {
+        !seg.is_empty()
+            && seg.chars().enumerate().all(|(i, c)| {
+                if i == 0 {
+                    c.is_ascii_alphabetic() || c == '_'
+                } else {
+                    c.is_ascii_alphanumeric() || c == '_'
+                }
+            })
+    })
 }
 
 fn has_blank_line_between(prev: &Stmt, next: &Stmt) -> bool {

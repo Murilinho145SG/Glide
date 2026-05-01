@@ -1,4 +1,4 @@
-import "std/color";
+import std::color;
 
 fn main() -> int {
     let text: string = "example".blue();

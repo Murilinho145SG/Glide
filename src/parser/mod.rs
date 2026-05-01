@@ -167,13 +167,25 @@ impl Parser {
     fn parse_import(&mut self) -> Result<StmtKind, ParseError> {
         self.advance(); // 'import'
         let path = match &self.current.token {
-            TokenKind::String(s) => s.clone(),
+            TokenKind::String(s) => {
+                let s = s.clone();
+                self.advance();
+                s
+            }
+            TokenKind::Identifier(_) => {
+                let mut parts = Vec::new();
+                parts.push(self.expect_ident()?);
+                while self.at_op(Operator::DoubleColon) {
+                    self.advance();
+                    parts.push(self.expect_ident()?);
+                }
+                parts.join("/")
+            }
             _ => return Err(self.err(format!(
-                "expected string literal after 'import' but found '{}'",
+                "expected string literal or path after 'import' but found '{}'",
                 self.current.lexeme
             ))),
         };
-        self.advance();
         self.expect_op(Operator::Semicolon)?;
         Ok(StmtKind::Import(path))
     }
@@ -228,15 +240,20 @@ impl Parser {
             if let TokenKind::Error(msg) = &self.current.token {
                 return Err(self.err(format!("lexer error: {}", msg)));
             }
+            let pos = self.current_pos();
+            let mut is_pub = true;
+            if self.at_keyword(Keyword::Pub) {
+                self.advance();
+                is_pub = true;
+            }
             if !self.at_keyword(Keyword::Fn) {
                 return Err(self.err(format!(
                     "expected 'fn' inside impl body but found '{}'",
                     self.current.lexeme
                 )));
             }
-            let pos = self.current_pos();
             let kind = self.parse_fn()?;
-            methods.push(Stmt { kind, pos, is_pub: true, source_file: None });
+            methods.push(Stmt { kind, pos, is_pub, source_file: None });
         }
         self.expect_op(Operator::RBrace)?;
         Ok(StmtKind::Impl { interface, target, methods })
@@ -638,7 +655,7 @@ impl Parser {
                 if self.at_op(Operator::DoubleColon) {
                     self.advance();
                     let method = self.expect_ident()?;
-                    ExprKind::Ident(format!("{}_{}", name, method))
+                    ExprKind::Path { ty: name, member: method }
                 } else if matches!(self.current.token, TokenKind::Operator(Operator::Bang))
                     && matches!(self.peek.token, TokenKind::Operator(Operator::LParen))
                 {

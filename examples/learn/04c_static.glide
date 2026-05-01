@@ -1,9 +1,4 @@
-// Type::method - static / associated calls.
-//
-// Functions inside `impl Type { ... }` that DO NOT take `self`
-// as the first arg are called as `Type::name(args)`.
-
-import "std/io";
+import std::io;
 
 struct Point {
     x: int,
@@ -11,18 +6,13 @@ struct Point {
 }
 
 impl Point {
-    // constructor: no `self` -> called as Point::make
-    // (`new` is a keyword in Glide, so use a different name)
-    fn make(x: int, y: int) -> Point {
+    pub fn make(x: int, y: int) -> Point {
         return Point { x: x, y: y };
     }
-
-    fn origin() -> Point {
+    pub fn origin() -> Point {
         return Point { x: 0, y: 0 };
     }
-
-    // instance method: takes `self` -> called as p.distance_sq()
-    fn distance_sq(self: Point, other: Point) -> int {
+    pub fn distance_sq(self: Point, other: Point) -> int {
         let dx: int = self.x - other.x;
         let dy: int = self.y - other.y;
         return dx * dx + dy * dy;
@@ -36,7 +26,6 @@ fn main() -> int {
     println!("p =", p.x, p.y);
     println!("o =", o.x, o.y);
 
-    // Same method, two ways:
     println!("via UFCS:  ", p.distance_sq(o));
     println!("via static:", Point::distance_sq(p, o));
 

@@ -731,6 +731,12 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 )));
             }
 
+            ExprKind::Path { ty, member } => {
+                self.push(ty);
+                self.push("_");
+                self.push(member);
+            }
+
             ExprKind::AddrOfTemp { value, ty } => {
                 let c_ty = self.type_to_c(ty);
                 self.push("(&((");

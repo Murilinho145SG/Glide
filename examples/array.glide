@@ -1,4 +1,4 @@
-import "std/io";
+import std::io;
 
 fn main() -> int {
     let nums: *int = [10, 20, 30, 40, 50];

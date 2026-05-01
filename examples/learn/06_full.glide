@@ -1,9 +1,6 @@
-// Full program: student grade summary.
-//
-// Uses: structs, arrays, UFCS, macros, std/io, std/color.
+import std::io;
 
-import "std/io";
-import "std/color";
+import std::color;
 
 struct Student {
     name: string,
@@ -11,7 +8,7 @@ struct Student {
 }
 
 impl Student {
-    fn print(self: *Student) {
+    pub fn print(self: *Student) {
         let status: string = "fail".red();
         if self->grade >= 60 {
             status = "pass".green();
@@ -39,12 +36,8 @@ fn highest(grades: *int, n: int) -> int {
 }
 
 fn main() -> int {
-    let students: *Student = [
-        Student { name: "Ana",    grade: 85 },
-        Student { name: "Bruno",  grade: 42 },
-        Student { name: "Carla",  grade: 73 },
-        Student { name: "Daniel", grade: 95 },
-    ];
+    let students: *Student = [Student { name: "Ana", grade: 85 }, Student { name: "Bruno", grade: 42 }, Student { name: "Carla", grade: 73 }, Student { name: "Daniel", grade: 95 }];
+
     let n: int = 4;
 
     println!("class:".bold());

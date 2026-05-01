@@ -2070,6 +2070,21 @@
     }
   },
   {
+    "type": "import_path",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "import_stmt",
     "named": true,
     "fields": {
@@ -2077,6 +2092,10 @@
         "multiple": false,
         "required": true,
         "types": [
+          {
+            "type": "import_path",
+            "named": true
+          },
           {
             "type": "string_literal",
             "named": true

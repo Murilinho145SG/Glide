@@ -43,8 +43,13 @@ module.exports = grammar({
 
     import_stmt: $ => seq(
       'import',
-      field('path', $.string_literal),
+      field('path', choice($.string_literal, $.import_path)),
       ';',
+    ),
+
+    import_path: $ => seq(
+      $.identifier,
+      repeat(seq('::', $.identifier)),
     ),
 
     // ---- declarations ----

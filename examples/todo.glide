@@ -1,5 +1,6 @@
-import "std/io";
-import "std/color";
+import std::io;
+
+import std::color;
 
 struct Task {
     name: string,
@@ -15,8 +16,8 @@ fn print_task(t: *Task) {
 }
 
 fn main() -> int {
-    let a: Task = Task { name: "write tutorial",       done: true };
-    let b: Task = Task { name: "add generics",         done: false };
+    let a: Task = Task { name: "write tutorial", done: true };
+    let b: Task = Task { name: "add generics", done: false };
     let c: Task = Task { name: "build a real project", done: false };
 
     print_task(&a);

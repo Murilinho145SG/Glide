@@ -913,6 +913,11 @@ impl Typer {
                 self.expand_macro(name, args, pos)
             }
 
+            ExprKind::Path { ty, member } => {
+                let mangled = format!("{}_{}", ty, member);
+                self.check_expr_kind(ExprKind::Ident(mangled), pos)
+            }
+
             ExprKind::ArrayLit { elements, .. } => {
                 if elements.is_empty() {
                     self.error("empty array literal `[]` requires a type annotation".into());
@@ -953,6 +958,7 @@ impl Typer {
 
         let fn_name = match &callee.kind {
             ExprKind::Ident(n) => Some(n.clone()),
+            ExprKind::Path { ty, member } => Some(format!("{}_{}", ty, member)),
             _ => None,
         };
 
