@@ -1,1 +1,9 @@
 /target
+/zed-extension/target
+/zed-extension/extension.wasm
+/glide-grammar/node_modules
+/glide-grammar/package-lock.json
+/.claude
+
+.DS_Store
+Thumbs.db

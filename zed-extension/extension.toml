@@ -13,4 +13,4 @@ languages = ["Glide"]
 [grammars.glide]
 repository = "file:///C:/Users/bye45/Desktop/desktop/works/javascomp"
 commit     = "9601d522b6ad247c9ef3dc044e139bff28951a0d"
-path       = "zed-extension/grammars/glide"
+path       = "glide-grammar"
