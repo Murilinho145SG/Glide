@@ -1,0 +1,52 @@
+fn println(s: string) {
+    printf("%s\n", s);
+}
+
+fn print_int(n: int) {
+    printf("%d\n", n);
+}
+
+fn print_float(f: float) {
+    printf("%f\n", f);
+}
+
+fn print_bool(b: bool) {
+    if b {
+        printf("true\n");
+    } else {
+        printf("false\n");
+    }
+}
+
+fn int_ptr_print(arr: *int, n: int) {
+    printf("[");
+    for let i: int = 0; i < n; i++ {
+        if i > 0 {
+            printf(", ");
+        }
+        printf("%d", arr[i]);
+    }
+    printf("]\n");
+}
+
+fn string_ptr_print(arr: *string, n: int) {
+    printf("[");
+    for let i: int = 0; i < n; i++ {
+        if i > 0 {
+            printf(", ");
+        }
+        printf("\"%s\"", arr[i]);
+    }
+    printf("]\n");
+}
+
+fn float_ptr_print(arr: *float, n: int) {
+    printf("[");
+    for let i: int = 0; i < n; i++ {
+        if i > 0 {
+            printf(", ");
+        }
+        printf("%g", arr[i]);
+    }
+    printf("]\n");
+}

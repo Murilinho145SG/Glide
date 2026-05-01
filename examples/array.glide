@@ -1,15 +1,20 @@
+import "std/io";
+
 fn main() -> int {
     let nums: *int = [10, 20, 30, 40, 50];
+    nums.print(5);
+
+    let names: *string = ["alelo", "tectec", "world"];
+    names.print(3);
+
+    let pis: *float = [3.14, 2.71, 1.41];
+    pis.print(3);
+
     let sum: int = 0;
     for let i: int = 0; i < 5; i++ {
         sum += nums[i];
-        printf("nums[%d] = %d\n", i, nums[i]);
     }
-    printf("sum = %d\n", sum);
-
-    let names: *string = ["alelo", "tectec", "world"];
-    printf("first = %s\n", names[0]);
-    printf("third = %s\n", names[2]);
+    print_int(sum);
 
     return 0;
 }
