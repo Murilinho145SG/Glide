@@ -946,6 +946,12 @@ impl Typer {
             arg_tys.push(a_ty);
         }
 
+        if matches!(&obj_ty, Type::Chan(_))
+            && matches!(method.as_str(), "send" | "recv" | "close")
+        {
+            return self.check_chan_builtin(&method, new_args, &arg_tys, pos);
+        }
+
         let full_prefix = obj_ty.mangle();
         let stripped_prefix = method_type_prefix(&obj_ty);
 

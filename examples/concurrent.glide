@@ -1,20 +1,20 @@
 fn producer(c: chan<int>, n: int) {
     for let i: int = 0; i < n; i++ {
-        send(c, i * 10);
+        c.send(i * 10);
     }
-    close(c);
+    c.close();
 }
 
 fn consumer(c: chan<int>, done: chan<int>) {
     let total: int = 0;
     let count: int = 0;
     while count < 5 {
-        let v: int = recv(c);
+        let v: int = c.recv();
         printf("consumer got %d\n", v);
         total += v;
         count++;
     }
-    send(done, total);
+    done.send(total);
 }
 
 fn main() -> int {
@@ -24,7 +24,7 @@ fn main() -> int {
     spawn producer(c, 5);
     spawn consumer(c, done);
 
-    let total: int = recv(done);
+    let total: int = done.recv();
     printf("total = %d\n", total);
     return 0;
 }
