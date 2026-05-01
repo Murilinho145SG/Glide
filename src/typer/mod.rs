@@ -65,6 +65,7 @@ pub struct DeclInfo {
     pub ty: Option<Type>,
     pub detail: String,
     pub module: Option<String>,
+    pub file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -106,6 +107,7 @@ pub struct Typer {
     errors: Vec<TypeError>,
     index: SymbolIndex,
     current_module: Option<String>,
+    current_file: Option<std::path::PathBuf>,
 }
 
 impl Default for Typer {
@@ -125,17 +127,26 @@ impl Typer {
             errors: Vec::new(),
             index: SymbolIndex::default(),
             current_module: None,
+            current_file: None,
         };
         t.register_builtins();
         t.register_stdlib();
         t
     }
 
-    pub fn pre_register_module(&mut self, program: &Program, module: Option<String>) {
-        let saved = self.current_module.take();
+    pub fn pre_register_module(
+        &mut self,
+        program: &Program,
+        module: Option<String>,
+        file: Option<std::path::PathBuf>,
+    ) {
+        let saved_module = self.current_module.take();
+        let saved_file = self.current_file.take();
         self.current_module = module;
+        self.current_file = file;
         self.pre_register(program);
-        self.current_module = saved;
+        self.current_module = saved_module;
+        self.current_file = saved_file;
     }
 
     fn register_builtins(&mut self) {
@@ -176,6 +187,7 @@ impl Typer {
                 ty: ret.clone(),
                 detail: format_fn_detail(name, &params, ret.as_ref()),
                 module: None,
+                file: None,
             });
         }
     }
@@ -192,6 +204,7 @@ impl Typer {
 
     fn pre_register_stmt(&mut self, stmt: &Stmt) {
         let module = self.current_module.clone();
+        let file = self.current_file.clone();
         match &stmt.kind {
             StmtKind::Struct { name, fields } => {
                 self.structs.insert(
@@ -206,6 +219,7 @@ impl Typer {
                     ty: None,
                     detail: format_struct_detail(name, fields),
                     module: module.clone(),
+                    file: file.clone(),
                 });
                 for f in fields {
                     self.index.decls.push(DeclInfo {
@@ -215,6 +229,7 @@ impl Typer {
                         ty: Some(f.ty.clone()),
                         detail: format!("{}.{}: {}", name, f.name, type_name(&f.ty)),
                         module: module.clone(),
+                        file: file.clone(),
                     });
                 }
             }
@@ -232,6 +247,7 @@ impl Typer {
                     ty: ret_type.clone(),
                     detail: format_fn_detail(name, params, ret_type.as_ref()),
                     module: module.clone(),
+                    file: file.clone(),
                 });
             }
             StmtKind::Impl { target, methods, .. } => {
@@ -252,6 +268,7 @@ impl Typer {
                             ty: ret_type.clone(),
                             detail: format_fn_detail(&mangled, params, ret_type.as_ref()),
                             module: module.clone(),
+                            file: file.clone(),
                         });
                     }
                 }
@@ -341,6 +358,7 @@ impl Typer {
                 ty: Some(p.ty.clone()),
                 detail: format!("{}: {}", p.name, type_name(&p.ty)),
                 module: None,
+                file: None,
             });
         }
         self.current_ret = ret_type.clone();
@@ -562,6 +580,7 @@ impl Typer {
             ty: Some(ty.clone()),
             detail: format!("let {}: {}", name, type_name(ty)),
             module: None,
+            file: None,
         });
     }
 
@@ -573,6 +592,7 @@ impl Typer {
             ty: Some(ty.clone()),
             detail: format!("const {}: {}", name, type_name(ty)),
             module: None,
+            file: None,
         });
     }
 

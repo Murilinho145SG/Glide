@@ -157,23 +157,42 @@ impl LanguageServer for Backend {
         let line = (pos.line as usize) + 1;
         let col = (pos.character as usize) + 1;
 
-        let r = match doc.index.ref_at(line, col) {
-            Some(r) => r,
-            None => return Ok(None),
-        };
-        let Some(decl_pos) = r.decl_pos else { return Ok(None) };
+        if let Some(r) = doc.index.ref_at(line, col) {
+            if let Some(decl_pos) = r.decl_pos {
+                let target_uri = doc.index.decls.iter()
+                    .find(|d| d.pos == decl_pos && d.file.is_some())
+                    .and_then(|d| d.file.as_ref())
+                    .and_then(|p| Url::from_file_path(p).ok())
+                    .unwrap_or_else(|| uri.clone());
+                return Ok(Some(make_location_response(target_uri, decl_pos, &r.name)));
+            }
+        }
 
-        let target_line = decl_pos.line.saturating_sub(1) as u32;
-        let target_col = decl_pos.column.saturating_sub(1) as u32;
-        let name_len = r.name.chars().count() as u32;
+        let line_text = doc.text.lines().nth(line - 1).unwrap_or("");
+        if let Some((method_name, ctx)) = parse_method_at_col(line_text, col) {
+            let ty = match ctx {
+                MemberContext::Ident { col: obj_col } => {
+                    doc.index.ref_at(line, obj_col).map(|r| r.ty.clone())
+                }
+                MemberContext::Literal(t) => Some(t),
+            };
+            if let Some(ty) = ty {
+                let prefixes = method_lookup_prefixes(&ty);
+                for prefix in &prefixes {
+                    let target = format!("{}{}", prefix, method_name);
+                    for d in &doc.index.decls {
+                        if d.name == target && d.pos != crate::ast::Pos::default() {
+                            let target_uri = d.file.as_ref()
+                                .and_then(|p| Url::from_file_path(p).ok())
+                                .unwrap_or_else(|| uri.clone());
+                            return Ok(Some(make_location_response(target_uri, d.pos, &method_name)));
+                        }
+                    }
+                }
+            }
+        }
 
-        Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri,
-            range: Range {
-                start: Position { line: target_line, character: target_col },
-                end: Position { line: target_line, character: target_col + name_len },
-            },
-        })))
+        Ok(None)
     }
 
     async fn formatting(
@@ -251,26 +270,30 @@ struct Analysis {
 fn analyze(source: &str, base_dir: Option<&Path>) -> Analysis {
     let mut parser = GlideParser::new(source);
     let parsed = parser.parse_program();
+
+    let imported_modules = collect_imports_textually(source);
+
     let program = match parsed {
         Err(e) => {
+            let mut typer = Typer::new();
+            if let Some(dir) = base_dir {
+                let mut loaded = HashSet::new();
+                for (path, module_name) in discover_std_files(dir) {
+                    preload_module(&path, Some(module_name), &mut loaded, &mut typer);
+                }
+            }
+            let (_, index) = typer.check(Vec::new());
             return Analysis {
                 diagnostics: vec![make_diagnostic(e.line, e.column, &e.message)],
                 program: None,
-                index: SymbolIndex::default(),
-                imported_modules: HashSet::new(),
+                index,
+                imported_modules,
             };
         }
         Ok(p) => p,
     };
 
     let mut typer = Typer::new();
-    let mut imported_modules: HashSet<String> = HashSet::new();
-
-    for stmt in &program {
-        if let StmtKind::Import(p) = &stmt.kind {
-            imported_modules.insert(p.clone());
-        }
-    }
 
     if let Some(dir) = base_dir {
         let mut loaded = HashSet::new();
@@ -303,6 +326,22 @@ fn analyze(source: &str, base_dir: Option<&Path>) -> Analysis {
     Analysis { diagnostics, program, index, imported_modules }
 }
 
+fn collect_imports_textually(source: &str) -> HashSet<String> {
+    let mut set = HashSet::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("import") {
+            let rest = rest.trim_start();
+            if let Some(rest) = rest.strip_prefix('"') {
+                if let Some(end) = rest.find('"') {
+                    set.insert(rest[..end].to_string());
+                }
+            }
+        }
+    }
+    set
+}
+
 fn preload_module(
     path: &Path,
     module: Option<String>,
@@ -325,7 +364,7 @@ fn preload_module(
             }
         }
     }
-    typer.pre_register_module(&program, module);
+    typer.pre_register_module(&program, module, Some(path.to_path_buf()));
 }
 
 fn discover_std_files(start_dir: &Path) -> Vec<(PathBuf, String)> {
@@ -407,6 +446,73 @@ fn decl_at(index: &SymbolIndex, line: usize, col: usize) -> Option<&DeclInfo> {
 enum MemberContext {
     Ident { col: usize },
     Literal(Type),
+}
+
+fn make_location_response(
+    uri: Url,
+    decl_pos: crate::ast::Pos,
+    name: &str,
+) -> GotoDefinitionResponse {
+    let target_line = decl_pos.line.saturating_sub(1) as u32;
+    let target_col = decl_pos.column.saturating_sub(1) as u32;
+    let name_len = name.chars().count() as u32;
+    GotoDefinitionResponse::Scalar(Location {
+        uri,
+        range: Range {
+            start: Position { line: target_line, character: target_col },
+            end: Position { line: target_line, character: target_col + name_len },
+        },
+    })
+}
+
+fn method_lookup_prefixes(ty: &Type) -> Vec<String> {
+    let full = ty.mangle();
+    let stripped = method_type_prefix_for_completion(ty);
+    let mut v = Vec::new();
+    v.push(format!("__glide_{}_", full));
+    v.push(format!("{}_", full));
+    if let Some(p) = &stripped {
+        if p != &full {
+            v.push(format!("__glide_{}_", p));
+            v.push(format!("{}_", p));
+        }
+    }
+    v
+}
+
+fn parse_method_at_col(line_text: &str, col_1based: usize) -> Option<(String, MemberContext)> {
+    let chars: Vec<char> = line_text.chars().collect();
+    let cursor = col_1based.saturating_sub(1).min(chars.len());
+
+    let mut start = cursor;
+    while start > 0 {
+        let c = chars[start - 1];
+        if c.is_alphanumeric() || c == '_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+    let mut end = cursor;
+    while end < chars.len() {
+        let c = chars[end];
+        if c.is_alphanumeric() || c == '_' {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    if start == end {
+        return None;
+    }
+    if start == 0 || chars[start - 1] != '.' {
+        return None;
+    }
+
+    let word: String = chars[start..end].iter().collect();
+    let prefix_str: String = chars[..start - 1].iter().collect();
+    let ctx = parse_member_access(&format!("{}.", prefix_str))?;
+    Some((word, ctx))
 }
 
 struct ImportAnchor {

@@ -59,6 +59,12 @@
 (member_expr field: (identifier) @property)
 (arrow_member_expr field: (identifier) @property)
 
+; Method calls (override the @property above for call_expr targets)
+(call_expr
+  callee: (member_expr field: (identifier) @function.method))
+(call_expr
+  callee: (arrow_member_expr field: (identifier) @function.method))
+
 ; Params and locals
 (param name: (identifier) @variable.parameter)
 (let_stmt name: (identifier) @variable)
