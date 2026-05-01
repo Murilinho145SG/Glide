@@ -1,0 +1,27 @@
+{
+  "grammars": [
+    {
+      "name": "glide",
+      "camelcase": "Glide",
+      "scope": "source.glide",
+      "path": ".",
+      "file-types": ["glide"]
+    }
+  ],
+  "metadata": {
+    "version": "0.0.1",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for Glide",
+    "authors": [
+      { "name": "Murilinho145SG" }
+    ]
+  },
+  "bindings": {
+    "c": false,
+    "go": false,
+    "node": false,
+    "python": false,
+    "rust": false,
+    "swift": false
+  }
+}

@@ -1,0 +1,16 @@
+id            = "glide"
+name          = "Glide"
+description   = "Glide language support"
+version       = "0.0.2"
+schema_version = 1
+authors       = ["Murilinho145SG"]
+repository    = "https://github.com/Murilinho145SG/Glide"
+
+[language_servers.glide-lsp]
+name      = "glide-lsp"
+languages = ["Glide"]
+
+[grammars.glide]
+repository = "file:///C:/Users/bye45/Desktop/desktop/works/javascomp"
+commit     = "<paste git rev-parse HEAD here>"
+path       = "zed-extension/grammars/glide"

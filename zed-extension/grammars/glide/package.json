@@ -1,0 +1,13 @@
+{
+  "name": "tree-sitter-glide",
+  "version": "0.0.1",
+  "description": "Tree-sitter grammar for Glide",
+  "license": "MIT",
+  "main": "bindings/node",
+  "scripts": {
+    "build": "tree-sitter generate"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.22"
+  }
+}
