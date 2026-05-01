@@ -5,10 +5,16 @@ pub enum TokenKind {
     Identifier(String),
     Keyword(Keyword),
     Operator(Operator),
-    Number(f64),
+
+    Int(i64),
+    Float(f64),
     String(String),
+    Char(char),
+
     EndOfFile,
+
     Unknown(char),
+    Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

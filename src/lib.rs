@@ -1,12 +1,10 @@
 pub mod types;
 pub mod lexer;
 pub mod parser;
+pub mod typer;
 pub mod ast;
 pub mod codegen;
 pub mod diagnostics;
+pub mod fmt;
+pub mod lsp;
 
-/// Entry point for the compiler logic (API).
-/// Here we connect the lexer, parser, and code generator.
-pub fn compile(_source: &str) {
-    println!("Compiling... (Not yet implemented)");
-}

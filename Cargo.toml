@@ -1,6 +1,8 @@
 [package]
-name = "javascomp"
+name = "glide"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+tokio     = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
+tower-lsp = "0.20"
