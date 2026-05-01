@@ -44,6 +44,7 @@
 ; Function declaration & calls
 (fn_decl   name: (identifier) @function)
 (call_expr callee: (identifier_expr (identifier) @function.call))
+(macro_call name: (identifier) @function.macro)
 
 ; Struct / interface / impl
 (struct_decl name: (identifier) @type)

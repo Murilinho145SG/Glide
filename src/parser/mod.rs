@@ -630,7 +630,14 @@ impl Parser {
             }
             TokenKind::Identifier(name) => {
                 self.advance();
-                if !self.no_struct_lit && self.at_op(Operator::LBrace) {
+                if matches!(self.current.token, TokenKind::Operator(Operator::Bang))
+                    && matches!(self.peek.token, TokenKind::Operator(Operator::LParen))
+                {
+                    self.advance(); // '!'
+                    self.advance(); // '('
+                    let args = self.parse_call_args()?;
+                    ExprKind::MacroCall { name, args }
+                } else if !self.no_struct_lit && self.at_op(Operator::LBrace) {
                     self.advance(); // '{'
                     let fields = self.parse_struct_lit_fields()?;
                     ExprKind::StructLit { type_name: name, fields }

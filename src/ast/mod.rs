@@ -98,6 +98,11 @@ pub enum ExprKind {
         value: Box<Expr>,
         ty: Type,
     },
+
+    MacroCall {
+        name: String,
+        args: Vec<Expr>,
+    },
 }
 
 impl Expr {

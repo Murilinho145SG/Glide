@@ -475,6 +475,16 @@ impl Formatter {
                 self.write("&");
                 self.emit_expr(value, PREC_UNARY);
             }
+
+            ExprKind::MacroCall { name, args } => {
+                self.write(name);
+                self.write("!(");
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { self.write(", "); }
+                    self.emit_expr(a, PREC_NONE);
+                }
+                self.write(")");
+            }
         }
     }
 

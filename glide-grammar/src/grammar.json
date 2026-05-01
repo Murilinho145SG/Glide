@@ -2038,6 +2038,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "macro_call"
+        },
+        {
+          "type": "SYMBOL",
           "name": "struct_literal"
         },
         {
@@ -2077,6 +2081,80 @@
           "name": "null_literal"
         }
       ]
+    },
+    "macro_call": {
+      "type": "PREC",
+      "value": 20,
+      "content": {
+        "type": "SEQ",
+        "members": [
+          {
+            "type": "FIELD",
+            "name": "name",
+            "content": {
+              "type": "SYMBOL",
+              "name": "identifier"
+            }
+          },
+          {
+            "type": "STRING",
+            "value": "!"
+          },
+          {
+            "type": "STRING",
+            "value": "("
+          },
+          {
+            "type": "CHOICE",
+            "members": [
+              {
+                "type": "SEQ",
+                "members": [
+                  {
+                    "type": "SYMBOL",
+                    "name": "_expression"
+                  },
+                  {
+                    "type": "REPEAT",
+                    "content": {
+                      "type": "SEQ",
+                      "members": [
+                        {
+                          "type": "STRING",
+                          "value": ","
+                        },
+                        {
+                          "type": "SYMBOL",
+                          "name": "_expression"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "type": "CHOICE",
+                    "members": [
+                      {
+                        "type": "STRING",
+                        "value": ","
+                      },
+                      {
+                        "type": "BLANK"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "BLANK"
+              }
+            ]
+          },
+          {
+            "type": "STRING",
+            "value": ")"
+          }
+        ]
+      }
     },
     "array_literal": {
       "type": "SEQ",

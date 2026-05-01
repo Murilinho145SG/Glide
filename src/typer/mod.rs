@@ -832,6 +832,10 @@ impl Typer {
                 (ExprKind::AddrOfTemp { value, ty }, ptr_ty)
             }
 
+            ExprKind::MacroCall { name, args } => {
+                self.expand_macro(name, args, pos)
+            }
+
             ExprKind::ArrayLit { elements, .. } => {
                 if elements.is_empty() {
                     self.error("empty array literal `[]` requires a type annotation".into());
@@ -928,6 +932,41 @@ impl Typer {
             Expr::new(ExprKind::Call(Box::new(callee_new), args_new), pos),
             result_ty,
         )
+    }
+
+    fn expand_macro(&mut self, name: String, args: Vec<Expr>, pos: Pos) -> (ExprKind, Type) {
+        let with_newline = match name.as_str() {
+            "println" => true,
+            "print" => false,
+            _ => {
+                self.error(format!("unknown macro `{}!`", name));
+                return (ExprKind::MacroCall { name, args }, error_ty());
+            }
+        };
+
+        let mut fmt = String::new();
+        let mut printf_args: Vec<Expr> = Vec::new();
+        for (i, arg) in args.into_iter().enumerate() {
+            if i > 0 {
+                fmt.push(' ');
+            }
+            let arg_pos = arg.pos;
+            let (a_new, a_ty) = self.check_expr(arg);
+            let (spec, transformed) = format_spec_for(&a_ty, a_new, arg_pos);
+            fmt.push_str(spec);
+            printf_args.push(transformed);
+        }
+        if with_newline {
+            fmt.push('\n');
+        }
+
+        let mut call_args = Vec::with_capacity(printf_args.len() + 1);
+        call_args.push(Expr::new(ExprKind::String(fmt), pos));
+        call_args.extend(printf_args);
+
+        let callee = Expr::new(ExprKind::Ident("printf".into()), pos);
+        let call = ExprKind::Call(Box::new(callee), call_args);
+        (call, void_ty())
     }
 
     fn check_method_call(&mut self, callee: Expr, args: Vec<Expr>, pos: Pos) -> (Expr, Type) {
@@ -1412,6 +1451,26 @@ fn binop_str(op: &BinaryOp) -> &'static str {
 
 fn synth_param(name: &str, ty: Type) -> Param {
     Param { name: name.into(), ty, pos: Pos::default() }
+}
+
+fn format_spec_for(ty: &Type, arg: Expr, pos: Pos) -> (&'static str, Expr) {
+    match ty {
+        Type::Named(n) => match n.as_str() {
+            "int"    => ("%d", arg),
+            "float"  => ("%g", arg),
+            "char"   => ("%c", arg),
+            "string" => ("%s", arg),
+            "bool"   => {
+                let callee = Expr::new(
+                    ExprKind::Ident("__glide_bool_to_string".into()),
+                    pos,
+                );
+                ("%s", Expr::new(ExprKind::Call(Box::new(callee), vec![arg]), pos))
+            }
+            _ => ("%p", arg),
+        },
+        Type::Pointer(_) | Type::Chan(_) => ("%p", arg),
+    }
 }
 
 fn method_type_prefix(ty: &Type) -> Option<String> {

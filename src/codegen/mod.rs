@@ -719,6 +719,13 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 self.push(&format!("}}; {}; }}))", var));
             }
 
+            ExprKind::MacroCall { name, .. } => {
+                return Err(self.err(format!(
+                    "macro `{}!` was not expanded by the typer",
+                    name
+                )));
+            }
+
             ExprKind::AddrOfTemp { value, ty } => {
                 let c_ty = self.type_to_c(ty);
                 self.push("(&((");

@@ -1,0 +1,13 @@
+fn main() -> int {
+    let alelo: int = 2 + 4;
+    println!(alelo, 123, "pinto");
+    println!("hello", "world", 42, 3.14, true);
+
+    print!("count down: ");
+    for let i: int = 3; i > 0; i-- {
+        print!(i, " ");
+    }
+    println!("go!");
+
+    return 0;
+}

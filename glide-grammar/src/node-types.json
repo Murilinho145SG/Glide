@@ -52,6 +52,10 @@
           "named": true
         },
         {
+          "type": "macro_call",
+          "named": true
+        },
+        {
           "type": "member_expr",
           "named": true
         },
@@ -144,6 +148,10 @@
         },
         {
           "type": "index_expr",
+          "named": true
+        },
+        {
+          "type": "macro_call",
           "named": true
         },
         {
@@ -240,6 +248,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -325,6 +337,10 @@
           },
           {
             "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "macro_call",
             "named": true
           },
           {
@@ -468,6 +484,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -557,6 +577,10 @@
           },
           {
             "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "macro_call",
             "named": true
           },
           {
@@ -721,6 +745,10 @@
           },
           {
             "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "macro_call",
             "named": true
           },
           {
@@ -891,6 +919,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -980,6 +1012,10 @@
         },
         {
           "type": "index_expr",
+          "named": true
+        },
+        {
+          "type": "macro_call",
           "named": true
         },
         {
@@ -1137,6 +1173,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -1235,6 +1275,10 @@
         },
         {
           "type": "index_expr",
+          "named": true
+        },
+        {
+          "type": "macro_call",
           "named": true
         },
         {
@@ -1397,6 +1441,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -1494,6 +1542,10 @@
           },
           {
             "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "macro_call",
             "named": true
           },
           {
@@ -1605,6 +1657,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -1693,6 +1749,10 @@
         },
         {
           "type": "index_expr",
+          "named": true
+        },
+        {
+          "type": "macro_call",
           "named": true
         },
         {
@@ -1821,6 +1881,10 @@
           },
           {
             "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "macro_call",
             "named": true
           },
           {
@@ -1990,6 +2054,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -2065,6 +2133,10 @@
           },
           {
             "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "macro_call",
             "named": true
           },
           {
@@ -2258,6 +2330,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -2299,6 +2375,116 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "macro_call",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "array_literal",
+          "named": true
+        },
+        {
+          "type": "arrow_member_expr",
+          "named": true
+        },
+        {
+          "type": "assignment",
+          "named": true
+        },
+        {
+          "type": "binary_expr",
+          "named": true
+        },
+        {
+          "type": "bool_literal",
+          "named": true
+        },
+        {
+          "type": "call_expr",
+          "named": true
+        },
+        {
+          "type": "cast_expr",
+          "named": true
+        },
+        {
+          "type": "char_literal",
+          "named": true
+        },
+        {
+          "type": "float_literal",
+          "named": true
+        },
+        {
+          "type": "identifier_expr",
+          "named": true
+        },
+        {
+          "type": "index_expr",
+          "named": true
+        },
+        {
+          "type": "macro_call",
+          "named": true
+        },
+        {
+          "type": "member_expr",
+          "named": true
+        },
+        {
+          "type": "new_expr",
+          "named": true
+        },
+        {
+          "type": "null_literal",
+          "named": true
+        },
+        {
+          "type": "number_literal",
+          "named": true
+        },
+        {
+          "type": "parenthesized",
+          "named": true
+        },
+        {
+          "type": "postfix_expr",
+          "named": true
+        },
+        {
+          "type": "sizeof_expr",
+          "named": true
+        },
+        {
+          "type": "string_literal",
+          "named": true
+        },
+        {
+          "type": "struct_literal",
+          "named": true
+        },
+        {
+          "type": "unary_expr",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -2349,6 +2535,10 @@
           },
           {
             "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "macro_call",
             "named": true
           },
           {
@@ -2534,6 +2724,10 @@
           "named": true
         },
         {
+          "type": "macro_call",
+          "named": true
+        },
+        {
           "type": "member_expr",
           "named": true
         },
@@ -2655,6 +2849,10 @@
           "named": true
         },
         {
+          "type": "macro_call",
+          "named": true
+        },
+        {
           "type": "member_expr",
           "named": true
         },
@@ -2743,6 +2941,10 @@
         },
         {
           "type": "index_expr",
+          "named": true
+        },
+        {
+          "type": "macro_call",
           "named": true
         },
         {
@@ -2901,6 +3103,10 @@
         },
         {
           "type": "index_expr",
+          "named": true
+        },
+        {
+          "type": "macro_call",
           "named": true
         },
         {
@@ -3069,6 +3275,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -3213,6 +3423,10 @@
             "named": true
           },
           {
+            "type": "macro_call",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -3316,6 +3530,10 @@
           },
           {
             "type": "index_expr",
+            "named": true
+          },
+          {
+            "type": "macro_call",
             "named": true
           },
           {
