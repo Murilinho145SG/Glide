@@ -1,0 +1,9 @@
+import "std/color";
+
+fn main() -> int {
+    printf("%s\n", "alelo".blue());
+    printf("%s\n", "world".red());
+    printf("%s\n", "ok".green().bold());
+    printf("%s\n", "hint".dim().underline());
+    return 0;
+}

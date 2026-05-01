@@ -1,0 +1,53 @@
+interface Color {
+    fn black(self: string) -> string;
+    fn red(self: string) -> string;
+    fn green(self: string) -> string;
+    fn yellow(self: string) -> string;
+    fn blue(self: string) -> string;
+    fn magenta(self: string) -> string;
+    fn cyan(self: string) -> string;
+    fn white(self: string) -> string;
+    fn bold(self: string) -> string;
+    fn dim(self: string) -> string;
+    fn underline(self: string) -> string;
+}
+
+fn wrap_ansi(code: string, s: string) -> string {
+    return code.concat(s).concat("\x1b[0m");
+}
+
+impl Color for string {
+    fn black(self: string) -> string {
+        return wrap_ansi("\x1b[30m", self);
+    }
+    fn red(self: string) -> string {
+        return wrap_ansi("\x1b[31m", self);
+    }
+    fn green(self: string) -> string {
+        return wrap_ansi("\x1b[32m", self);
+    }
+    fn yellow(self: string) -> string {
+        return wrap_ansi("\x1b[33m", self);
+    }
+    fn blue(self: string) -> string {
+        return wrap_ansi("\x1b[34m", self);
+    }
+    fn magenta(self: string) -> string {
+        return wrap_ansi("\x1b[35m", self);
+    }
+    fn cyan(self: string) -> string {
+        return wrap_ansi("\x1b[36m", self);
+    }
+    fn white(self: string) -> string {
+        return wrap_ansi("\x1b[37m", self);
+    }
+    fn bold(self: string) -> string {
+        return wrap_ansi("\x1b[1m", self);
+    }
+    fn dim(self: string) -> string {
+        return wrap_ansi("\x1b[2m", self);
+    }
+    fn underline(self: string) -> string {
+        return wrap_ansi("\x1b[4m", self);
+    }
+}
