@@ -263,10 +263,10 @@ impl Typer {
                         });
                         self.index.decls.push(DeclInfo {
                             pos: m.pos,
-                            name: name.clone(),
+                            name: mangled.clone(),
                             kind: DeclKind::Fn,
                             ty: ret_type.clone(),
-                            detail: format_fn_detail(&mangled, params, ret_type.as_ref()),
+                            detail: format_fn_detail(name, params, ret_type.as_ref()),
                             module: module.clone(),
                             file: file.clone(),
                         });
