@@ -15,6 +15,10 @@
       "members": [
         {
           "type": "SYMBOL",
+          "name": "import_stmt"
+        },
+        {
+          "type": "SYMBOL",
           "name": "fn_decl"
         },
         {
@@ -23,11 +27,40 @@
         },
         {
           "type": "SYMBOL",
+          "name": "interface_decl"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "impl_decl"
+        },
+        {
+          "type": "SYMBOL",
           "name": "let_stmt"
         },
         {
           "type": "SYMBOL",
           "name": "const_stmt"
+        }
+      ]
+    },
+    "import_stmt": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "import"
+        },
+        {
+          "type": "FIELD",
+          "name": "path",
+          "content": {
+            "type": "SYMBOL",
+            "name": "string_literal"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": ";"
         }
       ]
     },
@@ -264,6 +297,149 @@
             "type": "SYMBOL",
             "name": "_type"
           }
+        }
+      ]
+    },
+    "interface_decl": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "interface"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "{"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "interface_method_sig"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "}"
+        }
+      ]
+    },
+    "interface_method_sig": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "fn"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "params",
+          "content": {
+            "type": "SYMBOL",
+            "name": "param_list"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "->"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "return_type",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_type"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ";"
+        }
+      ]
+    },
+    "impl_decl": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "impl"
+        },
+        {
+          "type": "FIELD",
+          "name": "interface",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "for"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "target",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_type"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "{"
+        },
+        {
+          "type": "REPEAT",
+          "content": {
+            "type": "SYMBOL",
+            "name": "fn_decl"
+          }
+        },
+        {
+          "type": "STRING",
+          "value": "}"
         }
       ]
     },

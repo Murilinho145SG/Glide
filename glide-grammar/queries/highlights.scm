@@ -4,6 +4,9 @@
   "let"
   "const"
   "struct"
+  "interface"
+  "impl"
+  "import"
   "if"
   "else"
   "while"
@@ -42,8 +45,11 @@
 (fn_decl   name: (identifier) @function)
 (call_expr callee: (identifier_expr (identifier) @function.call))
 
-; Struct
+; Struct / interface / impl
 (struct_decl name: (identifier) @type)
+(interface_decl name: (identifier) @type)
+(interface_method_sig name: (identifier) @function)
+(impl_decl interface: (identifier) @type)
 (struct_field name: (identifier) @property)
 (struct_lit_field name: (identifier) @property)
 (struct_literal type: (identifier) @type)

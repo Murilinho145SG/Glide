@@ -30,10 +30,19 @@ module.exports = grammar({
     source_file: $ => repeat($._top_item),
 
     _top_item: $ => choice(
+      $.import_stmt,
       $.fn_decl,
       $.struct_decl,
+      $.interface_decl,
+      $.impl_decl,
       $.let_stmt,
       $.const_stmt,
+    ),
+
+    import_stmt: $ => seq(
+      'import',
+      field('path', $.string_literal),
+      ';',
     ),
 
     // ---- declarations ----
@@ -78,6 +87,31 @@ module.exports = grammar({
       field('name', $.identifier),
       ':',
       field('type', $._type),
+    ),
+
+    interface_decl: $ => seq(
+      'interface',
+      field('name', $.identifier),
+      '{',
+      repeat($.interface_method_sig),
+      '}',
+    ),
+
+    interface_method_sig: $ => seq(
+      'fn',
+      field('name', $.identifier),
+      field('params', $.param_list),
+      optional(seq('->', field('return_type', $._type))),
+      ';',
+    ),
+
+    impl_decl: $ => seq(
+      'impl',
+      field('interface', $.identifier),
+      optional(seq('for', field('target', $._type))),
+      '{',
+      repeat($.fn_decl),
+      '}',
     ),
 
     // ---- statements ----

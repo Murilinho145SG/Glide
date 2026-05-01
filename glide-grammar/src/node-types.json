@@ -1723,6 +1723,66 @@
     }
   },
   {
+    "type": "impl_decl",
+    "named": true,
+    "fields": {
+      "interface": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "target": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "named_type",
+            "named": true
+          },
+          {
+            "type": "pointer_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "fn_decl",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "import_stmt",
+    "named": true,
+    "fields": {
+      "path": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "string_literal",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "index_expr",
     "named": true,
     "fields": {
@@ -1878,6 +1938,76 @@
           },
           {
             "type": "struct_literal",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "interface_decl",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "interface_method_sig",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "interface_method_sig",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "params": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "param_list",
+            "named": true
+          }
+        ]
+      },
+      "return_type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "named_type",
+            "named": true
+          },
+          {
+            "type": "pointer_type",
             "named": true
           }
         ]
@@ -2513,6 +2643,18 @@
         },
         {
           "type": "fn_decl",
+          "named": true
+        },
+        {
+          "type": "impl_decl",
+          "named": true
+        },
+        {
+          "type": "import_stmt",
+          "named": true
+        },
+        {
+          "type": "interface_decl",
           "named": true
         },
         {
@@ -3228,6 +3370,18 @@
   },
   {
     "type": "if",
+    "named": false
+  },
+  {
+    "type": "impl",
+    "named": false
+  },
+  {
+    "type": "import",
+    "named": false
+  },
+  {
+    "type": "interface",
     "named": false
   },
   {
