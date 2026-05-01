@@ -416,6 +416,24 @@ impl Lexer {
     }
 
     fn read_escape(&mut self) -> Result<char, String> {
+        if self.ch == 'x' {
+            self.read_char();
+            let h1 = self.ch;
+            if !h1.is_ascii_hexdigit() {
+                return Err(format!("invalid hex escape: '\\x{}'", h1));
+            }
+            self.read_char();
+            let h2 = self.ch;
+            if !h2.is_ascii_hexdigit() {
+                return Err(format!("invalid hex escape: '\\x{}{}'", h1, h2));
+            }
+            self.read_char();
+            let hex: String = [h1, h2].iter().collect();
+            return match u32::from_str_radix(&hex, 16) {
+                Ok(v) => Ok(char::from_u32(v).unwrap_or('?')),
+                Err(_) => Err(format!("invalid hex escape: '\\x{}'", hex)),
+            };
+        }
         let c = match self.ch {
             'n' => '\n',
             't' => '\t',

@@ -24,6 +24,10 @@ pub enum Keyword {
     As,
     Sizeof,
     New,
+
+    Interface,
+    Impl,
+    Import,
 }
 
 impl Keyword {
@@ -49,6 +53,9 @@ impl Keyword {
             Keyword::As       => "as",
             Keyword::Sizeof   => "sizeof",
             Keyword::New      => "new",
+            Keyword::Interface => "interface",
+            Keyword::Impl      => "impl",
+            Keyword::Import    => "import",
         }
     }
 
@@ -74,6 +81,9 @@ impl Keyword {
             "as"       => Some(Keyword::As),
             "sizeof"   => Some(Keyword::Sizeof),
             "new"      => Some(Keyword::New),
+            "interface" => Some(Keyword::Interface),
+            "impl"      => Some(Keyword::Impl),
+            "import"    => Some(Keyword::Import),
             _ => None,
         }
     }
