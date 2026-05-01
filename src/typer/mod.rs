@@ -66,6 +66,7 @@ pub struct DeclInfo {
     pub detail: String,
     pub module: Option<String>,
     pub file: Option<std::path::PathBuf>,
+    pub is_method: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -188,6 +189,7 @@ impl Typer {
                 detail: format_fn_detail(name, &params, ret.as_ref()),
                 module: None,
                 file: None,
+                is_method: true,
             });
         }
     }
@@ -220,6 +222,7 @@ impl Typer {
                     detail: format_struct_detail(name, fields),
                     module: module.clone(),
                     file: file.clone(),
+                    is_method: false,
                 });
                 for f in fields {
                     self.index.decls.push(DeclInfo {
@@ -230,6 +233,7 @@ impl Typer {
                         detail: format!("{}.{}: {}", name, f.name, type_name(&f.ty)),
                         module: module.clone(),
                         file: file.clone(),
+                        is_method: false,
                     });
                 }
             }
@@ -248,6 +252,7 @@ impl Typer {
                     detail: format_fn_detail(name, params, ret_type.as_ref()),
                     module: module.clone(),
                     file: file.clone(),
+                    is_method: false,
                 });
             }
             StmtKind::Impl { target, methods, .. } => {
@@ -269,6 +274,7 @@ impl Typer {
                             detail: format_fn_detail(name, params, ret_type.as_ref()),
                             module: module.clone(),
                             file: file.clone(),
+                            is_method: true,
                         });
                     }
                 }
@@ -359,6 +365,7 @@ impl Typer {
                 detail: format!("{}: {}", p.name, type_name(&p.ty)),
                 module: None,
                 file: None,
+                is_method: false,
             });
         }
         self.current_ret = ret_type.clone();
@@ -581,6 +588,7 @@ impl Typer {
             detail: format!("let {}: {}", name, type_name(ty)),
             module: None,
             file: None,
+            is_method: false,
         });
     }
 
@@ -593,6 +601,7 @@ impl Typer {
             detail: format!("const {}: {}", name, type_name(ty)),
             module: None,
             file: None,
+            is_method: false,
         });
     }
 

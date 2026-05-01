@@ -36,17 +36,44 @@ impl Backend {
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
         let analysis = analyze(&source, base_dir.as_deref());
-        self.docs.lock().unwrap().insert(
-            uri.clone(),
-            DocumentState {
-                text: source,
-                program: analysis.program,
-                index: analysis.index,
-                imported_modules: analysis.imported_modules,
-            },
-        );
+
+        let parse_failed = analysis.program.is_none();
+        {
+            let mut docs = self.docs.lock().unwrap();
+            let kept_index = if parse_failed {
+                docs.get(&uri).map(|d| d.index.clone())
+            } else {
+                None
+            };
+            let index = kept_index
+                .map(|prev| merge_indexes(prev, analysis.index.clone()))
+                .unwrap_or(analysis.index);
+            docs.insert(
+                uri.clone(),
+                DocumentState {
+                    text: source,
+                    program: analysis.program,
+                    index,
+                    imported_modules: analysis.imported_modules,
+                },
+            );
+        }
         self.client.publish_diagnostics(uri, analysis.diagnostics, None).await;
     }
+}
+
+fn merge_indexes(mut prev: SymbolIndex, fresh: SymbolIndex) -> SymbolIndex {
+    let prev_decl_keys: HashSet<(String, crate::ast::Pos)> =
+        prev.decls.iter().map(|d| (d.name.clone(), d.pos)).collect();
+    for d in fresh.decls {
+        if !prev_decl_keys.contains(&(d.name.clone(), d.pos)) {
+            prev.decls.push(d);
+        }
+    }
+    for (k, v) in fresh.structs {
+        prev.structs.entry(k).or_insert(v);
+    }
+    prev
 }
 
 #[tower_lsp::async_trait]
@@ -140,6 +167,33 @@ impl LanguageServer for Backend {
                 })),
                 range: None,
             }));
+        }
+
+        let line_text = doc.text.lines().nth(line - 1).unwrap_or("");
+        if let Some((method_name, ctx)) = parse_method_at_col(line_text, col) {
+            let ty = match ctx {
+                MemberContext::Ident { col: obj_col } => {
+                    doc.index.ref_at(line, obj_col).map(|r| r.ty.clone())
+                }
+                MemberContext::Literal(t) => Some(t),
+            };
+            if let Some(ty) = ty {
+                let prefixes = method_lookup_prefixes(&ty);
+                for prefix in &prefixes {
+                    let target = format!("{}{}", prefix, method_name);
+                    for d in &doc.index.decls {
+                        if d.name == target {
+                            return Ok(Some(Hover {
+                                contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
+                                    language: "glide".into(),
+                                    value: d.detail.clone(),
+                                })),
+                                range: None,
+                            }));
+                        }
+                    }
+                }
+            }
         }
 
         Ok(None)
@@ -245,6 +299,8 @@ impl LanguageServer for Backend {
                 &doc.imported_modules,
                 &import_anchor,
             )
+        } else if looks_like_type_position(line_text, col_idx + 1) {
+            type_completions(&doc.index, &doc.imported_modules, &import_anchor)
         } else {
             symbol_completions(&doc.index, &doc.imported_modules, &import_anchor)
         };
@@ -887,6 +943,7 @@ fn symbol_completions(
         items.push(CompletionItem {
             label: (*kw).into(),
             kind: Some(CompletionItemKind::KEYWORD),
+            sort_text: Some(format!("9_{}", kw)),
             ..Default::default()
         });
     }
@@ -894,14 +951,18 @@ fn symbol_completions(
         items.push(CompletionItem {
             label: (*ty).into(),
             kind: Some(CompletionItemKind::CLASS),
+            sort_text: Some(format!("8_{}", ty)),
             ..Default::default()
         });
     }
 
-    let mut seen_globals: HashSet<String> = HashSet::new();
+    let mut seen: HashSet<String> = HashSet::new();
     for d in &index.decls {
-        if d.name.starts_with("__glide_") || d.name.contains('_') && d.module.is_some() {
-            // skip mangled stdlib + impl methods at the top level (only show via member access)
+        if d.is_method || d.name.starts_with("__glide_") {
+            continue;
+        }
+        if !seen.insert(format!("{}:{}", d.name, d.pos.line)) {
+            continue;
         }
         let kind = match d.kind {
             DeclKind::Fn => CompletionItemKind::FUNCTION,
@@ -910,19 +971,14 @@ fn symbol_completions(
             DeclKind::Let => CompletionItemKind::VARIABLE,
             DeclKind::Param => CompletionItemKind::VARIABLE,
         };
-        if !matches!(d.kind, DeclKind::Fn | DeclKind::Struct | DeclKind::Const) {
-            continue;
-        }
-        if d.name.starts_with("__glide_") {
-            continue;
-        }
-        if d.name.contains('_') && d.module.is_some() && matches!(d.kind, DeclKind::Fn) {
-            // looks like an impl method (e.g. string_blue) — skip in top-level completion
-            continue;
-        }
-        if !seen_globals.insert(d.name.clone()) {
-            continue;
-        }
+        let sort_prefix = match d.kind {
+            DeclKind::Param => "0",
+            DeclKind::Let => "1",
+            DeclKind::Const => "2",
+            DeclKind::Fn => "3",
+            DeclKind::Struct => "4",
+        };
+
         let needs_import = d.module.as_deref()
             .filter(|m| !imported.contains(*m))
             .map(str::to_string);
@@ -941,10 +997,75 @@ fn symbol_completions(
             kind: Some(kind),
             detail: Some(display_detail),
             additional_text_edits: additional_edits,
+            sort_text: Some(format!("{}_{}", sort_prefix, d.name)),
             ..Default::default()
         });
     }
     items
+}
+
+fn type_completions(
+    index: &SymbolIndex,
+    imported: &HashSet<String>,
+    import_anchor: &ImportAnchor,
+) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    for ty in PRIMITIVE_TYPES {
+        items.push(CompletionItem {
+            label: (*ty).into(),
+            kind: Some(CompletionItemKind::CLASS),
+            sort_text: Some(format!("0_{}", ty)),
+            ..Default::default()
+        });
+    }
+    let mut seen: HashSet<String> = HashSet::new();
+    for d in &index.decls {
+        if !matches!(d.kind, DeclKind::Struct) {
+            continue;
+        }
+        if d.pos == crate::ast::Pos::default() {
+            continue;
+        }
+        if !seen.insert(d.name.clone()) {
+            continue;
+        }
+        let needs_import = d.module.as_deref()
+            .filter(|m| !imported.contains(*m))
+            .map(str::to_string);
+        let detail = match (&d.module, &needs_import) {
+            (Some(m), Some(_)) => format!("{}  (auto-import \"{}\")", d.detail, m),
+            (Some(m), None) => format!("{}  (from \"{}\")", d.detail, m),
+            _ => d.detail.clone(),
+        };
+        let additional_edits = needs_import
+            .as_ref()
+            .map(|m| vec![import_anchor.text_edit_for(m)]);
+        items.push(CompletionItem {
+            label: d.name.clone(),
+            kind: Some(CompletionItemKind::STRUCT),
+            detail: Some(detail),
+            additional_text_edits: additional_edits,
+            sort_text: Some(format!("1_{}", d.name)),
+            ..Default::default()
+        });
+    }
+    items
+}
+
+fn looks_like_type_position(line_text: &str, col: usize) -> bool {
+    let chars: Vec<char> = line_text.chars().collect();
+    let mut p = col.saturating_sub(1).min(chars.len());
+    while p > 0 && (chars[p - 1].is_alphanumeric() || chars[p - 1] == '_' || chars[p - 1] == '*') {
+        p -= 1;
+    }
+    while p > 0 && chars[p - 1].is_whitespace() {
+        p -= 1;
+    }
+    if p == 0 {
+        return false;
+    }
+    matches!(chars[p - 1], ':' | '>')
+        && !(p >= 2 && chars[p - 2] == ':')
 }
 
 const KEYWORDS: &[&str] = &[
