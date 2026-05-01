@@ -1,0 +1,31 @@
+fn main() -> int {
+    let name: string = env_get("USER");
+    if name.eq("") {
+        name = env_get("USERNAME");
+    }
+    println!("hello,", name);
+
+    let count: int = args_count();
+    println!("argc =", count);
+    for let i: int = 0; i < count; i++ {
+        println!("  argv[", i, "] =", args_at(i));
+    }
+
+    let msg: string = format!("answer = {}", 42);
+    println!(msg);
+    println!("{} + {} = {}", 2, 3, 2 + 3);
+
+    let written: bool = write_file("/tmp/glide_test.txt", "hello from glide\n");
+    println!("wrote:", written);
+
+    if file_exists("/tmp/glide_test.txt") {
+        let content: string = read_file("/tmp/glide_test.txt");
+        print!(content);
+    }
+
+    let n: int = 5;
+    assert!(n > 0);
+    println!("assert passed");
+
+    return 0;
+}

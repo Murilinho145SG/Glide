@@ -132,7 +132,51 @@ impl Typer {
         };
         t.register_builtins();
         t.register_stdlib();
+        t.register_extras();
         t
+    }
+
+    fn register_extras(&mut self) {
+        self.fns.insert("__glide_assert".into(), FnSig {
+            params: vec![synth_param("cond", bool_ty()), synth_param("msg", string_ty())],
+            ret_type: None,
+            variadic: false,
+            decl_pos: None,
+        });
+        self.fns.insert("__glide_format".into(), FnSig {
+            params: vec![synth_param("fmt", string_ty())],
+            ret_type: Some(string_ty()),
+            variadic: true,
+            decl_pos: None,
+        });
+
+        let entries: Vec<(&str, Vec<Param>, Option<Type>, &str)> = vec![
+            ("panic",       vec![synth_param("msg", string_ty())],            None,                "fn panic(msg: string)"),
+            ("args_count",  vec![],                                           Some(int_ty()),      "fn args_count() -> int"),
+            ("args_at",     vec![synth_param("i", int_ty())],                 Some(string_ty()),   "fn args_at(i: int) -> string"),
+            ("env_get",     vec![synth_param("name", string_ty())],           Some(string_ty()),   "fn env_get(name: string) -> string"),
+            ("read_file",   vec![synth_param("path", string_ty())],           Some(string_ty()),   "fn read_file(path: string) -> string"),
+            ("write_file",  vec![synth_param("path", string_ty()), synth_param("content", string_ty())], Some(bool_ty()), "fn write_file(path: string, content: string) -> bool"),
+            ("file_exists", vec![synth_param("path", string_ty())],           Some(bool_ty()),     "fn file_exists(path: string) -> bool"),
+        ];
+        for (name, params, ret, detail) in entries {
+            self.fns.insert(name.into(), FnSig {
+                params,
+                ret_type: ret.clone(),
+                variadic: false,
+                decl_pos: None,
+            });
+            self.index.decls.push(DeclInfo {
+                pos: Pos::default(),
+                name: name.into(),
+                kind: DeclKind::Fn,
+                ty: ret,
+                detail: detail.into(),
+                module: None,
+                file: None,
+                is_method: false,
+            });
+        }
     }
 
     pub fn pre_register_module(
@@ -935,15 +979,60 @@ impl Typer {
     }
 
     fn expand_macro(&mut self, name: String, args: Vec<Expr>, pos: Pos) -> (ExprKind, Type) {
-        let with_newline = match name.as_str() {
-            "println" => true,
-            "print" => false,
+        match name.as_str() {
+            "println" => self.expand_print_macro(args, pos, true),
+            "print" => self.expand_print_macro(args, pos, false),
+            "format" => self.expand_format_macro(args, pos),
+            "assert" => self.expand_assert_macro(args, pos),
             _ => {
                 self.error(format!("unknown macro `{}!`", name));
-                return (ExprKind::MacroCall { name, args }, error_ty());
+                (ExprKind::MacroCall { name, args }, error_ty())
             }
-        };
+        }
+    }
 
+    fn expand_print_macro(&mut self, args: Vec<Expr>, pos: Pos, with_newline: bool) -> (ExprKind, Type) {
+        let (fmt, printf_args) = self.build_printf_format(args, with_newline);
+        let mut call_args = Vec::with_capacity(printf_args.len() + 1);
+        call_args.push(Expr::new(ExprKind::String(fmt), pos));
+        call_args.extend(printf_args);
+        let callee = Expr::new(ExprKind::Ident("printf".into()), pos);
+        (ExprKind::Call(Box::new(callee), call_args), void_ty())
+    }
+
+    fn expand_format_macro(&mut self, args: Vec<Expr>, pos: Pos) -> (ExprKind, Type) {
+        let (fmt, printf_args) = self.build_printf_format(args, false);
+        let mut call_args = Vec::with_capacity(printf_args.len() + 1);
+        call_args.push(Expr::new(ExprKind::String(fmt), pos));
+        call_args.extend(printf_args);
+        let callee = Expr::new(ExprKind::Ident("__glide_format".into()), pos);
+        (ExprKind::Call(Box::new(callee), call_args), string_ty())
+    }
+
+    fn expand_assert_macro(&mut self, args: Vec<Expr>, pos: Pos) -> (ExprKind, Type) {
+        if args.is_empty() {
+            self.error("`assert!` requires at least 1 argument".into());
+            return (ExprKind::MacroCall { name: "assert".into(), args }, error_ty());
+        }
+        let cond = args.into_iter().next().unwrap();
+        let (cond_new, cond_ty) = self.check_expr(cond);
+        self.expect_type(&bool_ty(), &cond_ty, "`assert!` condition");
+        let msg = format!("assertion failed at {}:{}", pos.line, pos.column);
+        let call = ExprKind::Call(
+            Box::new(Expr::new(ExprKind::Ident("__glide_assert".into()), pos)),
+            vec![cond_new, Expr::new(ExprKind::String(msg), pos)],
+        );
+        (call, void_ty())
+    }
+
+    fn build_printf_format(&mut self, args: Vec<Expr>, with_newline: bool) -> (String, Vec<Expr>) {
+        if let Some(first) = args.first() {
+            if let ExprKind::String(s) = &first.kind {
+                if s.contains("{}") {
+                    return self.build_template_format(s.clone(), args, with_newline);
+                }
+            }
+        }
         let mut fmt = String::new();
         let mut printf_args: Vec<Expr> = Vec::new();
         for (i, arg) in args.into_iter().enumerate() {
@@ -959,14 +1048,45 @@ impl Typer {
         if with_newline {
             fmt.push('\n');
         }
+        (fmt, printf_args)
+    }
 
-        let mut call_args = Vec::with_capacity(printf_args.len() + 1);
-        call_args.push(Expr::new(ExprKind::String(fmt), pos));
-        call_args.extend(printf_args);
-
-        let callee = Expr::new(ExprKind::Ident("printf".into()), pos);
-        let call = ExprKind::Call(Box::new(callee), call_args);
-        (call, void_ty())
+    fn build_template_format(
+        &mut self,
+        template: String,
+        mut args: Vec<Expr>,
+        with_newline: bool,
+    ) -> (String, Vec<Expr>) {
+        args.remove(0);
+        let mut iter = args.into_iter();
+        let mut fmt = String::new();
+        let mut printf_args: Vec<Expr> = Vec::new();
+        let chars: Vec<char> = template.chars().collect();
+        let mut i = 0;
+        while i < chars.len() {
+            if i + 1 < chars.len() && chars[i] == '{' && chars[i + 1] == '}' {
+                if let Some(arg) = iter.next() {
+                    let arg_pos = arg.pos;
+                    let (a_new, a_ty) = self.check_expr(arg);
+                    let (spec, transformed) = format_spec_for(&a_ty, a_new, arg_pos);
+                    fmt.push_str(spec);
+                    printf_args.push(transformed);
+                } else {
+                    fmt.push_str("{}");
+                }
+                i += 2;
+            } else if chars[i] == '%' {
+                fmt.push_str("%%");
+                i += 1;
+            } else {
+                fmt.push(chars[i]);
+                i += 1;
+            }
+        }
+        if with_newline {
+            fmt.push('\n');
+        }
+        (fmt, printf_args)
     }
 
     fn check_method_call(&mut self, callee: Expr, args: Vec<Expr>, pos: Pos) -> (Expr, Type) {

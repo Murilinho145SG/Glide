@@ -140,6 +140,7 @@ impl Codegen {
         self.push("#include <stdbool.h>\n");
         self.push("#include <stddef.h>\n");
         self.push("#include <string.h>\n");
+        self.push("#include <stdarg.h>\n");
         self.push("#include <ctype.h>\n");
         self.push("#include <math.h>\n");
         if self.uses_concurrency {
@@ -270,7 +271,7 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             if !params.is_empty() {
                 return Err(self.err("`fn main` must take no parameters".into()));
             }
-            self.push("int main(void)");
+            self.push("int main(int __glide_main_argc, char** __glide_main_argv)");
             return Ok(());
         }
 
@@ -320,6 +321,10 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
         self.emit_fn_signature(name, params, ret_type)?;
         self.push(" {\n");
         self.indent += 1;
+        if is_main {
+            self.write_indent();
+            self.push("__glide_args_init(__glide_main_argc, __glide_main_argv);\n");
+        }
         for s in body {
             self.emit_stmt(s)?;
         }
@@ -1089,5 +1094,80 @@ static bool __glide_char_is_digit(char c) {
 
 static bool __glide_char_is_alpha(char c) {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static int    __glide_argc_g = 0;
+static char** __glide_argv_g = NULL;
+
+static void __glide_args_init(int argc, char** argv) {
+    __glide_argc_g = argc;
+    __glide_argv_g = argv;
+}
+
+static int args_count(void) { return __glide_argc_g; }
+
+static const char* args_at(int i) {
+    if (i < 0 || i >= __glide_argc_g) return "";
+    return __glide_argv_g[i];
+}
+
+static const char* env_get(const char* name) {
+    const char* v = getenv(name);
+    return v ? v : "";
+}
+
+static void panic(const char* msg) {
+    fprintf(stderr, "panic: %s\n", msg);
+    exit(1);
+}
+
+static void __glide_assert(bool cond, const char* msg) {
+    if (!cond) {
+        fprintf(stderr, "%s\n", msg);
+        exit(1);
+    }
+}
+
+static const char* __glide_format(const char* fmt, ...) {
+    va_list ap1, ap2;
+    va_start(ap1, fmt);
+    va_copy(ap2, ap1);
+    int n = vsnprintf(NULL, 0, fmt, ap1);
+    va_end(ap1);
+    if (n < 0) { va_end(ap2); return ""; }
+    char* out = (char*)malloc((size_t)n + 1);
+    vsnprintf(out, (size_t)n + 1, fmt, ap2);
+    va_end(ap2);
+    return out;
+}
+
+static const char* read_file(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return "";
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    if (n < 0) { fclose(f); return ""; }
+    fseek(f, 0, SEEK_SET);
+    char* buf = (char*)malloc((size_t)n + 1);
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+    buf[got] = 0;
+    return buf;
+}
+
+static bool write_file(const char* path, const char* content) {
+    FILE* f = fopen(path, "wb");
+    if (!f) return false;
+    size_t n = strlen(content);
+    size_t wrote = fwrite(content, 1, n, f);
+    fclose(f);
+    return wrote == n;
+}
+
+static bool file_exists(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
 }
 "#;

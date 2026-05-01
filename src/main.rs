@@ -27,15 +27,17 @@ fn main() {
         "build" => {
             let file = require_file_arg(&argv, "build");
             let output = parse_o_flag(&argv).unwrap_or_else(|| default_output_name(&file));
+            let mode = parse_build_mode(&argv);
             let result = compile_to_c(&file);
-            invoke_gcc(&result, Path::new(&output));
+            invoke_gcc(&result, Path::new(&output), mode);
             eprintln!("compiled {} -> {}", file, output);
         }
         "run" => {
             let file = require_file_arg(&argv, "run");
+            let mode = parse_build_mode(&argv);
             let result = compile_to_c(&file);
             let exe = temp_exe_path(&file);
-            invoke_gcc(&result, &exe);
+            invoke_gcc(&result, &exe, mode);
             let status = Command::new(&exe).status().unwrap_or_else(|e| {
                 eprintln!("glide: failed to run {}: {}", exe.display(), e);
                 let _ = std::fs::remove_file(&exe);
@@ -62,11 +64,15 @@ fn print_usage() {
     eprintln!("usage: glide <subcommand> [args]");
     eprintln!();
     eprintln!("subcommands:");
-    eprintln!("  emit  <file>             generate C source to stdout");
-    eprintln!("  build <file> [-o out]    compile to a native executable");
-    eprintln!("  run   <file>             build and run, forwarding the exit code");
-    eprintln!("  fmt   <file> [--write]   pretty-print to stdout, or rewrite the file");
-    eprintln!("  lsp                      start the LSP server on stdio");
+    eprintln!("  emit  <file>                       generate C source to stdout");
+    eprintln!("  build <file> [-o out] [--release]  compile to a native executable");
+    eprintln!("  run   <file> [--release]           build and run, forwarding the exit code");
+    eprintln!("  fmt   <file> [--write]             pretty-print to stdout, or rewrite the file");
+    eprintln!("  lsp                                start the LSP server on stdio");
+    eprintln!();
+    eprintln!("build flags:");
+    eprintln!("  --release   use -O3 -flto -DNDEBUG");
+    eprintln!("  --debug     use -O0 -g");
 }
 
 fn require_file_arg(argv: &[String], sub: &str) -> String {
@@ -243,7 +249,24 @@ fn find_repo_root_with_std() -> Option<PathBuf> {
     None
 }
 
-fn invoke_gcc(result: &EmitResult, output: &Path) {
+#[derive(Clone, Copy)]
+enum BuildMode {
+    Default,
+    Release,
+    Debug,
+}
+
+fn parse_build_mode(argv: &[String]) -> BuildMode {
+    if argv.iter().any(|a| a == "--release") {
+        BuildMode::Release
+    } else if argv.iter().any(|a| a == "--debug") {
+        BuildMode::Debug
+    } else {
+        BuildMode::Default
+    }
+}
+
+fn invoke_gcc(result: &EmitResult, output: &Path, mode: BuildMode) {
     let tmp_dir = std::env::temp_dir();
     let c_path = tmp_dir.join(format!("glide-{}.c", std::process::id()));
     if let Err(e) = std::fs::write(&c_path, &result.c_source) {
@@ -252,7 +275,13 @@ fn invoke_gcc(result: &EmitResult, output: &Path) {
     }
 
     let mut cmd = Command::new("gcc");
-    cmd.arg(&c_path).arg("-O2").arg("-o").arg(output);
+    cmd.arg(&c_path);
+    match mode {
+        BuildMode::Default => { cmd.arg("-O2"); }
+        BuildMode::Release => { cmd.args(["-O3", "-flto", "-DNDEBUG"]); }
+        BuildMode::Debug   => { cmd.args(["-O0", "-g"]); }
+    }
+    cmd.arg("-o").arg(output);
     if result.needs_pthread {
         cmd.arg("-lpthread");
     }
