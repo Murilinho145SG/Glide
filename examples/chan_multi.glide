@@ -1,0 +1,44 @@
+fn int_producer(c: chan<int>, n: int) {
+    for let i: int = 1; i <= n; i++ {
+        send(c, i);
+    }
+    close(c);
+}
+
+fn float_producer(c: chan<float>, n: int) {
+    for let i: int = 0; i < n; i++ {
+        let v: float = 1.5;
+        send(c, v);
+    }
+    close(c);
+}
+
+fn collect_int(c: chan<int>, done: chan<int>) {
+    let total: int = 0;
+    let v: int    = recv(c);
+    while v != 0 {
+        total += v;
+        v = recv(c);
+    }
+    send(done, total);
+}
+
+fn main() -> int {
+    let ints:   chan<int>   = make_chan(4);
+    let floats: chan<float> = make_chan(2);
+    let done:   chan<int>   = make_chan(1);
+
+    spawn int_producer(ints, 5);
+    spawn float_producer(floats, 3);
+    spawn collect_int(ints, done);
+
+    let f1: float = recv(floats);
+    let f2: float = recv(floats);
+    let f3: float = recv(floats);
+    printf("floats: %.2f %.2f %.2f\n", f1, f2, f3);
+
+    let total: int = recv(done);
+    printf("int sum 1..5: %d\n", total);
+
+    return 0;
+}

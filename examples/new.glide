@@ -1,0 +1,38 @@
+struct Node {
+    value: int,
+    next: *Node,
+}
+
+fn cons(value: int, next: *Node) -> *Node {
+    return new Node { value: value, next: next };
+}
+
+fn sum(head: *Node) -> int {
+    let total: int = 0;
+    let cur: *Node = head;
+    while cur != null {
+        total += cur->value;
+        cur = cur->next;
+    }
+    return total;
+}
+
+fn free_list(head: *Node) {
+    let cur: *Node = head;
+    while cur != null {
+        let next: *Node = cur->next;
+        free(cur);
+        cur = next;
+    }
+}
+
+fn main() -> int {
+    let head: *Node = null;
+    for let i: int = 5; i >= 1; i-- {
+        head = cons(i, head);
+    }
+
+    printf("sum = %d\n", sum(head));
+    free_list(head);
+    return 0;
+}

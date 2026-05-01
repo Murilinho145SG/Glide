@@ -1,0 +1,26 @@
+struct Point {
+    x: int,
+    y: int,
+}
+
+fn main() -> int {
+    let n: int   = 7;
+    let half: float = n as float / 2.0;
+    printf("7 / 2 as float = %.2f\n", half);
+
+    let pi: float = 3.14;
+    let i:  int   = pi as int;
+    printf("3.14 as int = %d\n", i);
+
+    printf("sizeof(int)    = %d\n", sizeof(int));
+    printf("sizeof(*int)   = %d\n", sizeof(*int));
+    printf("sizeof(Point)  = %d\n", sizeof(Point));
+
+    let p: *Point = malloc(sizeof(Point)) as *Point;
+    p->x = 10;
+    p->y = 20;
+    printf("heap point = (%d, %d)\n", p->x, p->y);
+    free(p);
+
+    return 0;
+}
