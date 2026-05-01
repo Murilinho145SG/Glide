@@ -719,6 +719,15 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 self.push(&format!("}}; {}; }}))", var));
             }
 
+            ExprKind::AddrOfTemp { value, ty } => {
+                let c_ty = self.type_to_c(ty);
+                self.push("(&((");
+                self.push(&c_ty);
+                self.push("){");
+                self.emit_expr(value)?;
+                self.push("}))");
+            }
+
             ExprKind::ArrayLit { elements, elem_type } => {
                 let elem_c = match elem_type {
                     Some(t) => self.type_to_c(t),

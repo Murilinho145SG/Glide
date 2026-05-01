@@ -470,6 +470,11 @@ impl Formatter {
                 }
                 self.write("]");
             }
+
+            ExprKind::AddrOfTemp { value, .. } => {
+                self.write("&");
+                self.emit_expr(value, PREC_UNARY);
+            }
         }
     }
 

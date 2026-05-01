@@ -93,6 +93,11 @@ pub enum ExprKind {
         elements: Vec<Expr>,
         elem_type: Option<Type>,
     },
+
+    AddrOfTemp {
+        value: Box<Expr>,
+        ty: Type,
+    },
 }
 
 impl Expr {

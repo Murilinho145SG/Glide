@@ -735,11 +735,21 @@ impl Typer {
                     },
                     UnaryOp::AddrOf => {
                         if !is_lvalue(&inner_new) {
-                            self.error(
-                                "cannot take the address of a non-lvalue (assign it to a `let` first)".into(),
-                            );
+                            if is_error(&inner_ty) {
+                                Type::Pointer(Box::new(inner_ty.clone()))
+                            } else {
+                                let ptr_ty = Type::Pointer(Box::new(inner_ty.clone()));
+                                return (
+                                    ExprKind::AddrOfTemp {
+                                        value: Box::new(inner_new),
+                                        ty: inner_ty,
+                                    },
+                                    ptr_ty,
+                                );
+                            }
+                        } else {
+                            Type::Pointer(Box::new(inner_ty.clone()))
                         }
-                        Type::Pointer(Box::new(inner_ty.clone()))
                     }
                     UnaryOp::PostInc | UnaryOp::PostDec => inner_ty.clone(),
                 };
@@ -815,6 +825,11 @@ impl Typer {
                     Type::Pointer(Box::new(lit_ty))
                 };
                 (ExprKind::New { type_name: tn, fields: new_fields }, ptr_ty)
+            }
+
+            ExprKind::AddrOfTemp { value, ty } => {
+                let ptr_ty = Type::Pointer(Box::new(ty.clone()));
+                (ExprKind::AddrOfTemp { value, ty }, ptr_ty)
             }
 
             ExprKind::ArrayLit { elements, .. } => {
