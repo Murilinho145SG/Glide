@@ -647,6 +647,27 @@ impl Parser {
                 self.expect_op(Operator::RParen)?;
                 return Ok(Expr::new(inner.kind, pos));
             }
+            TokenKind::Operator(Operator::LBracket) => {
+                self.advance();
+                let saved = self.no_struct_lit;
+                self.no_struct_lit = false;
+                let mut elems = Vec::new();
+                if !self.at_op(Operator::RBracket) {
+                    loop {
+                        elems.push(self.parse_expr(0)?);
+                        if self.eat_op(Operator::Comma) {
+                            if self.at_op(Operator::RBracket) {
+                                break;
+                            }
+                            continue;
+                        }
+                        break;
+                    }
+                }
+                self.no_struct_lit = saved;
+                self.expect_op(Operator::RBracket)?;
+                ExprKind::ArrayLit { elements: elems, elem_type: None }
+            }
             TokenKind::Operator(op) => {
                 let unary = match op {
                     Operator::Minus  => UnaryOp::Neg,

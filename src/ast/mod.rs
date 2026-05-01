@@ -88,6 +88,11 @@ pub enum ExprKind {
         type_name: String,
         fields: Vec<(String, Expr)>,
     },
+
+    ArrayLit {
+        elements: Vec<Expr>,
+        elem_type: Option<Type>,
+    },
 }
 
 impl Expr {

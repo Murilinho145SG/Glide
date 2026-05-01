@@ -718,6 +718,23 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 }
                 self.push(&format!("}}; {}; }}))", var));
             }
+
+            ExprKind::ArrayLit { elements, elem_type } => {
+                let elem_c = match elem_type {
+                    Some(t) => self.type_to_c(t),
+                    None => return Err(self.err(
+                        "array literal type was not resolved by the typer".into(),
+                    )),
+                };
+                self.push("((");
+                self.push(&elem_c);
+                self.push("[]){");
+                for (i, e) in elements.iter().enumerate() {
+                    if i > 0 { self.push(", "); }
+                    self.emit_expr(e)?;
+                }
+                self.push("})");
+            }
         }
         Ok(())
     }

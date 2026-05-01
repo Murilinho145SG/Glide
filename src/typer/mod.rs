@@ -153,21 +153,32 @@ impl Typer {
     fn register_builtins(&mut self) {
         let int = int_ty();
         let void_ptr = Type::Pointer(Box::new(void_ty()));
-        for (name, ret) in [
-            ("printf", Some(int.clone())),
-            ("scanf",  Some(int.clone())),
-            ("puts",   Some(int.clone())),
-            ("malloc", Some(void_ptr.clone())),
-            ("calloc", Some(void_ptr)),
-            ("free",   None),
-            ("strlen", Some(int.clone())),
-            ("strcmp", Some(int)),
-        ] {
+        let entries: Vec<(&str, Option<Type>, &str)> = vec![
+            ("printf", Some(int.clone()),       "fn printf(fmt: string, ...) -> int"),
+            ("scanf",  Some(int.clone()),       "fn scanf(fmt: string, ...) -> int"),
+            ("puts",   Some(int.clone()),       "fn puts(s: string) -> int"),
+            ("malloc", Some(void_ptr.clone()),  "fn malloc(size: int) -> *void"),
+            ("calloc", Some(void_ptr.clone()),  "fn calloc(n: int, size: int) -> *void"),
+            ("free",   None,                    "fn free(p: *void)"),
+            ("strlen", Some(int.clone()),       "fn strlen(s: string) -> int"),
+            ("strcmp", Some(int.clone()),       "fn strcmp(a: string, b: string) -> int"),
+        ];
+        for (name, ret, detail) in entries {
             self.fns.insert(name.into(), FnSig {
                 params: vec![],
-                ret_type: ret,
+                ret_type: ret.clone(),
                 variadic: true,
                 decl_pos: None,
+            });
+            self.index.decls.push(DeclInfo {
+                pos: Pos::default(),
+                name: name.into(),
+                kind: DeclKind::Fn,
+                ty: ret,
+                detail: detail.into(),
+                module: None,
+                file: None,
+                is_method: false,
             });
         }
     }
@@ -797,6 +808,37 @@ impl Typer {
                     Type::Pointer(Box::new(lit_ty))
                 };
                 (ExprKind::New { type_name: tn, fields: new_fields }, ptr_ty)
+            }
+
+            ExprKind::ArrayLit { elements, .. } => {
+                if elements.is_empty() {
+                    self.error("empty array literal `[]` requires a type annotation".into());
+                    return (
+                        ExprKind::ArrayLit { elements: Vec::new(), elem_type: None },
+                        error_ty(),
+                    );
+                }
+                let mut new_elems = Vec::with_capacity(elements.len());
+                let mut elem_ty: Option<Type> = None;
+                for e in elements {
+                    let (e_new, e_ty) = self.check_expr(e);
+                    if let Some(expected) = &elem_ty {
+                        self.expect_type(expected, &e_ty, "array element");
+                    } else if !is_error(&e_ty) {
+                        elem_ty = Some(e_ty);
+                    }
+                    new_elems.push(e_new);
+                }
+                let inner = elem_ty.clone().unwrap_or_else(error_ty);
+                let result_ty = if is_error(&inner) {
+                    error_ty()
+                } else {
+                    Type::Pointer(Box::new(inner))
+                };
+                (
+                    ExprKind::ArrayLit { elements: new_elems, elem_type: elem_ty },
+                    result_ty,
+                )
             }
         }
     }

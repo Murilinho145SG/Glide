@@ -311,6 +311,7 @@ module.exports = grammar({
 
     _primary: $ => choice(
       $.parenthesized,
+      $.array_literal,
       $.struct_literal,
       $.new_expr,
       $.sizeof_expr,
@@ -321,6 +322,16 @@ module.exports = grammar({
       $.char_literal,
       $.bool_literal,
       $.null_literal,
+    ),
+
+    array_literal: $ => seq(
+      '[',
+      optional(seq(
+        $._expression,
+        repeat(seq(',', $._expression)),
+        optional(','),
+      )),
+      ']',
     ),
 
     parenthesized: $ => seq('(', $._expression, ')'),

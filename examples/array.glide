@@ -1,0 +1,15 @@
+fn main() -> int {
+    let nums: *int = [10, 20, 30, 40, 50];
+    let sum: int = 0;
+    for let i: int = 0; i < 5; i++ {
+        sum += nums[i];
+        printf("nums[%d] = %d\n", i, nums[i]);
+    }
+    printf("sum = %d\n", sum);
+
+    let names: *string = ["alelo", "tectec", "world"];
+    printf("first = %s\n", names[0]);
+    printf("third = %s\n", names[2]);
+
+    return 0;
+}

@@ -461,6 +461,15 @@ impl Formatter {
                 self.write(type_name);
                 self.emit_struct_lit_fields(fields);
             }
+
+            ExprKind::ArrayLit { elements, .. } => {
+                self.write("[");
+                for (i, el) in elements.iter().enumerate() {
+                    if i > 0 { self.write(", "); }
+                    self.emit_expr(el, PREC_NONE);
+                }
+                self.write("]");
+            }
         }
     }
 
