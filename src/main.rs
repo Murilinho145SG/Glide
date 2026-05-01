@@ -252,7 +252,7 @@ fn invoke_gcc(result: &EmitResult, output: &Path) {
     }
 
     let mut cmd = Command::new("gcc");
-    cmd.arg(&c_path).arg("-o").arg(output);
+    cmd.arg(&c_path).arg("-O2").arg("-o").arg(output);
     if result.needs_pthread {
         cmd.arg("-lpthread");
     }
