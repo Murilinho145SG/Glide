@@ -124,6 +124,7 @@ impl Typer {
             index: SymbolIndex::default(),
         };
         t.register_builtins();
+        t.register_stdlib();
         t
     }
 
@@ -144,6 +145,17 @@ impl Typer {
                 params: vec![],
                 ret_type: ret,
                 variadic: true,
+                decl_pos: None,
+            });
+        }
+    }
+
+    fn register_stdlib(&mut self) {
+        for (name, params, ret) in stdlib_signatures() {
+            self.fns.insert(format!("__glide_{}", name), FnSig {
+                params,
+                ret_type: ret,
+                variadic: false,
                 decl_pos: None,
             });
         }
@@ -194,6 +206,27 @@ impl Typer {
                         detail: format_fn_detail(name, params, ret_type.as_ref()),
                     });
                 }
+                StmtKind::Impl { target, methods, .. } => {
+                    let prefix = target.mangle();
+                    for m in methods {
+                        if let StmtKind::Fn { name, params, ret_type, .. } = &m.kind {
+                            let mangled = format!("{}_{}", prefix, name);
+                            self.fns.insert(mangled.clone(), FnSig {
+                                params: params.clone(),
+                                ret_type: ret_type.clone(),
+                                variadic: false,
+                                decl_pos: Some(m.pos),
+                            });
+                            self.index.decls.push(DeclInfo {
+                                pos: m.pos,
+                                name: name.clone(),
+                                kind: DeclKind::Fn,
+                                ty: ret_type.clone(),
+                                detail: format_fn_detail(&mangled, params, ret_type.as_ref()),
+                            });
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -221,6 +254,11 @@ impl Typer {
             StmtKind::Struct { name, fields } => StmtKind::Struct { name, fields },
             StmtKind::Let { name, ty, value } => self.check_let(name, ty, value),
             StmtKind::Const { name, ty, value } => self.check_const(name, ty, value),
+            StmtKind::Interface { name, methods } => StmtKind::Interface { name, methods },
+            StmtKind::Impl { interface, target, methods } => {
+                self.check_impl(interface, target, methods)
+            }
+            StmtKind::Import(p) => StmtKind::Import(p),
             other => {
                 self.error("unsupported top-level statement".into());
                 other
@@ -228,6 +266,27 @@ impl Typer {
         };
         self.current_pos = saved_pos;
         Stmt { kind, pos: stmt.pos }
+    }
+
+    fn check_impl(
+        &mut self,
+        interface: Option<String>,
+        target: Type,
+        methods: Vec<Stmt>,
+    ) -> StmtKind {
+        let prefix = target.mangle();
+        let mut new_methods = Vec::with_capacity(methods.len());
+        for m in methods {
+            let pos = m.pos;
+            if let StmtKind::Fn { name, params, ret_type, body } = m.kind {
+                let mangled = format!("{}_{}", prefix, name);
+                let new_kind = self.check_fn(mangled, params, ret_type, body);
+                new_methods.push(Stmt { kind: new_kind, pos });
+            } else {
+                self.error("only `fn` declarations are allowed inside `impl`".into());
+            }
+        }
+        StmtKind::Impl { interface, target, methods: new_methods }
     }
 
     fn check_fn(
@@ -365,10 +424,18 @@ impl Typer {
 
             StmtKind::Fn { .. } => {
                 self.error("nested `fn` not supported".into());
-                StmtKind::Break // unreachable in practice; type-error path
+                StmtKind::Break
             }
             StmtKind::Struct { .. } => {
                 self.error("nested `struct` not supported".into());
+                StmtKind::Break
+            }
+            StmtKind::Interface { .. } | StmtKind::Impl { .. } => {
+                self.error("`interface`/`impl` only allowed at top level".into());
+                StmtKind::Break
+            }
+            StmtKind::Import(_) => {
+                self.error("`import` only allowed at top level".into());
                 StmtKind::Break
             }
         }
@@ -671,6 +738,10 @@ impl Typer {
     }
 
     fn check_call(&mut self, callee: Expr, args: Vec<Expr>, pos: Pos) -> (Expr, Type) {
+        if let ExprKind::Member(_, _) = &callee.kind {
+            return self.check_method_call(callee, args, pos);
+        }
+
         let fn_name = match &callee.kind {
             ExprKind::Ident(n) => Some(n.clone()),
             _ => None,
@@ -727,6 +798,102 @@ impl Typer {
 
         (
             Expr::new(ExprKind::Call(Box::new(callee_new), args_new), pos),
+            result_ty,
+        )
+    }
+
+    fn check_method_call(&mut self, callee: Expr, args: Vec<Expr>, pos: Pos) -> (Expr, Type) {
+        let ExprKind::Member(obj_box, method) = callee.kind else { unreachable!() };
+        let obj = *obj_box;
+
+        let (obj_new, obj_ty) = self.check_expr(obj);
+
+        let mut new_args = Vec::with_capacity(args.len() + 1);
+        let mut arg_tys = Vec::with_capacity(args.len() + 1);
+        new_args.push(obj_new);
+        arg_tys.push(obj_ty.clone());
+        for a in args {
+            let (a_new, a_ty) = self.check_expr(a);
+            new_args.push(a_new);
+            arg_tys.push(a_ty);
+        }
+
+        let full_prefix = obj_ty.mangle();
+        let stripped_prefix = method_type_prefix(&obj_ty);
+
+        let candidates: Vec<String> = {
+            let mut v = Vec::new();
+            v.push(format!("__glide_{}_{}", full_prefix, method));
+            v.push(format!("{}_{}", full_prefix, method));
+            if let Some(p) = &stripped_prefix {
+                if p != &full_prefix {
+                    v.push(format!("__glide_{}_{}", p, method));
+                    v.push(format!("{}_{}", p, method));
+                }
+            }
+            v
+        };
+
+        let resolved = candidates.iter().find_map(|n| {
+            self.fns.get(n).cloned().map(|sig| (n.clone(), sig))
+        }).or_else(|| {
+            self.fns.get(&method).cloned().and_then(|sig| {
+                if sig.variadic {
+                    return None;
+                }
+                let first_ok = sig.params.first()
+                    .map(|p| types_compat(&p.ty, &obj_ty))
+                    .unwrap_or(false);
+                if first_ok {
+                    Some((method.clone(), sig))
+                } else {
+                    None
+                }
+            })
+        });
+
+        let (resolved_name, sig) = match resolved {
+            Some(x) => x,
+            None => {
+                if !is_error(&obj_ty) {
+                    self.error(format!(
+                        "no method `{}` found for type `{}`",
+                        method, type_name(&obj_ty)
+                    ));
+                }
+                let dummy = Expr::new(ExprKind::Ident(method), pos);
+                return (
+                    Expr::new(ExprKind::Call(Box::new(dummy), new_args), pos),
+                    error_ty(),
+                );
+            }
+        };
+
+        if sig.params.len() != new_args.len() {
+            self.error(format!(
+                "method `{}`: expected {} argument(s), got {}",
+                method,
+                sig.params.len().saturating_sub(1),
+                new_args.len().saturating_sub(1),
+            ));
+        } else {
+            for (i, p) in sig.params.iter().enumerate() {
+                let saved = self.current_pos;
+                self.current_pos = new_args[i].pos;
+                self.expect_type(
+                    &p.ty,
+                    &arg_tys[i],
+                    &format!("argument `{}` of `{}`", p.name, resolved_name),
+                );
+                self.current_pos = saved;
+            }
+        }
+
+        let new_callee = Expr::new(ExprKind::Ident(resolved_name), pos);
+        let result_ty = sig.ret_type.unwrap_or_else(void_ty);
+
+        (
+            Expr::new(ExprKind::Call(Box::new(new_callee), new_args), pos),
             result_ty,
         )
     }
@@ -1107,4 +1274,45 @@ fn binop_str(op: &BinaryOp) -> &'static str {
         BinaryOp::BitAnd => "&", BinaryOp::BitOr => "|", BinaryOp::BitXor => "^",
         BinaryOp::Shl => "<<", BinaryOp::Shr => ">>",
     }
+}
+
+fn synth_param(name: &str, ty: Type) -> Param {
+    Param { name: name.into(), ty, pos: Pos::default() }
+}
+
+fn method_type_prefix(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Named(n) if !is_error(ty) => Some(n.clone()),
+        Type::Pointer(inner) => method_type_prefix(inner),
+        Type::Chan(_) => Some("chan".into()),
+        _ => None,
+    }
+}
+
+pub fn stdlib_signatures() -> Vec<(&'static str, Vec<Param>, Option<Type>)> {
+    vec![
+        ("int_to_string",   vec![synth_param("n", int_ty())],   Some(string_ty())),
+        ("int_to_float",    vec![synth_param("n", int_ty())],   Some(float_ty())),
+        ("int_abs",         vec![synth_param("n", int_ty())],   Some(int_ty())),
+
+        ("float_to_string", vec![synth_param("f", float_ty())], Some(string_ty())),
+        ("float_to_int",    vec![synth_param("f", float_ty())], Some(int_ty())),
+        ("float_floor",     vec![synth_param("f", float_ty())], Some(float_ty())),
+        ("float_ceil",      vec![synth_param("f", float_ty())], Some(float_ty())),
+
+        ("string_len",      vec![synth_param("s", string_ty())], Some(int_ty())),
+        ("string_eq",       vec![synth_param("a", string_ty()), synth_param("b", string_ty())], Some(bool_ty())),
+        ("string_at",       vec![synth_param("s", string_ty()), synth_param("i", int_ty())],     Some(char_ty())),
+        ("string_concat",   vec![synth_param("a", string_ty()), synth_param("b", string_ty())], Some(string_ty())),
+
+        ("bool_to_string",  vec![synth_param("b", bool_ty())],  Some(string_ty())),
+
+        ("char_to_int",     vec![synth_param("c", char_ty())], Some(int_ty())),
+        ("char_is_digit",   vec![synth_param("c", char_ty())], Some(bool_ty())),
+        ("char_is_alpha",   vec![synth_param("c", char_ty())], Some(bool_ty())),
+    ]
+}
+
+pub fn is_stdlib_fn(name: &str) -> bool {
+    stdlib_signatures().iter().any(|(n, _, _)| *n == name)
 }

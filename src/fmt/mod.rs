@@ -73,6 +73,7 @@ impl Formatter {
     fn emit_top_stmt(&mut self, s: &Stmt) {
         match &s.kind {
             StmtKind::Fn { name, params, ret_type, body } => {
+                self.write_indent();
                 self.write("fn ");
                 self.write(name);
                 self.write("(");
@@ -93,9 +94,11 @@ impl Formatter {
                 self.indent += 1;
                 self.emit_block(body);
                 self.indent -= 1;
+                self.write_indent();
                 self.write("}\n");
             }
             StmtKind::Struct { name, fields } => {
+                self.write_indent();
                 self.write("struct ");
                 self.write(name);
                 if fields.is_empty() {
@@ -112,11 +115,70 @@ impl Formatter {
                     self.write(",\n");
                 }
                 self.indent -= 1;
+                self.write_indent();
                 self.write("}\n");
             }
             StmtKind::Let { .. } | StmtKind::Const { .. } => {
                 self.write_indent();
                 self.emit_simple_stmt(s);
+            }
+            StmtKind::Import(p) => {
+                self.write("import \"");
+                self.write(&format_string(p));
+                self.write("\";\n");
+            }
+            StmtKind::Interface { name, methods } => {
+                self.write_indent();
+                self.write("interface ");
+                self.write(name);
+                if methods.is_empty() {
+                    self.write(" {}\n");
+                    return;
+                }
+                self.write(" {\n");
+                self.indent += 1;
+                for m in methods {
+                    self.write_indent();
+                    self.write("fn ");
+                    self.write(&m.name);
+                    self.write("(");
+                    for (i, p) in m.params.iter().enumerate() {
+                        if i > 0 { self.write(", "); }
+                        self.write(&p.name);
+                        self.write(": ");
+                        self.write(&format_type(&p.ty));
+                    }
+                    self.write(")");
+                    if let Some(rt) = &m.ret_type {
+                        self.write(" -> ");
+                        self.write(&format_type(rt));
+                    }
+                    self.write(";\n");
+                }
+                self.indent -= 1;
+                self.write_indent();
+                self.write("}\n");
+            }
+            StmtKind::Impl { interface, target, methods } => {
+                self.write_indent();
+                self.write("impl ");
+                if let Some(iface) = interface {
+                    self.write(iface);
+                    self.write(" for ");
+                }
+                self.write(&format_type(target));
+                if methods.is_empty() {
+                    self.write(" {}\n");
+                    return;
+                }
+                self.write(" {\n");
+                self.indent += 1;
+                for m in methods {
+                    self.emit_top_stmt(m);
+                }
+                self.indent -= 1;
+                self.write_indent();
+                self.write("}\n");
             }
             _ => {
                 self.write_indent();
@@ -501,6 +563,9 @@ fn format_string(s: &str) -> String {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
             '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
             c => out.push(c),
         }
     }
@@ -515,6 +580,9 @@ fn format_char(c: char) -> String {
         '\\' => "\\\\".into(),
         '\'' => "\\'".into(),
         '\0' => "\\0".into(),
+        c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+            format!("\\x{:02x}", c as u32)
+        }
         c => c.to_string(),
     }
 }

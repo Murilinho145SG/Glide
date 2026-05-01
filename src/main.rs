@@ -1,7 +1,9 @@
+use glide::ast::{Program, StmtKind};
 use glide::codegen::{Codegen, EmitResult};
 use glide::fmt;
 use glide::parser::Parser;
 use glide::typer::Typer;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -122,19 +124,8 @@ fn parse_o_flag(argv: &[String]) -> Option<String> {
 }
 
 fn compile_to_c(filename: &str) -> EmitResult {
-    let source = std::fs::read_to_string(filename).unwrap_or_else(|e| {
-        eprintln!("glide: could not read {}: {}", filename, e);
-        std::process::exit(1);
-    });
-
-    let mut parser = Parser::new(&source);
-    let program = match parser.parse_program() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("{}: {}", filename, e);
-            std::process::exit(1);
-        }
-    };
+    let mut loaded = HashSet::new();
+    let program = load_program(Path::new(filename), &mut loaded);
 
     let typer = Typer::new();
     let (result, _index) = typer.check(program);
@@ -161,6 +152,95 @@ fn compile_to_c(filename: &str) -> EmitResult {
             std::process::exit(1);
         }
     }
+}
+
+fn load_program(path: &Path, loaded: &mut HashSet<PathBuf>) -> Program {
+    let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    if !loaded.insert(canon.clone()) {
+        return Vec::new();
+    }
+
+    let source = std::fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("glide: could not read {}: {}", path.display(), e);
+        std::process::exit(1);
+    });
+
+    let mut parser = Parser::new(&source);
+    let parsed = match parser.parse_program() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}: {}", path.display(), e);
+            std::process::exit(1);
+        }
+    };
+
+    let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let mut out = Vec::new();
+    for stmt in parsed {
+        if let StmtKind::Import(p) = &stmt.kind {
+            let target = resolve_import(&dir, p);
+            let sub = load_program(&target, loaded);
+            out.extend(sub);
+        } else {
+            out.push(stmt);
+        }
+    }
+    out
+}
+
+fn resolve_import(base_dir: &Path, import_path: &str) -> PathBuf {
+    let p = Path::new(import_path);
+    if p.is_absolute() {
+        return p.to_path_buf();
+    }
+    let direct = base_dir.join(p);
+    if direct.extension().is_some() {
+        return direct;
+    }
+    let with_ext = direct.with_extension("glide");
+    if with_ext.exists() {
+        return with_ext;
+    }
+    let as_dir_mod = direct.join("mod.glide");
+    if as_dir_mod.exists() {
+        return as_dir_mod;
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(root) = exe.parent().and_then(|d| d.ancestors().find(|p| p.join("std").is_dir())) {
+            let std_path = root.join(p);
+            if std_path.exists() {
+                return std_path;
+            }
+            let std_with_ext = std_path.with_extension("glide");
+            if std_with_ext.exists() {
+                return std_with_ext;
+            }
+        }
+    }
+    if let Some(repo_root) = find_repo_root_with_std() {
+        let std_path = repo_root.join(p);
+        if std_path.exists() {
+            return std_path;
+        }
+        let std_with_ext = std_path.with_extension("glide");
+        if std_with_ext.exists() {
+            return std_with_ext;
+        }
+    }
+    with_ext
+}
+
+fn find_repo_root_with_std() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    for ancestor in cwd.ancestors() {
+        if ancestor.join("std").is_dir() && ancestor.join("std").join("mod.glide").exists() {
+            return Some(ancestor.to_path_buf());
+        }
+        if ancestor.join("std").is_dir() {
+            return Some(ancestor.to_path_buf());
+        }
+    }
+    None
 }
 
 fn invoke_gcc(result: &EmitResult, output: &Path) {

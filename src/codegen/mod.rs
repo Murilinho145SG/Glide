@@ -49,13 +49,13 @@ impl Codegen {
     }
 
     pub fn emit_program(mut self, program: &Program) -> Result<EmitResult, CodegenError> {
-        for stmt in program {
-            if let StmtKind::Fn { name, params, ret_type, .. } = &stmt.kind {
-                self.fn_sigs.insert(
-                    name.clone(),
-                    FnSig { params: params.clone(), ret_type: ret_type.clone() },
-                );
-            }
+        let all_fns = collect_all_fns(program);
+
+        for (name, params, ret_type) in &all_fns {
+            self.fn_sigs.insert(
+                name.clone(),
+                FnSig { params: params.clone(), ret_type: ret_type.clone() },
+            );
         }
 
         self.uses_concurrency = program_uses_concurrency(program);
@@ -84,11 +84,9 @@ impl Codegen {
             }
         }
 
-        for stmt in program {
-            if let StmtKind::Fn { name, params, ret_type, .. } = &stmt.kind {
-                self.emit_fn_signature(name, params, ret_type.as_ref())?;
-                self.push(";\n");
-            }
+        for (name, params, ret_type) in &all_fns {
+            self.emit_fn_signature(name, params, ret_type.as_ref())?;
+            self.push(";\n");
         }
         self.push("\n");
 
@@ -142,9 +140,13 @@ impl Codegen {
         self.push("#include <stdbool.h>\n");
         self.push("#include <stddef.h>\n");
         self.push("#include <string.h>\n");
+        self.push("#include <ctype.h>\n");
+        self.push("#include <math.h>\n");
         if self.uses_concurrency {
             self.push("#include <pthread.h>\n");
         }
+        self.push("\n");
+        self.push(STDLIB_C);
         self.push("\n");
     }
 
@@ -243,6 +245,14 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::Let { .. } | StmtKind::Const { .. } => self.emit_stmt(stmt),
             StmtKind::Struct { name, fields } => self.emit_struct_def(name, fields),
+            StmtKind::Interface { .. } | StmtKind::Import(_) => Ok(()),
+            StmtKind::Impl { methods, .. } => {
+                for m in methods {
+                    self.emit_top_level(m)?;
+                    self.push("\n");
+                }
+                Ok(())
+            }
             other => Err(self.err(format!(
                 "unsupported top-level statement: {:?}",
                 std::mem::discriminant(other)
@@ -462,6 +472,12 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 self.push(";\n");
             }
             StmtKind::Spawn(e) => self.emit_spawn(e)?,
+            StmtKind::Interface { .. } | StmtKind::Impl { .. } => {
+                return Err(self.err("`interface`/`impl` only allowed at top level".into()));
+            }
+            StmtKind::Import(_) => {
+                return Err(self.err("`import` should have been resolved before codegen".into()));
+            }
         }
         Ok(())
     }
@@ -873,6 +889,8 @@ fn stmt_uses_concurrency(stmt: &Stmt) -> bool {
         StmtKind::Expr(e) => expr_uses_chan(e),
         StmtKind::Struct { fields, .. } => fields.iter().any(|f| ty_has_chan(&f.ty)),
         StmtKind::Break | StmtKind::Continue => false,
+        StmtKind::Interface { .. } | StmtKind::Import(_) => false,
+        StmtKind::Impl { methods, .. } => methods.iter().any(stmt_uses_concurrency),
     }
 }
 
@@ -940,3 +958,103 @@ fn escape_for_c_char(c: char) -> String {
         c => c.to_string(),
     }
 }
+
+type FnDecl = (String, Vec<Param>, Option<Type>);
+
+fn collect_all_fns(program: &Program) -> Vec<FnDecl> {
+    let mut out = Vec::new();
+    for stmt in program {
+        match &stmt.kind {
+            StmtKind::Fn { name, params, ret_type, .. } => {
+                out.push((name.clone(), params.clone(), ret_type.clone()));
+            }
+            StmtKind::Impl { methods, .. } => {
+                for m in methods {
+                    if let StmtKind::Fn { name, params, ret_type, .. } = &m.kind {
+                        out.push((name.clone(), params.clone(), ret_type.clone()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+const STDLIB_C: &str = r#"
+static const char* __glide_int_to_string(int n) {
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "%d", n);
+    char* out = (char*)malloc((size_t)len + 1);
+    memcpy(out, buf, (size_t)len + 1);
+    return out;
+}
+
+static double __glide_int_to_float(int n) {
+    return (double)n;
+}
+
+static int __glide_int_abs(int n) {
+    return n < 0 ? -n : n;
+}
+
+static const char* __glide_float_to_string(double f) {
+    char buf[64];
+    int len = snprintf(buf, sizeof(buf), "%g", f);
+    char* out = (char*)malloc((size_t)len + 1);
+    memcpy(out, buf, (size_t)len + 1);
+    return out;
+}
+
+static int __glide_float_to_int(double f) {
+    return (int)f;
+}
+
+static double __glide_float_floor(double f) {
+    long long i = (long long)f;
+    return (double)((f < 0.0 && f != (double)i) ? i - 1 : i);
+}
+
+static double __glide_float_ceil(double f) {
+    long long i = (long long)f;
+    return (double)((f > 0.0 && f != (double)i) ? i + 1 : i);
+}
+
+static int __glide_string_len(const char* s) {
+    return (int)strlen(s);
+}
+
+static bool __glide_string_eq(const char* a, const char* b) {
+    return strcmp(a, b) == 0;
+}
+
+static char __glide_string_at(const char* s, int i) {
+    return s[i];
+}
+
+static const char* __glide_string_concat(const char* a, const char* b) {
+    size_t la = strlen(a);
+    size_t lb = strlen(b);
+    char* out = (char*)malloc(la + lb + 1);
+    memcpy(out, a, la);
+    memcpy(out + la, b, lb);
+    out[la + lb] = 0;
+    return out;
+}
+
+static const char* __glide_bool_to_string(bool b) {
+    return b ? "true" : "false";
+}
+
+static int __glide_char_to_int(char c) {
+    return (int)c;
+}
+
+static bool __glide_char_is_digit(char c) {
+    return c >= '0' && c <= '9';
+}
+
+static bool __glide_char_is_alpha(char c) {
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+"#;

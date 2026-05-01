@@ -119,7 +119,9 @@ impl Parser {
     }
 
     fn parse_stmt_kind(&mut self) -> Result<StmtKind, ParseError> {
-        if self.at_keyword(Keyword::Let) {
+        if self.at_keyword(Keyword::Import) {
+            self.parse_import()
+        } else if self.at_keyword(Keyword::Let) {
             self.parse_let()
         } else if self.at_keyword(Keyword::Const) {
             self.parse_const()
@@ -127,6 +129,10 @@ impl Parser {
             self.parse_fn()
         } else if self.at_keyword(Keyword::Struct) {
             self.parse_struct_decl()
+        } else if self.at_keyword(Keyword::Interface) {
+            self.parse_interface()
+        } else if self.at_keyword(Keyword::Impl) {
+            self.parse_impl()
         } else if self.at_keyword(Keyword::If) {
             self.parse_if()
         } else if self.at_keyword(Keyword::While) {
@@ -151,6 +157,84 @@ impl Parser {
         } else {
             self.parse_expr_stmt()
         }
+    }
+
+    fn parse_import(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'import'
+        let path = match &self.current.token {
+            TokenKind::String(s) => s.clone(),
+            _ => return Err(self.err(format!(
+                "expected string literal after 'import' but found '{}'",
+                self.current.lexeme
+            ))),
+        };
+        self.advance();
+        self.expect_op(Operator::Semicolon)?;
+        Ok(StmtKind::Import(path))
+    }
+
+    fn parse_interface(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'interface'
+        let name = self.expect_ident()?;
+        self.expect_op(Operator::LBrace)?;
+        let mut methods = Vec::new();
+        while !self.at_op(Operator::RBrace) && !self.at_eof() {
+            if let TokenKind::Error(msg) = &self.current.token {
+                return Err(self.err(format!("lexer error: {}", msg)));
+            }
+            let pos = self.current_pos();
+            if !self.at_keyword(Keyword::Fn) {
+                return Err(self.err(format!(
+                    "expected 'fn' inside interface body but found '{}'",
+                    self.current.lexeme
+                )));
+            }
+            self.advance(); // 'fn'
+            let mname = self.expect_ident()?;
+            self.expect_op(Operator::LParen)?;
+            let params = self.parse_params()?;
+            let ret_type = if self.eat_op(Operator::Arrow) {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            self.expect_op(Operator::Semicolon)?;
+            methods.push(MethodSig { name: mname, params, ret_type, pos });
+        }
+        self.expect_op(Operator::RBrace)?;
+        Ok(StmtKind::Interface { name, methods })
+    }
+
+    fn parse_impl(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'impl'
+
+        let first_name = self.expect_ident()?;
+        let (interface, target) = if self.at_keyword(Keyword::For) {
+            self.advance();
+            let target = self.parse_type()?;
+            (Some(first_name), target)
+        } else {
+            (None, Type::Named(first_name))
+        };
+
+        self.expect_op(Operator::LBrace)?;
+        let mut methods = Vec::new();
+        while !self.at_op(Operator::RBrace) && !self.at_eof() {
+            if let TokenKind::Error(msg) = &self.current.token {
+                return Err(self.err(format!("lexer error: {}", msg)));
+            }
+            if !self.at_keyword(Keyword::Fn) {
+                return Err(self.err(format!(
+                    "expected 'fn' inside impl body but found '{}'",
+                    self.current.lexeme
+                )));
+            }
+            let pos = self.current_pos();
+            let kind = self.parse_fn()?;
+            methods.push(Stmt { kind, pos });
+        }
+        self.expect_op(Operator::RBrace)?;
+        Ok(StmtKind::Impl { interface, target, methods })
     }
 
     fn parse_struct_decl(&mut self) -> Result<StmtKind, ParseError> {

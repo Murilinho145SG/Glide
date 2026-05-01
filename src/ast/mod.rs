@@ -165,6 +165,25 @@ pub enum StmtKind {
     Return(Option<Expr>),
     Expr(Expr),
     Spawn(Expr),
+
+    Interface {
+        name: String,
+        methods: Vec<MethodSig>,
+    },
+    Impl {
+        interface: Option<String>,
+        target: Type,
+        methods: Vec<Stmt>,
+    },
+    Import(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodSig {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub ret_type: Option<Type>,
+    pub pos: Pos,
 }
 
 pub type Program = Vec<Stmt>;
