@@ -1,0 +1,20 @@
+// Programa mais simples possível.
+//
+// `fn main` é o ponto de entrada. Retorna int (exit code do processo).
+// `printf` vem da libc, igualzinho a C.
+//
+// rode: glide run examples/learn/01_hello.glide
+
+fn main() -> int {
+    let nome: string = "alelo";
+    let idade: int = 21;
+    let pi: float = 3.14;
+    let ativo: bool = true;
+
+    printf("nome  = %s\n", nome);
+    printf("idade = %d\n", idade);
+    printf("pi    = %.2f\n", pi);
+    printf("ativo = %d\n", ativo);
+
+    return 0;
+}

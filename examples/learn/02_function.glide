@@ -1,0 +1,38 @@
+// Funções e controle de fluxo.
+//
+// `fn nome(arg: tipo, ...) -> retorno { corpo }`
+// if/else, while, for. Sem parênteses na condição. Corpo sempre entre {}.
+
+fn fatorial(n: int) -> int {
+    if n <= 1 {
+        return 1;
+    }
+    return n * fatorial(n - 1);
+}
+
+fn classifica(n: int) -> string {
+    if n < 0 {
+        return "negativo";
+    } else if n == 0 {
+        return "zero";
+    }
+    return "positivo";
+}
+
+fn main() -> int {
+    printf("5! = %d\n", fatorial(5));
+
+    for let i: int = -1; i <= 1; i++ {
+        printf("%d eh %s\n", i, classifica(i));
+    }
+
+    let soma: int = 0;
+    let i: int = 1;
+    while i <= 10 {
+        soma += i;
+        i++;
+    }
+    printf("1+2+...+10 = %d\n", soma);
+
+    return 0;
+}

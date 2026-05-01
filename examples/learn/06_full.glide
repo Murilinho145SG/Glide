@@ -1,0 +1,59 @@
+// Programa completo: estatistica de alunos.
+//
+// Usa: structs, arrays, UFCS, macros, std/io, std/color.
+
+import "std/io";
+import "std/color";
+
+struct Aluno {
+    nome: string,
+    nota: int,
+}
+
+fn Aluno_print(a: *Aluno) {
+    let status: string = "reprovado".red();
+    if a->nota >= 60 {
+        status = "aprovado".green();
+    }
+    println!(a->nome, "-", a->nota, status);
+}
+
+fn media(notas: *int, n: int) -> int {
+    let total: int = 0;
+    for let i: int = 0; i < n; i++ {
+        total += notas[i];
+    }
+    return total / n;
+}
+
+fn maior(notas: *int, n: int) -> int {
+    let m: int = notas[0];
+    for let i: int = 1; i < n; i++ {
+        if notas[i] > m {
+            m = notas[i];
+        }
+    }
+    return m;
+}
+
+fn main() -> int {
+    let alunos: *Aluno = [
+        Aluno { nome: "alelo",  nota: 85 },
+        Aluno { nome: "tectec", nota: 42 },
+        Aluno { nome: "pinto",  nota: 73 },
+        Aluno { nome: "bia",    nota: 95 },
+    ];
+    let n: int = 4;
+
+    println!("turma:".bold());
+    for let i: int = 0; i < n; i++ {
+        (&alunos[i]).print();
+    }
+
+    let notas: *int = [85, 42, 73, 95];
+    println!("");
+    println!("media: ".concat(media(notas, n).to_string()));
+    println!("maior: ".concat(maior(notas, n).to_string()));
+
+    return 0;
+}
