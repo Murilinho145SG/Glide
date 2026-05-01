@@ -135,6 +135,8 @@ pub struct Pos {
 pub struct Stmt {
     pub kind: StmtKind,
     pub pos: Pos,
+    pub is_pub: bool,
+    pub source_file: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

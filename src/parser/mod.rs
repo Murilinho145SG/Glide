@@ -114,8 +114,13 @@ impl Parser {
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
         let pos = self.current_pos();
+        let mut is_pub = false;
+        if self.at_keyword(Keyword::Pub) {
+            self.advance();
+            is_pub = true;
+        }
         let kind = self.parse_stmt_kind()?;
-        Ok(Stmt { kind, pos })
+        Ok(Stmt { kind, pos, is_pub, source_file: None })
     }
 
     fn parse_stmt_kind(&mut self) -> Result<StmtKind, ParseError> {
@@ -231,7 +236,7 @@ impl Parser {
             }
             let pos = self.current_pos();
             let kind = self.parse_fn()?;
-            methods.push(Stmt { kind, pos });
+            methods.push(Stmt { kind, pos, is_pub: true, source_file: None });
         }
         self.expect_op(Operator::RBrace)?;
         Ok(StmtKind::Impl { interface, target, methods })
@@ -268,7 +273,7 @@ impl Parser {
             if self.at_keyword(Keyword::If) {
                 let pos = self.current_pos();
                 let kind = self.parse_if()?;
-                Some(vec![Stmt { kind, pos }])
+                Some(vec![Stmt { kind, pos, is_pub: false, source_file: None }])
             } else {
                 Some(self.parse_block()?)
             }
@@ -352,7 +357,7 @@ impl Parser {
             let expr = self.parse_assign_chain(lhs)?;
             StmtKind::Expr(expr)
         };
-        Ok(Some(Stmt { kind, pos }))
+        Ok(Some(Stmt { kind, pos, is_pub: false, source_file: None }))
     }
 
     fn parse_block(&mut self) -> Result<Vec<Stmt>, ParseError> {

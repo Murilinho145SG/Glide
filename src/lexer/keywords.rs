@@ -28,6 +28,7 @@ pub enum Keyword {
     Interface,
     Impl,
     Import,
+    Pub,
 }
 
 impl Keyword {
@@ -56,6 +57,7 @@ impl Keyword {
             Keyword::Interface => "interface",
             Keyword::Impl      => "impl",
             Keyword::Import    => "import",
+            Keyword::Pub       => "pub",
         }
     }
 
@@ -84,6 +86,7 @@ impl Keyword {
             "interface" => Some(Keyword::Interface),
             "impl"      => Some(Keyword::Impl),
             "import"    => Some(Keyword::Import),
+            "pub"       => Some(Keyword::Pub),
             _ => None,
         }
     }

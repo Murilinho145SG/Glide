@@ -12,7 +12,7 @@ interface Color {
     fn underline(self: string) -> string;
 }
 
-fn wrap_ansi(code: string, s: string) -> string {
+pub fn wrap_ansi(code: string, s: string) -> string {
     return code.concat(s).concat("\x1b[0m");
 }
 

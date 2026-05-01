@@ -74,6 +74,7 @@ impl Formatter {
         match &s.kind {
             StmtKind::Fn { name, params, ret_type, body } => {
                 self.write_indent();
+                if s.is_pub { self.write("pub "); }
                 self.write("fn ");
                 self.write(name);
                 self.write("(");
@@ -99,6 +100,7 @@ impl Formatter {
             }
             StmtKind::Struct { name, fields } => {
                 self.write_indent();
+                if s.is_pub { self.write("pub "); }
                 self.write("struct ");
                 self.write(name);
                 if fields.is_empty() {
@@ -293,6 +295,7 @@ impl Formatter {
                 self.write(";\n");
             }
             StmtKind::Const { name, ty, value } => {
+                if s.is_pub { self.write("pub "); }
                 self.write("const ");
                 self.write(name);
                 if let Some(t) = ty {

@@ -7,6 +7,7 @@
   "interface"
   "impl"
   "import"
+  "pub"
   "if"
   "else"
   "while"

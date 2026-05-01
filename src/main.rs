@@ -131,7 +131,7 @@ fn parse_o_flag(argv: &[String]) -> Option<String> {
 
 fn compile_to_c(filename: &str) -> EmitResult {
     let mut loaded = HashSet::new();
-    let program = load_program(Path::new(filename), &mut loaded);
+    let program = load_program_with_origin(Path::new(filename), &mut loaded, true);
 
     let typer = Typer::new();
     let (result, _index) = typer.check(program);
@@ -160,7 +160,7 @@ fn compile_to_c(filename: &str) -> EmitResult {
     }
 }
 
-fn load_program(path: &Path, loaded: &mut HashSet<PathBuf>) -> Program {
+fn load_program_with_origin(path: &Path, loaded: &mut HashSet<PathBuf>, is_root: bool) -> Program {
     let canon = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     if !loaded.insert(canon.clone()) {
         return Vec::new();
@@ -181,13 +181,15 @@ fn load_program(path: &Path, loaded: &mut HashSet<PathBuf>) -> Program {
     };
 
     let dir = path.parent().map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let source_file = if is_root { None } else { Some(canon) };
     let mut out = Vec::new();
-    for stmt in parsed {
+    for mut stmt in parsed {
         if let StmtKind::Import(p) = &stmt.kind {
             let target = resolve_import(&dir, p);
-            let sub = load_program(&target, loaded);
+            let sub = load_program_with_origin(&target, loaded, false);
             out.extend(sub);
         } else {
+            stmt.source_file = source_file.clone();
             out.push(stmt);
         }
     }

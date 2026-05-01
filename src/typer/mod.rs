@@ -25,6 +25,8 @@ struct FnSig {
     ret_type: Option<Type>,
     variadic: bool,
     decl_pos: Option<Pos>,
+    home_file: Option<std::path::PathBuf>,
+    is_pub: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +34,8 @@ struct StructInfo {
     fields: Vec<Field>,
     #[allow(dead_code)]
     decl_pos: Pos,
+    home_file: Option<std::path::PathBuf>,
+    is_pub: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -142,12 +146,16 @@ impl Typer {
             ret_type: None,
             variadic: false,
             decl_pos: None,
+            home_file: None,
+            is_pub: true,
         });
         self.fns.insert("__glide_format".into(), FnSig {
             params: vec![synth_param("fmt", string_ty())],
             ret_type: Some(string_ty()),
             variadic: true,
             decl_pos: None,
+            home_file: None,
+            is_pub: true,
         });
 
         let entries: Vec<(&str, Vec<Param>, Option<Type>, &str)> = vec![
@@ -165,6 +173,8 @@ impl Typer {
                 ret_type: ret.clone(),
                 variadic: false,
                 decl_pos: None,
+                home_file: None,
+                is_pub: true,
             });
             self.index.decls.push(DeclInfo {
                 pos: Pos::default(),
@@ -189,7 +199,12 @@ impl Typer {
         let saved_file = self.current_file.take();
         self.current_module = module;
         self.current_file = file;
-        self.pre_register(program);
+        for stmt in program {
+            if !stmt.is_pub && !is_always_visible(&stmt.kind) {
+                continue;
+            }
+            self.pre_register_stmt(stmt);
+        }
         self.current_module = saved_module;
         self.current_file = saved_file;
     }
@@ -213,6 +228,8 @@ impl Typer {
                 ret_type: ret.clone(),
                 variadic: true,
                 decl_pos: None,
+                home_file: None,
+                is_pub: true,
             });
             self.index.decls.push(DeclInfo {
                 pos: Pos::default(),
@@ -235,6 +252,8 @@ impl Typer {
                 ret_type: ret.clone(),
                 variadic: false,
                 decl_pos: None,
+                home_file: None,
+                is_pub: true,
             });
             self.index.decls.push(DeclInfo {
                 pos: Pos::default(),
@@ -261,12 +280,17 @@ impl Typer {
 
     fn pre_register_stmt(&mut self, stmt: &Stmt) {
         let module = self.current_module.clone();
-        let file = self.current_file.clone();
+        let file = stmt.source_file.clone().or_else(|| self.current_file.clone());
         match &stmt.kind {
             StmtKind::Struct { name, fields } => {
                 self.structs.insert(
                     name.clone(),
-                    StructInfo { fields: fields.clone(), decl_pos: stmt.pos },
+                    StructInfo {
+                        fields: fields.clone(),
+                        decl_pos: stmt.pos,
+                        home_file: file.clone(),
+                        is_pub: stmt.is_pub,
+                    },
                 );
                 self.index.structs.insert(name.clone(), fields.clone());
                 self.index.decls.push(DeclInfo {
@@ -298,6 +322,8 @@ impl Typer {
                     ret_type: ret_type.clone(),
                     variadic: false,
                     decl_pos: Some(stmt.pos),
+                    home_file: file.clone(),
+                    is_pub: stmt.is_pub,
                 });
                 self.index.decls.push(DeclInfo {
                     pos: stmt.pos,
@@ -320,6 +346,8 @@ impl Typer {
                             ret_type: ret_type.clone(),
                             variadic: false,
                             decl_pos: Some(m.pos),
+                            home_file: file.clone(),
+                            is_pub: true,
                         });
                         self.index.decls.push(DeclInfo {
                             pos: m.pos,
@@ -356,7 +384,9 @@ impl Typer {
 
     fn check_top(&mut self, stmt: Stmt) -> Stmt {
         let saved_pos = self.current_pos;
+        let saved_file = self.current_file.take();
         self.current_pos = stmt.pos;
+        self.current_file = stmt.source_file.clone();
         let kind = match stmt.kind {
             StmtKind::Fn { name, params, ret_type, body } => {
                 self.check_fn(name, params, ret_type, body)
@@ -375,7 +405,8 @@ impl Typer {
             }
         };
         self.current_pos = saved_pos;
-        Stmt { kind, pos: stmt.pos }
+        self.current_file = saved_file;
+        Stmt { kind, pos: stmt.pos, is_pub: stmt.is_pub, source_file: stmt.source_file }
     }
 
     fn check_impl(
@@ -388,10 +419,11 @@ impl Typer {
         let mut new_methods = Vec::with_capacity(methods.len());
         for m in methods {
             let pos = m.pos;
+            let m_pub = m.is_pub;
             if let StmtKind::Fn { name, params, ret_type, body } = m.kind {
                 let mangled = format!("{}_{}", prefix, name);
                 let new_kind = self.check_fn(mangled, params, ret_type, body);
-                new_methods.push(Stmt { kind: new_kind, pos });
+                new_methods.push(Stmt { kind: new_kind, pos, is_pub: m_pub, source_file: None });
             } else {
                 self.error("only `fn` declarations are allowed inside `impl`".into());
             }
@@ -436,9 +468,10 @@ impl Typer {
     fn check_stmt(&mut self, stmt: Stmt) -> Stmt {
         let saved_pos = self.current_pos;
         self.current_pos = stmt.pos;
+        let is_pub = stmt.is_pub;
         let kind = self.check_stmt_kind(stmt.kind);
         self.current_pos = saved_pos;
-        Stmt { kind, pos: stmt.pos }
+        Stmt { kind, pos: stmt.pos, is_pub, source_file: stmt.source_file }
     }
 
     fn check_stmt_kind(&mut self, kind: StmtKind) -> StmtKind {
@@ -941,6 +974,12 @@ impl Typer {
 
         let result_ty = if let Some(name) = &fn_name {
             if let Some(sig) = self.fns.get(name).cloned() {
+                if !sig.is_pub && sig.home_file.is_some() && sig.home_file != self.current_file {
+                    self.error(format!(
+                        "`{}` is private to its module",
+                        name
+                    ));
+                }
                 if !sig.variadic {
                     if sig.params.len() != args_new.len() {
                         self.error(format!(
@@ -1594,6 +1633,10 @@ fn binop_str(op: &BinaryOp) -> &'static str {
 
 fn synth_param(name: &str, ty: Type) -> Param {
     Param { name: name.into(), ty, pos: Pos::default() }
+}
+
+fn is_always_visible(kind: &StmtKind) -> bool {
+    matches!(kind, StmtKind::Interface { .. } | StmtKind::Impl { .. })
 }
 
 fn format_spec_for(ty: &Type, arg: Expr, pos: Pos) -> (&'static str, Expr) {

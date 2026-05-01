@@ -1,12 +1,12 @@
-fn print(s: string) {
+pub fn print(s: string) {
     printf("%s", s);
 }
 
-fn println(s: string) {
+pub fn println(s: string) {
     printf("%s\n", s);
 }
 
-fn int_ptr_to_string(arr: *int, n: int) -> string {
+pub fn int_ptr_to_string(arr: *int, n: int) -> string {
     let result: string = "[";
     for let i: int = 0; i < n; i++ {
         if i > 0 {
@@ -17,7 +17,7 @@ fn int_ptr_to_string(arr: *int, n: int) -> string {
     return result.concat("]");
 }
 
-fn string_ptr_to_string(arr: *string, n: int) -> string {
+pub fn string_ptr_to_string(arr: *string, n: int) -> string {
     let result: string = "[";
     for let i: int = 0; i < n; i++ {
         if i > 0 {
@@ -28,7 +28,7 @@ fn string_ptr_to_string(arr: *string, n: int) -> string {
     return result.concat("]");
 }
 
-fn float_ptr_to_string(arr: *float, n: int) -> string {
+pub fn float_ptr_to_string(arr: *float, n: int) -> string {
     let result: string = "[";
     for let i: int = 0; i < n; i++ {
         if i > 0 {

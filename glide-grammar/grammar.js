@@ -39,6 +39,8 @@ module.exports = grammar({
       $.const_stmt,
     ),
 
+    visibility: _ => 'pub',
+
     import_stmt: $ => seq(
       'import',
       field('path', $.string_literal),
@@ -48,6 +50,7 @@ module.exports = grammar({
     // ---- declarations ----
 
     fn_decl: $ => seq(
+      optional($.visibility),
       'fn',
       field('name', $.identifier),
       field('params', $.param_list),
@@ -72,6 +75,7 @@ module.exports = grammar({
     ),
 
     struct_decl: $ => seq(
+      optional($.visibility),
       'struct',
       field('name', $.identifier),
       '{',
@@ -141,6 +145,7 @@ module.exports = grammar({
     ),
 
     const_stmt: $ => seq(
+      optional($.visibility),
       'const',
       field('name', $.identifier),
       optional(seq(':', field('type', $._type))),
