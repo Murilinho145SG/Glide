@@ -233,6 +233,10 @@ pub enum StmtKind {
         ret_type: Option<Type>,
         variadic: bool,
     },
+    ExternType {
+        name: String,
+        c_repr: Option<String>,
+    },
     CInclude(String),
     CLink(String),
 }

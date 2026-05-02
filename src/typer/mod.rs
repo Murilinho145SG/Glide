@@ -439,6 +439,28 @@ impl Typer {
                     is_method: false,
                 });
             }
+            StmtKind::ExternType { name, .. } => {
+                self.structs.insert(
+                    name.clone(),
+                    StructInfo {
+                        fields: Vec::new(),
+                        decl_pos: stmt.pos,
+                        home_file: file.clone(),
+                        is_pub: true,
+                    },
+                );
+                self.index.structs.insert(name.clone(), Vec::new());
+                self.index.decls.push(DeclInfo {
+                    pos: stmt.pos,
+                    name: name.clone(),
+                    kind: DeclKind::Struct,
+                    ty: None,
+                    detail: format!("extern type {}", name),
+                    module: module.clone(),
+                    file: file.clone(),
+                    is_method: false,
+                });
+            }
             _ => {}
         }
     }
@@ -528,6 +550,9 @@ impl Typer {
             StmtKind::TypeAlias { name, ty } => StmtKind::TypeAlias { name, ty },
             StmtKind::ExternFn { name, params, ret_type, variadic } => {
                 StmtKind::ExternFn { name, params, ret_type, variadic }
+            }
+            StmtKind::ExternType { name, c_repr } => {
+                StmtKind::ExternType { name, c_repr }
             }
             StmtKind::CInclude(p) => StmtKind::CInclude(p),
             StmtKind::CLink(p) => StmtKind::CLink(p),
@@ -759,6 +784,10 @@ impl Typer {
             }
             StmtKind::ExternFn { .. } => {
                 self.error("`extern fn` only allowed at top level".into());
+                StmtKind::Break
+            }
+            StmtKind::ExternType { .. } => {
+                self.error("`extern type` only allowed at top level".into());
                 StmtKind::Break
             }
             StmtKind::CInclude(_) | StmtKind::CLink(_) => {
@@ -2728,7 +2757,7 @@ fn is_copy_type(t: &Type) -> bool {
 fn is_always_visible(kind: &StmtKind) -> bool {
     matches!(
         kind,
-        StmtKind::Impl { .. } | StmtKind::ExternFn { .. }
+        StmtKind::Impl { .. } | StmtKind::ExternFn { .. } | StmtKind::ExternType { .. }
             | StmtKind::CInclude(_) | StmtKind::CLink(_)
     )
 }

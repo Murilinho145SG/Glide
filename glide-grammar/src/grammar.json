@@ -27,6 +27,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "extern_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "c_include"
         },
         {
@@ -454,6 +458,56 @@
                   "content": {
                     "type": "SYMBOL",
                     "name": "_type"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ";"
+        }
+      ]
+    },
+    "extern_type": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "extern"
+        },
+        {
+          "type": "STRING",
+          "value": "type"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "="
+                },
+                {
+                  "type": "FIELD",
+                  "name": "c_repr",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "string_literal"
                   }
                 }
               ]

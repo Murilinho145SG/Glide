@@ -110,6 +110,20 @@ impl Codegen {
         }
         if !extra_includes.is_empty() { self.push("\n"); }
 
+        let mut any_extern_type = false;
+        for stmt in program {
+            if let StmtKind::ExternType { name, c_repr } = &stmt.kind {
+                match c_repr {
+                    Some(repr) => self.push(&format!("typedef {} {};\n", repr, name)),
+                    None => self.push(&format!(
+                        "typedef struct __glide_opaque_{} {};\n", name, name
+                    )),
+                }
+                any_extern_type = true;
+            }
+        }
+        if any_extern_type { self.push("\n"); }
+
         for stmt in program {
             if let StmtKind::Enum { name, variants } = &stmt.kind {
                 self.known_enums.insert(name.clone());
@@ -357,7 +371,7 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::Let { .. } | StmtKind::Const { .. } => self.emit_stmt(stmt),
             StmtKind::Struct { name, fields } => self.emit_struct_def(name, fields),
-            StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } | StmtKind::TypeAlias { .. } | StmtKind::ExternFn { .. } | StmtKind::CInclude(_) | StmtKind::CLink(_) => Ok(()),
+            StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } | StmtKind::TypeAlias { .. } | StmtKind::ExternFn { .. } | StmtKind::ExternType { .. } | StmtKind::CInclude(_) | StmtKind::CLink(_) => Ok(()),
             StmtKind::Impl { methods, .. } => {
                 for m in methods {
                     self.emit_top_level(m)?;
@@ -704,6 +718,9 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::CInclude(_) | StmtKind::CLink(_) => {
                 return Err(self.err("`c_include` / `c_link` only allowed at top level".into()));
+            }
+            StmtKind::ExternType { .. } => {
+                return Err(self.err("`extern type` only allowed at top level".into()));
             }
         }
         Ok(())
@@ -1418,6 +1435,7 @@ fn stmt_uses_concurrency(stmt: &Stmt) -> bool {
                 || ret_type.as_ref().map_or(false, ty_has_chan)
         }
         StmtKind::CInclude(_) | StmtKind::CLink(_) => false,
+        StmtKind::ExternType { .. } => false,
     }
 }
 

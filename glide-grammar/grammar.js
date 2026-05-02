@@ -33,6 +33,7 @@ module.exports = grammar({
       $.import_stmt,
       $.fn_decl,
       $.extern_fn,
+      $.extern_type,
       $.c_include,
       $.c_link,
       $.struct_decl,
@@ -107,6 +108,14 @@ module.exports = grammar({
       field('name', $.identifier),
       field('params', $.extern_param_list),
       optional(seq('->', field('return_type', $._type))),
+      ';',
+    ),
+
+    extern_type: $ => seq(
+      'extern',
+      'type',
+      field('name', $.identifier),
+      optional(seq('=', field('c_repr', $.string_literal))),
       ';',
     ),
 

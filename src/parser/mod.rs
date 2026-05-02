@@ -682,9 +682,12 @@ impl Parser {
         if let TokenKind::String(_) = &self.current.token {
             self.advance();
         }
+        if self.at_keyword(Keyword::Type) {
+            return self.parse_extern_type();
+        }
         if !self.at_keyword(Keyword::Fn) {
             return Err(self.err(format!(
-                "expected `fn` after `extern` but found '{}'",
+                "expected `fn` or `type` after `extern` but found '{}'",
                 self.current.lexeme
             )));
         }
@@ -699,6 +702,28 @@ impl Parser {
         };
         self.expect_op(Operator::Semicolon)?;
         Ok(StmtKind::ExternFn { name, params, ret_type, variadic })
+    }
+
+    fn parse_extern_type(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'type'
+        let name = self.expect_ident()?;
+        let c_repr = if self.eat_op(Operator::Assignment) {
+            match &self.current.token {
+                TokenKind::String(s) => {
+                    let s = s.clone();
+                    self.advance();
+                    Some(s)
+                }
+                _ => return Err(self.err(format!(
+                    "expected string literal after `=` in extern type but found '{}'",
+                    self.current.lexeme
+                ))),
+            }
+        } else {
+            None
+        };
+        self.expect_op(Operator::Semicolon)?;
+        Ok(StmtKind::ExternType { name, c_repr })
     }
 
     fn parse_c_include(&mut self) -> Result<StmtKind, ParseError> {

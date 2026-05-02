@@ -51,6 +51,7 @@
 ; Function declaration & calls
 (fn_decl   name: (identifier) @function)
 (extern_fn name: (identifier) @function)
+(extern_type name: (identifier) @type)
 (call_expr callee: (identifier_expr (identifier) @function.call))
 (macro_call name: (identifier) @function.macro
             "!" @function.macro)

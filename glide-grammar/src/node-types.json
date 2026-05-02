@@ -1642,6 +1642,32 @@
     }
   },
   {
+    "type": "extern_type",
+    "named": true,
+    "fields": {
+      "c_repr": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "string_literal",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "fn_decl",
     "named": true,
     "fields": {
@@ -3839,6 +3865,10 @@
         },
         {
           "type": "extern_fn",
+          "named": true
+        },
+        {
+          "type": "extern_type",
           "named": true
         },
         {
