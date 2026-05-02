@@ -36,6 +36,7 @@ pub struct Codegen {
     match_count: usize,
     known_enums: std::collections::HashSet<String>,
     enum_infos: HashMap<String, Vec<(String, Vec<Type>)>>,
+    defer_stack: Vec<Vec<Expr>>,
 }
 
 impl Codegen {
@@ -51,6 +52,7 @@ impl Codegen {
             match_count: 0,
             known_enums: std::collections::HashSet::new(),
             enum_infos: HashMap::new(),
+            defer_stack: Vec::new(),
         }
     }
 
@@ -354,6 +356,17 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
         Ok(())
     }
 
+    fn emit_deferred_in_reverse(&mut self) -> Result<(), CodegenError> {
+        if let Some(top) = self.defer_stack.last().cloned() {
+            for expr in top.iter().rev() {
+                self.write_indent();
+                self.emit_expr(expr)?;
+                self.push(";\n");
+            }
+        }
+        Ok(())
+    }
+
     fn emit_fn_def(
         &mut self,
         name: &str,
@@ -381,9 +394,12 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             self.write_indent();
             self.push("__glide_args_init(__glide_main_argc, __glide_main_argv);\n");
         }
+        self.defer_stack.push(Vec::new());
         for s in body {
             self.emit_stmt(s)?;
         }
+        self.emit_deferred_in_reverse()?;
+        self.defer_stack.pop();
         if is_main && ret_type.is_none() {
             self.write_indent();
             self.push("return 0;\n");
@@ -519,13 +535,37 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 self.push("continue;\n");
             }
             StmtKind::Return(value) => {
-                self.write_indent();
-                self.push("return");
                 if let Some(v) = value {
-                    self.push(" ");
+                    let tmp = format!("__glide_ret_{}", self.match_count + 1);
+                    self.match_count += 1;
+                    self.write_indent();
+                    self.push(&format!("__typeof__("));
                     self.emit_expr(v)?;
+                    self.push(&format!(") {} = ", tmp));
+                    self.emit_expr(v)?;
+                    self.push(";\n");
+                    let stack: Vec<Vec<Expr>> = self.defer_stack.clone();
+                    for level in stack.iter().rev() {
+                        for e in level.iter().rev() {
+                            self.write_indent();
+                            self.emit_expr(e)?;
+                            self.push(";\n");
+                        }
+                    }
+                    self.write_indent();
+                    self.push(&format!("return {};\n", tmp));
+                } else {
+                    let stack: Vec<Vec<Expr>> = self.defer_stack.clone();
+                    for level in stack.iter().rev() {
+                        for e in level.iter().rev() {
+                            self.write_indent();
+                            self.emit_expr(e)?;
+                            self.push(";\n");
+                        }
+                    }
+                    self.write_indent();
+                    self.push("return;\n");
                 }
-                self.push(";\n");
             }
             StmtKind::Expr(e) => {
                 self.write_indent();
@@ -533,6 +573,11 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 self.push(";\n");
             }
             StmtKind::Spawn(e) => self.emit_spawn(e)?,
+            StmtKind::Defer(e) => {
+                if let Some(top) = self.defer_stack.last_mut() {
+                    top.push(e.clone());
+                }
+            }
             StmtKind::Interface { .. } | StmtKind::Impl { .. } => {
                 return Err(self.err("`interface`/`impl` only allowed at top level".into()));
             }
@@ -1179,6 +1224,7 @@ fn stmt_uses_concurrency(stmt: &Stmt) -> bool {
             expr_uses_chan(scrutinee)
                 || arms.iter().any(|a| a.body.iter().any(stmt_uses_concurrency))
         }
+        StmtKind::Defer(e) => expr_uses_chan(e),
     }
 }
 

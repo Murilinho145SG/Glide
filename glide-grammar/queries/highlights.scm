@@ -10,6 +10,7 @@
   "pub"
   "enum"
   "match"
+  "defer"
   "if"
   "else"
   "while"

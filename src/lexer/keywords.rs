@@ -31,6 +31,7 @@ pub enum Keyword {
     Pub,
     Enum,
     Match,
+    Defer,
 }
 
 impl Keyword {
@@ -62,6 +63,7 @@ impl Keyword {
             Keyword::Pub       => "pub",
             Keyword::Enum      => "enum",
             Keyword::Match     => "match",
+            Keyword::Defer     => "defer",
         }
     }
 
@@ -93,6 +95,7 @@ impl Keyword {
             "pub"       => Some(Keyword::Pub),
             "enum"      => Some(Keyword::Enum),
             "match"     => Some(Keyword::Match),
+            "defer"     => Some(Keyword::Defer),
             _ => None,
         }
     }

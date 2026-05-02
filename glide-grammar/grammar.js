@@ -158,6 +158,7 @@ module.exports = grammar({
       $.match_stmt,
       $.return_stmt,
       $.spawn_stmt,
+      $.defer_stmt,
       $.break_stmt,
       $.continue_stmt,
       $.block,
@@ -263,6 +264,7 @@ module.exports = grammar({
 
     return_stmt: $ => seq('return', optional($._expression), ';'),
     spawn_stmt:  $ => seq('spawn', $._expression, ';'),
+    defer_stmt:  $ => seq('defer', $._expression, ';'),
     break_stmt:  $ => seq('break', ';'),
     continue_stmt: $ => seq('continue', ';'),
 

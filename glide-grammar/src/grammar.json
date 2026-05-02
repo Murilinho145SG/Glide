@@ -686,6 +686,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "defer_stmt"
+        },
+        {
+          "type": "SYMBOL",
           "name": "break_stmt"
         },
         {
@@ -1343,6 +1347,23 @@
         {
           "type": "STRING",
           "value": "spawn"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_expression"
+        },
+        {
+          "type": "STRING",
+          "value": ";"
+        }
+      ]
+    },
+    "defer_stmt": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "defer"
         },
         {
           "type": "SYMBOL",

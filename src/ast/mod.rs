@@ -212,6 +212,7 @@ pub enum StmtKind {
         scrutinee: Expr,
         arms: Vec<MatchArm>,
     },
+    Defer(Expr),
 }
 
 #[derive(Debug, Clone, PartialEq)]

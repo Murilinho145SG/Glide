@@ -158,6 +158,8 @@ impl Parser {
             Ok(StmtKind::Continue)
         } else if self.at_keyword(Keyword::Spawn) {
             self.parse_spawn()
+        } else if self.at_keyword(Keyword::Defer) {
+            self.parse_defer()
         } else if self.at_keyword(Keyword::Return) {
             self.parse_return()
         } else if self.at_op(Operator::LBrace) {
@@ -622,6 +624,13 @@ impl Parser {
         let value = self.parse_expr(0)?;
         self.expect_op(Operator::Semicolon)?;
         Ok(StmtKind::Const { name, ty, value })
+    }
+
+    fn parse_defer(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'defer'
+        let expr = self.parse_expr(0)?;
+        self.expect_op(Operator::Semicolon)?;
+        Ok(StmtKind::Defer(expr))
     }
 
     fn parse_spawn(&mut self) -> Result<StmtKind, ParseError> {

@@ -596,6 +596,11 @@ impl Typer {
                 StmtKind::Spawn(e_new)
             }
 
+            StmtKind::Defer(e) => {
+                let (e_new, _) = self.check_expr(e);
+                StmtKind::Defer(e_new)
+            }
+
             StmtKind::Break => StmtKind::Break,
             StmtKind::Continue => StmtKind::Continue,
 

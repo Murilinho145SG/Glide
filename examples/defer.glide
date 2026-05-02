@@ -1,0 +1,22 @@
+fn process() -> int {
+    let p: *int = malloc(sizeof(int)) as *int;
+    defer free(p as *void);
+    defer printf("cleanup 1 (runs second)\n");
+    defer printf("cleanup 2 (runs first)\n");
+
+    *p = 42;
+    printf("p = %d\n", *p);
+
+    if *p > 0 {
+        printf("returning early\n");
+        return *p;
+    }
+
+    return 0;
+}
+
+fn main() -> int {
+    let v: int = process();
+    printf("got %d\n", v);
+    return 0;
+}

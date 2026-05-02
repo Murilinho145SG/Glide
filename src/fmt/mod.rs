@@ -412,6 +412,11 @@ impl Formatter {
                 self.emit_expr(e, PREC_NONE);
                 self.write(";\n");
             }
+            StmtKind::Defer(e) => {
+                self.write("defer ");
+                self.emit_expr(e, PREC_NONE);
+                self.write(";\n");
+            }
             _ => {}
         }
     }
