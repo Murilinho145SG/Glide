@@ -127,6 +127,8 @@ pub const ST_CONST: int = 11;
 pub const ST_FOR: int = 12;
 pub const ST_DEFER: int = 13;
 pub const ST_IMPORT: int = 14;
+pub const ST_ENUM: int = 15;
+pub const ST_MATCH: int = 16;
 
 pub struct Param {
     name: string,
@@ -136,6 +138,17 @@ pub struct Param {
 pub struct Field {
     name: string,
     ty: *Type,
+}
+
+pub struct EnumVariant {
+    name: string,
+    fields: *Vector<Type>,
+}
+
+pub struct MatchArm {
+    variant: string,           // variant name; "_" = wildcard
+    bindings: *Vector<string>, // names to bind for payload
+    body: *Vector<Stmt>,
 }
 
 pub struct Stmt {
@@ -175,6 +188,13 @@ pub struct Stmt {
 
     // Import
     import_path: string,
+
+    // Enum
+    enum_variants: *Vector<EnumVariant>,
+
+    // Match
+    scrutinee: *Expr,
+    arms: *Vector<MatchArm>,
 }
 
 // ---- Constructors --------------------------------------------------------
@@ -380,6 +400,26 @@ pub fn stmt_import(path: string, line: int, col: int) -> *Stmt {
     s.line = line;
     s.column = col;
     s.import_path = path;
+    return s;
+}
+
+pub fn stmt_enum(name: string, variants: *Vector<EnumVariant>, line: int, col: int) -> *Stmt {
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+    s.kind = ST_ENUM;
+    s.line = line;
+    s.column = col;
+    s.name = name;
+    s.enum_variants = variants;
+    return s;
+}
+
+pub fn stmt_match(scrutinee: *Expr, arms: *Vector<MatchArm>, line: int, col: int) -> *Stmt {
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+    s.kind = ST_MATCH;
+    s.line = line;
+    s.column = col;
+    s.scrutinee = scrutinee;
+    s.arms = arms;
     return s;
 }
 

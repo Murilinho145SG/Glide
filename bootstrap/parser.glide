@@ -99,6 +99,7 @@ pub fn parse_top_stmt(p: *Parser) -> *Stmt {
     if p.at_kw("let") { let s: *Stmt = parse_let(p); if s != null { s.is_pub = is_pub; } return s; }
     if p.at_kw("const") { let s: *Stmt = parse_const(p); if s != null { s.is_pub = is_pub; } return s; }
     if p.at_kw("struct") { let s: *Stmt = parse_struct(p); if s != null { s.is_pub = is_pub; } return s; }
+    if p.at_kw("enum") { let s: *Stmt = parse_enum(p); if s != null { s.is_pub = is_pub; } return s; }
     if p.at_kw("impl") { return parse_impl(p); }
     if p.at_kw("import") { return parse_import(p); }
 
@@ -179,6 +180,33 @@ fn parse_struct(p: *Parser) -> *Stmt {
     return s;
 }
 
+fn parse_enum(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'enum'
+    let name: string = p.expect_ident();
+    if p.at_op("<") { skip_type_params(p); }
+    p.expect_op("{");
+    let variants: *Vector<EnumVariant> = Vector::new();
+    while !p.at_op("}") && !p.at_eof() {
+        let vname: string = p.expect_ident();
+        let fields: *Vector<Type> = Vector::new();
+        if p.eat_op("(") {
+            while !p.at_op(")") && !p.at_eof() {
+                let t: *Type = parse_type(p);
+                if t != null { fields.push(*t); }
+                if !p.eat_op(",") { break; }
+            }
+            p.expect_op(")");
+        }
+        let v: EnumVariant = EnumVariant { name: vname, fields: fields };
+        variants.push(v);
+        if !p.eat_op(",") { break; }
+    }
+    p.expect_op("}");
+    return stmt_enum(name, variants, line, col);
+}
+
 fn parse_impl(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
@@ -241,6 +269,7 @@ fn parse_stmt(p: *Parser) -> *Stmt {
     if p.at_kw("if") { return parse_if(p); }
     if p.at_kw("while") { return parse_while(p); }
     if p.at_kw("for") { return parse_for(p); }
+    if p.at_kw("match") { return parse_match(p); }
     if p.at_kw("break") {
         let line: int = p.current.line;
         let col: int = p.current.column;
@@ -320,6 +349,52 @@ fn parse_return(p: *Parser) -> *Stmt {
     if !p.at_op(";") { value = parse_expr(p, 0); }
     p.expect_op(";");
     return stmt_return(value, line, col);
+}
+
+fn parse_match(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'match'
+    let saved: bool = p.no_struct_lit;
+    p.no_struct_lit = true;
+    let scrut: *Expr = parse_expr(p, 0);
+    p.no_struct_lit = saved;
+    p.expect_op("{");
+    let arms: *Vector<MatchArm> = Vector::new();
+    while !p.at_op("}") && !p.at_eof() {
+        let mut variant: string = "_";
+        let bindings: *Vector<string> = Vector::new();
+        if p.current.kind == TOK_IDENT {
+            let first: string = p.current.lexeme;
+            p.advance();
+            if p.eat_op("::") {
+                variant = p.expect_ident();
+            } else {
+                variant = first;
+            }
+            if p.eat_op("(") {
+                while !p.at_op(")") && !p.at_eof() {
+                    bindings.push(p.expect_ident());
+                    if !p.eat_op(",") { break; }
+                }
+                p.expect_op(")");
+            }
+        }
+        p.expect_op("=>");
+        let body: *Vector<Stmt> = Vector::new();
+        if p.at_op("{") {
+            let blk: *Vector<Stmt> = parse_block(p);
+            for let i: int = 0; i < blk.len(); i++ { body.push(blk.get(i)); }
+        } else {
+            let e: *Expr = parse_expr(p, 0);
+            let ass: *Expr = parse_maybe_assign(p, e);
+            body.push(*stmt_expr(ass));
+        }
+        arms.push(MatchArm { variant: variant, bindings: bindings, body: body });
+        p.eat_op(",");
+    }
+    p.expect_op("}");
+    return stmt_match(scrut, arms, line, col);
 }
 
 fn parse_if(p: *Parser) -> *Stmt {
