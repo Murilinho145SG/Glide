@@ -2,10 +2,11 @@ use crate::ast::Program;
 use crate::parser::Parser;
 
 const VECTOR_SRC: &str = include_str!("vector.glide");
+const HASHMAP_SRC: &str = include_str!("hashmap.glide");
 
 pub fn prelude() -> Program {
     let mut out = Vec::new();
-    for (name, src) in [("vector", VECTOR_SRC)] {
+    for (name, src) in [("vector", VECTOR_SRC), ("hashmap", HASHMAP_SRC)] {
         let mut parser = Parser::new(src);
         match parser.parse_program() {
             Ok(p) => out.extend(p),

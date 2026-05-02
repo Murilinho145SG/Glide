@@ -1,0 +1,148 @@
+// HashMap<V>: open-addressing hash map with string keys.
+// Linear probing, ~75% load factor, power-of-two capacities.
+
+struct HashMap<V> {
+    keys: *string,
+    values: *V,
+    occupied: *bool,
+    len: int,
+    cap: int,
+}
+
+impl<V> HashMap<V> {
+    fn new() -> *HashMap<V> {
+        let m: *HashMap<V> = malloc(sizeof(HashMap<V>)) as *HashMap<V>;
+        m.keys = null;
+        m.values = null;
+        m.occupied = null;
+        m.len = 0;
+        m.cap = 0;
+        return m;
+    }
+
+    fn len(self: *HashMap<V>) -> int { return self.len; }
+
+    fn cap(self: *HashMap<V>) -> int { return self.cap; }
+
+    // Internal: hash a string (Java-ish, multiply-add).
+    fn hash_key(self: *HashMap<V>, k: string) -> int {
+        let mut h: int = 0;
+        let n: int = k.len();
+        for let i: int = 0; i < n; i++ {
+            h = h * 31 + k.at(i).to_int();
+        }
+        if h < 0 { h = -h; }
+        return h;
+    }
+
+    // Internal: find the slot for `k`. Returns -1 if cap == 0.
+    // If found: index of existing slot. Otherwise: index of first empty slot.
+    fn slot(self: *HashMap<V>, k: string) -> int {
+        if self.cap == 0 { return -1; }
+        let mask: int = self.cap - 1;
+        let mut i: int = self.hash_key(k) & mask;
+        while self.occupied[i] {
+            if self.keys[i].eq(k) { return i; }
+            i = (i + 1) & mask;
+        }
+        return i;
+    }
+
+    fn contains(self: *HashMap<V>, k: string) -> bool {
+        let i: int = self.slot(k);
+        if i < 0 { return false; }
+        return self.occupied[i] && self.keys[i].eq(k);
+    }
+
+    fn get(self: *HashMap<V>, k: string) -> V {
+        let i: int = self.slot(k);
+        return self.values[i];
+    }
+
+    // Resize to a new power-of-two capacity. Rehashes all entries.
+    fn resize(self: *HashMap<V>, new_cap: int) {
+        let old_keys: *string = self.keys;
+        let old_values: *V = self.values;
+        let old_occupied: *bool = self.occupied;
+        let old_cap: int = self.cap;
+
+        self.keys = malloc(new_cap * sizeof(string)) as *string;
+        self.values = malloc(new_cap * sizeof(V)) as *V;
+        self.occupied = malloc(new_cap * sizeof(bool)) as *bool;
+        self.cap = new_cap;
+        self.len = 0;
+        for let i: int = 0; i < new_cap; i++ {
+            self.occupied[i] = false;
+        }
+
+        for let i: int = 0; i < old_cap; i++ {
+            if old_occupied[i] {
+                self.insert(old_keys[i], old_values[i]);
+            }
+        }
+
+        if old_cap > 0 {
+            free(old_keys as *void);
+            free(old_values as *void);
+            free(old_occupied as *void);
+        }
+    }
+
+    fn insert(self: *HashMap<V>, k: string, v: V) {
+        // Grow when load >= 3/4
+        if self.cap == 0 {
+            self.resize(8);
+        } else {
+            if self.len * 4 >= self.cap * 3 {
+                self.resize(self.cap * 2);
+            }
+        }
+
+        let i: int = self.slot(k);
+        if !self.occupied[i] {
+            self.occupied[i] = true;
+            self.len = self.len + 1;
+        }
+        self.keys[i] = k;
+        self.values[i] = v;
+    }
+
+    fn remove(self: *HashMap<V>, k: string) -> bool {
+        let i: int = self.slot(k);
+        if i < 0 { return false; }
+        if !self.occupied[i] { return false; }
+        if !self.keys[i].eq(k) { return false; }
+
+        // Linear-probe deletion: re-insert items in the chain after `i` until
+        // we hit an empty slot, to keep probe chains intact.
+        self.occupied[i] = false;
+        self.len = self.len - 1;
+        let mask: int = self.cap - 1;
+        let mut j: int = (i + 1) & mask;
+        while self.occupied[j] {
+            let rk: string = self.keys[j];
+            let rv: V = self.values[j];
+            self.occupied[j] = false;
+            self.len = self.len - 1;
+            self.insert(rk, rv);
+            j = (j + 1) & mask;
+        }
+        return true;
+    }
+
+    fn clear(self: *HashMap<V>) {
+        for let i: int = 0; i < self.cap; i++ {
+            self.occupied[i] = false;
+        }
+        self.len = 0;
+    }
+
+    fn free(self: *HashMap<V>) {
+        if self.cap > 0 {
+            free(self.keys as *void);
+            free(self.values as *void);
+            free(self.occupied as *void);
+        }
+        free(self as *void);
+    }
+}
