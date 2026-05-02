@@ -2,6 +2,7 @@
 [
   "fn"
   "let"
+  "mut"
   "const"
   "struct"
   "interface"
@@ -23,9 +24,16 @@
   "as"
   "sizeof"
   "new"
-  "mut"
+  "move"
   "type"
+  "extern"
+  "c_include"
+  "c_link"
 ] @keyword
+
+; Built-in / known primitive types
+((identifier) @type.builtin
+ (#match? @type.builtin "^(int|uint|long|ulong|i8|i16|i32|i64|u8|u16|u32|u64|usize|isize|f32|f64|float|bool|char|string|void)$"))
 
 ; Constants
 (bool_literal) @boolean
@@ -45,13 +53,29 @@
 (named_type (identifier) @type)
 (chan_type)
 "chan" @type.builtin
-"*" @operator
+
+; Operators / punctuation (generic — overridden by more specific captures below)
+[
+  "+" "-" "/" "%" "*"
+  "==" "!=" "<" "<=" ">" ">="
+  "&&" "||"
+  "&" "|" "^" "~" "<<" ">>"
+  "=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>="
+  "++" "--"
+  "->"
+] @operator
+
+[ "{" "}" "(" ")" "[" "]" ] @punctuation.bracket
+[ ";" "," ":" "." "::" ] @punctuation.delimiter
+
+; `!` as unary not (when it appears as a unary op)
+(unary_expr "!" @operator)
 
 ; Function declaration & calls
 (fn_decl   name: (identifier) @function)
+(extern_fn name: (identifier) @function)
+(extern_type name: (identifier) @type)
 (call_expr callee: (identifier_expr (identifier) @function.call))
-(macro_call name: (identifier) @function.macro
-            "!" @function.macro)
 
 ; Struct / interface / impl
 (struct_decl name: (identifier) @type)
@@ -75,19 +99,10 @@
 (let_stmt name: (identifier) @variable)
 (const_stmt name: (identifier) @constant)
 
-; Operators / punctuation
-[
-  "+" "-" "/" "%"
-  "==" "!=" "<" "<=" ">" ">="
-  "&&" "||" "!"
-  "&" "|" "^" "~" "<<" ">>"
-  "=" "+=" "-=" "*=" "/=" "%=" "&=" "|=" "^=" "<<=" ">>="
-  "++" "--"
-  "->"
-] @operator
-
-[ "{" "}" "(" ")" "[" "]" ] @punctuation.bracket
-[ ";" "," ":" "." "::" ] @punctuation.delimiter
-
 (path_expr type: (identifier) @type)
 (path_expr member: (identifier) @function)
+
+; Macro calls (placed last so `!` and macro name override the generic
+; operator/identifier captures above)
+(macro_call name: (identifier) @function.macro
+            "!" @function.macro)
