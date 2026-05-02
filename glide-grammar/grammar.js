@@ -27,6 +27,7 @@ module.exports = grammar({
   ],
 
   conflicts: $ => [
+    [$.struct_literal, $.identifier_expr],
   ],
 
   rules: {
@@ -471,6 +472,7 @@ module.exports = grammar({
       $.struct_literal,
       $.new_expr,
       $.sizeof_expr,
+      $.fn_expr,
       $.identifier_expr,
       $.number_literal,
       $.float_literal,
@@ -478,6 +480,14 @@ module.exports = grammar({
       $.char_literal,
       $.bool_literal,
       $.null_literal,
+    ),
+
+    fn_expr: $ => seq(
+      optional('move'),
+      'fn',
+      field('params', $.param_list),
+      optional(seq('->', field('return_type', $._type))),
+      field('body', $.block),
     ),
 
     path_expr: $ => prec(20, seq(
@@ -510,16 +520,16 @@ module.exports = grammar({
 
     parenthesized: $ => seq('(', $._expression, ')'),
 
-    struct_literal: $ => prec(2, seq(
+    // No `prec` here so identifier_expr + block (e.g. `if abc { ... }`)
+    // wins via conflict resolution when struct_literal can't parse the body.
+    struct_literal: $ => seq(
       field('type', $.identifier),
       '{',
-      optional(seq(
-        $.struct_lit_field,
-        repeat(seq(',', $.struct_lit_field)),
-        optional(','),
-      )),
+      $.struct_lit_field,
+      repeat(seq(',', $.struct_lit_field)),
+      optional(','),
       '}',
-    )),
+    ),
 
     struct_lit_field: $ => seq(
       field('name', $.identifier),
