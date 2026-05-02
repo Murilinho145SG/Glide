@@ -1,0 +1,14 @@
+struct Box<T> {
+    val: T,
+}
+
+impl<T> Box<T> {
+    fn make(v: T) -> Box<T> {
+        return Box { val: v };
+    }
+}
+
+fn main() -> int {
+    let b: Box<int> = Box::make(77);
+    return b.val;
+}
