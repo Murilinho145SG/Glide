@@ -896,6 +896,10 @@ pub fn emit_expr(g: *CG, e: *Expr) {
         print!(")");
         return;
     }
+    if e.kind == EX_SIZEOF {
+        print!("sizeof(", type_to_c(e.cast_to), ")");
+        return;
+    }
     if e.kind == EX_PATH {
         print!(e.str_val.concat("_").concat(e.field));
         return;

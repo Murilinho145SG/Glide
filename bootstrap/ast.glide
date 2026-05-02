@@ -50,6 +50,7 @@ pub const EX_POSTINC: int = 16;     // x++
 pub const EX_POSTDEC: int = 17;     // x--
 pub const EX_STRUCT_LIT: int = 18;  // Foo { fields }
 pub const EX_NEW: int = 19;         // new Foo { fields }
+pub const EX_SIZEOF: int = 20;      // sizeof(T) — cast_to holds the target type
 
 // Binary op codes (subset; extend as needed)
 pub const OP_ADD: int = 1;

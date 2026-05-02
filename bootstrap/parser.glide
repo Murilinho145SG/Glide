@@ -570,11 +570,14 @@ fn parse_prefix(p: *Parser) -> *Expr {
         if tok.lexeme.eq("sizeof") {
             p.advance();
             p.expect_op("(");
-            let _t: *Type = parse_type(p);
+            let t: *Type = parse_type(p);
             p.expect_op(")");
-            // We don't have EX_SIZEOF yet — encode as a 0 int placeholder.
-            // (typer will produce the real value; for now just shape.)
-            return expr_int(0, line, col);
+            let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+            e.kind = EX_SIZEOF;
+            e.line = line;
+            e.column = col;
+            e.cast_to = t;
+            return e;
         }
         if tok.lexeme.eq("new") {
             p.advance();
