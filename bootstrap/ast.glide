@@ -32,6 +32,13 @@ pub const EX_ASSIGN: int = 9;       // op, lhs, rhs
 pub const EX_MEMBER: int = 10;      // obj, field name
 pub const EX_INDEX: int = 11;       // obj, idx
 pub const EX_CAST: int = 12;        // expr, target type
+pub const EX_CHAR: int = 13;        // single char
+pub const EX_MACRO: int = 14;       // name + args (println! etc)
+pub const EX_PATH: int = 15;        // Type::member
+pub const EX_POSTINC: int = 16;     // x++
+pub const EX_POSTDEC: int = 17;     // x--
+pub const EX_STRUCT_LIT: int = 18;  // Foo { fields }
+pub const EX_NEW: int = 19;         // new Foo { fields }
 
 // Binary op codes (subset; extend as needed)
 pub const OP_ADD: int = 1;
@@ -49,6 +56,22 @@ pub const OP_AND: int = 12;
 pub const OP_OR: int = 13;
 pub const OP_ASSIGN: int = 14;
 pub const OP_PLUS_ASSIGN: int = 15;
+pub const OP_MINUS_ASSIGN: int = 16;
+pub const OP_STAR_ASSIGN: int = 17;
+pub const OP_SLASH_ASSIGN: int = 18;
+pub const OP_BIT_AND: int = 19;
+pub const OP_BIT_OR: int = 20;
+pub const OP_BIT_XOR: int = 21;
+pub const OP_SHL: int = 22;
+pub const OP_SHR: int = 23;
+
+// Unary op codes
+pub const UN_NEG: int = 1;
+pub const UN_NOT: int = 2;
+pub const UN_DEREF: int = 3;
+pub const UN_ADDR: int = 4;
+pub const UN_ADDR_MUT: int = 5;
+pub const UN_BIT_NOT: int = 6;
 
 pub struct Expr {
     kind: int,
@@ -83,8 +106,19 @@ pub const ST_BLOCK: int = 5;
 pub const ST_FN: int = 6;
 pub const ST_BREAK: int = 7;
 pub const ST_CONTINUE: int = 8;
+pub const ST_STRUCT: int = 9;
+pub const ST_IMPL: int = 10;
+pub const ST_CONST: int = 11;
+pub const ST_FOR: int = 12;
+pub const ST_DEFER: int = 13;
+pub const ST_IMPORT: int = 14;
 
 pub struct Param {
+    name: string,
+    ty: *Type,
+}
+
+pub struct Field {
     name: string,
     ty: *Type,
 }
@@ -93,6 +127,7 @@ pub struct Stmt {
     kind: int,
     line: int,
     column: int,
+    is_pub: bool,
 
     // Let / Const
     name: string,
@@ -100,18 +135,28 @@ pub struct Stmt {
     let_value: *Expr,
     is_mut: bool,
 
-    // Return / Expr stmt
+    // Return / Expr stmt / Defer
     expr_value: *Expr,
 
-    // If / While
+    // If / While / For
     cond: *Expr,
     then_body: *Vector<Stmt>,
     else_body: *Vector<Stmt>,
+    for_init: *Stmt,
+    for_step: *Expr,
 
     // Fn
     fn_params: *Vector<Param>,
     fn_ret_ty: *Type,
     fn_body: *Vector<Stmt>,
+
+    // Struct / Impl
+    struct_fields: *Vector<Field>,
+    impl_target: *Type,
+    impl_methods: *Vector<Stmt>,
+
+    // Import
+    import_path: string,
 }
 
 // ---- Constructors --------------------------------------------------------
@@ -229,4 +274,215 @@ pub fn stmt_fn(name: string, params: *Vector<Param>, ret_ty: *Type, body: *Vecto
     s.fn_ret_ty = ret_ty;
     s.fn_body = body;
     return s;
+}
+
+pub fn stmt_struct(name: string, fields: *Vector<Field>, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_STRUCT;
+    s.line = line;
+    s.column = col;
+    s.name = name;
+    s.struct_fields = fields;
+    return s;
+}
+
+pub fn stmt_impl(target: *Type, methods: *Vector<Stmt>, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_IMPL;
+    s.line = line;
+    s.column = col;
+    s.impl_target = target;
+    s.impl_methods = methods;
+    return s;
+}
+
+pub fn stmt_if(cond: *Expr, then_body: *Vector<Stmt>, else_body: *Vector<Stmt>, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_IF;
+    s.line = line;
+    s.column = col;
+    s.cond = cond;
+    s.then_body = then_body;
+    s.else_body = else_body;
+    return s;
+}
+
+pub fn stmt_while(cond: *Expr, body: *Vector<Stmt>, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_WHILE;
+    s.line = line;
+    s.column = col;
+    s.cond = cond;
+    s.then_body = body;
+    return s;
+}
+
+pub fn stmt_for(init: *Stmt, cond: *Expr, step: *Expr, body: *Vector<Stmt>, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_FOR;
+    s.line = line;
+    s.column = col;
+    s.for_init = init;
+    s.cond = cond;
+    s.for_step = step;
+    s.then_body = body;
+    return s;
+}
+
+pub fn stmt_break(line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_BREAK;
+    s.line = line;
+    s.column = col;
+    return s;
+}
+
+pub fn stmt_continue(line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_CONTINUE;
+    s.line = line;
+    s.column = col;
+    return s;
+}
+
+pub fn stmt_const(name: string, ty: *Type, value: *Expr, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_CONST;
+    s.line = line;
+    s.column = col;
+    s.name = name;
+    s.let_ty = ty;
+    s.let_value = value;
+    return s;
+}
+
+pub fn stmt_import(path: string, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_IMPORT;
+    s.line = line;
+    s.column = col;
+    s.import_path = path;
+    return s;
+}
+
+pub fn expr_unary(op: int, operand: *Expr, line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_UNARY;
+    e.line = line;
+    e.column = col;
+    e.op_code = op;
+    e.operand = operand;
+    return e;
+}
+
+pub fn expr_assign(op: int, lhs: *Expr, rhs: *Expr) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_ASSIGN;
+    e.line = lhs.line;
+    e.column = lhs.column;
+    e.op_code = op;
+    e.lhs = lhs;
+    e.rhs = rhs;
+    return e;
+}
+
+pub fn expr_member(obj: *Expr, field: string) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_MEMBER;
+    e.line = obj.line;
+    e.column = obj.column;
+    e.lhs = obj;
+    e.field = field;
+    return e;
+}
+
+pub fn expr_index(obj: *Expr, idx: *Expr) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_INDEX;
+    e.line = obj.line;
+    e.column = obj.column;
+    e.lhs = obj;
+    e.rhs = idx;
+    return e;
+}
+
+pub fn expr_cast(inner: *Expr, target: *Type) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_CAST;
+    e.line = inner.line;
+    e.column = inner.column;
+    e.lhs = inner;
+    e.cast_to = target;
+    return e;
+}
+
+pub fn expr_path(ty: string, member: string, line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_PATH;
+    e.line = line;
+    e.column = col;
+    e.str_val = ty;
+    e.field = member;
+    return e;
+}
+
+pub fn expr_macro(name: string, args: *Vector<Expr>, line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_MACRO;
+    e.line = line;
+    e.column = col;
+    e.str_val = name;
+    e.args = args;
+    return e;
+}
+
+pub fn expr_char(c: char, line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_CHAR;
+    e.line = line;
+    e.column = col;
+    e.int_val = c.to_int();
+    return e;
+}
+
+pub fn expr_null(line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_NULL;
+    e.line = line;
+    e.column = col;
+    return e;
+}
+
+pub fn expr_postinc(inner: *Expr) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_POSTINC;
+    e.line = inner.line;
+    e.column = inner.column;
+    e.lhs = inner;
+    return e;
+}
+
+pub fn expr_postdec(inner: *Expr) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_POSTDEC;
+    e.line = inner.line;
+    e.column = inner.column;
+    e.lhs = inner;
+    return e;
+}
+
+pub struct StructLitField {
+    name: string,
+    value: *Expr,
+}
+
+pub fn expr_struct_lit(type_name: string, fields: *Vector<StructLitField>, line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_STRUCT_LIT;
+    e.line = line;
+    e.column = col;
+    e.str_val = type_name;
+    e.args = null;
+    e.field = "";
+    return e;
 }

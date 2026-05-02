@@ -169,6 +169,39 @@ impl Lexer {
             return Token { kind: TOK_STRING, lexeme: lex, line: start_line, column: start_col };
         }
 
+        // char literal
+        if ci == 39 {
+            self.advance();
+            if self.peek().to_int() == 92 {
+                self.advance();
+                self.advance();
+            } else {
+                self.advance();
+            }
+            if self.peek().to_int() == 39 { self.advance(); }
+            let lex: string = self.src.substring(start_pos, self.pos);
+            return Token { kind: TOK_CHAR, lexeme: lex, line: start_line, column: start_col };
+        }
+
+        // multi-char operators we need to recognize as a unit
+        if ci == 61 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "==", line: start_line, column: start_col }; }
+        if ci == 33 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "!=", line: start_line, column: start_col }; }
+        if ci == 60 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "<=", line: start_line, column: start_col }; }
+        if ci == 62 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: ">=", line: start_line, column: start_col }; }
+        if ci == 38 && self.peek_at(1).to_int() == 38 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "&&", line: start_line, column: start_col }; }
+        if ci == 124 && self.peek_at(1).to_int() == 124 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "||", line: start_line, column: start_col }; }
+        if ci == 60 && self.peek_at(1).to_int() == 60 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "<<", line: start_line, column: start_col }; }
+        if ci == 62 && self.peek_at(1).to_int() == 62 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: ">>", line: start_line, column: start_col }; }
+        if ci == 43 && self.peek_at(1).to_int() == 43 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "++", line: start_line, column: start_col }; }
+        if ci == 45 && self.peek_at(1).to_int() == 45 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "--", line: start_line, column: start_col }; }
+        if ci == 45 && self.peek_at(1).to_int() == 62 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "->", line: start_line, column: start_col }; }
+        if ci == 61 && self.peek_at(1).to_int() == 62 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "=>", line: start_line, column: start_col }; }
+        if ci == 58 && self.peek_at(1).to_int() == 58 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "::", line: start_line, column: start_col }; }
+        if ci == 43 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "+=", line: start_line, column: start_col }; }
+        if ci == 45 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "-=", line: start_line, column: start_col }; }
+        if ci == 42 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "*=", line: start_line, column: start_col }; }
+        if ci == 47 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "/=", line: start_line, column: start_col }; }
+
         // operator (single char fallback)
         self.advance();
         let lex: string = self.src.substring(start_pos, self.pos);

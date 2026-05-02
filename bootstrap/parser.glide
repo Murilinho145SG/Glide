@@ -1,5 +1,4 @@
-// Glide-in-Glide parser. Pratt-style for expressions, recursive-descent
-// for statements. Minimal subset to start: fn decls, let, return, exprs.
+// Glide-in-Glide parser. Pratt expressions + recursive descent for stmts.
 
 import "lexer.glide";
 import "ast.glide";
@@ -8,20 +7,22 @@ pub struct Parser {
     lex: *Lexer,
     current: Token,
     peek: Token,
+    error_count: int,
+    no_struct_lit: bool,
 }
 
 impl Parser {
-    fn new(lex: *Lexer) -> *Parser {
+    pub fn new(lex: *Lexer) -> *Parser {
         let p: *Parser = malloc(sizeof(Parser)) as *Parser;
         p.lex = lex;
         p.current = lex.next_token();
         p.peek = lex.next_token();
+        p.error_count = 0;
+        p.no_struct_lit = false;
         return p;
     }
 
-    fn free(self: *Parser) {
-        free(self as *void);
-    }
+    pub fn free(self: *Parser) { free(self as *void); }
 
     fn advance(self: *Parser) -> Token {
         let prev: Token = self.current;
@@ -30,46 +31,47 @@ impl Parser {
         return prev;
     }
 
-    fn at_eof(self: *Parser) -> bool {
-        return self.current.kind == TOK_EOF;
-    }
+    fn at_eof(self: *Parser) -> bool { return self.current.kind == TOK_EOF; }
 
     fn at_kw(self: *Parser, lexeme: string) -> bool {
         if self.current.kind != TOK_KEYWORD { return false; }
         return self.current.lexeme.eq(lexeme);
     }
-
     fn at_op(self: *Parser, lexeme: string) -> bool {
         if self.current.kind != TOK_OP { return false; }
         return self.current.lexeme.eq(lexeme);
     }
-
+    fn peek_op(self: *Parser, lexeme: string) -> bool {
+        if self.peek.kind != TOK_OP { return false; }
+        return self.peek.lexeme.eq(lexeme);
+    }
     fn eat_kw(self: *Parser, lexeme: string) -> bool {
         if self.at_kw(lexeme) { self.advance(); return true; }
         return false;
     }
-
     fn eat_op(self: *Parser, lexeme: string) -> bool {
         if self.at_op(lexeme) { self.advance(); return true; }
         return false;
     }
 
-    fn expect_op(self: *Parser, lexeme: string) -> bool {
-        if self.at_op(lexeme) { self.advance(); return true; }
-        println!("parse error at", self.current.line, ":", self.current.column,
-                 "- expected '", lexeme, "' but found '", self.current.lexeme, "'");
-        return false;
+    fn err(self: *Parser, msg: string) {
+        println!("parse error at", self.current.line, ":", self.current.column, "-", msg, "near '", self.current.lexeme, "'");
+        self.error_count = self.error_count + 1;
     }
 
+    fn expect_op(self: *Parser, lexeme: string) -> bool {
+        if self.at_op(lexeme) { self.advance(); return true; }
+        self.err("expected '".concat(lexeme).concat("'"));
+        return false;
+    }
     fn expect_ident(self: *Parser) -> string {
-        if self.current.kind != TOK_IDENT {
-            println!("parse error at", self.current.line, ":", self.current.column,
-                     "- expected identifier but found '", self.current.lexeme, "'");
-            return "";
+        if self.current.kind == TOK_IDENT || self.current.kind == TOK_KEYWORD {
+            let name: string = self.current.lexeme;
+            self.advance();
+            return name;
         }
-        let name: string = self.current.lexeme;
-        self.advance();
-        return name;
+        self.err("expected identifier");
+        return "";
     }
 }
 
@@ -79,33 +81,42 @@ pub fn parse_program(p: *Parser) -> *Vector<Stmt> {
     let stmts: *Vector<Stmt> = Vector::new();
     while !p.at_eof() {
         let s: *Stmt = parse_top_stmt(p);
-        if s == null { break; }
+        if s == null { p.advance(); continue; }
         stmts.push(*s);
     }
     return stmts;
 }
 
 pub fn parse_top_stmt(p: *Parser) -> *Stmt {
+    let mut is_pub: bool = false;
+    if p.eat_kw("pub") { is_pub = true; }
+
     if p.at_kw("fn") {
-        return parse_fn(p);
+        let s: *Stmt = parse_fn(p);
+        if s != null { s.is_pub = is_pub; }
+        return s;
     }
-    if p.at_kw("let") || p.at_kw("const") {
-        return parse_let(p);
-    }
-    println!("parse error at", p.current.line, ":", p.current.column,
-             "- unexpected token '", p.current.lexeme, "' at top level");
-    p.advance();
+    if p.at_kw("let") { let s: *Stmt = parse_let(p); if s != null { s.is_pub = is_pub; } return s; }
+    if p.at_kw("const") { let s: *Stmt = parse_const(p); if s != null { s.is_pub = is_pub; } return s; }
+    if p.at_kw("struct") { let s: *Stmt = parse_struct(p); if s != null { s.is_pub = is_pub; } return s; }
+    if p.at_kw("impl") { return parse_impl(p); }
+    if p.at_kw("import") { return parse_import(p); }
+
+    p.err("unexpected token at top level");
     return null;
 }
 
-pub fn parse_fn(p: *Parser) -> *Stmt {
+fn parse_fn(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
     p.advance(); // 'fn'
 
     let name: string = p.expect_ident();
-    p.expect_op("(");
 
+    // Optional generic params <T, U>
+    if p.at_op("<") { skip_type_params(p); }
+
+    p.expect_op("(");
     let params: *Vector<Param> = Vector::new();
     while !p.at_op(")") && !p.at_eof() {
         let pname: string = p.expect_ident();
@@ -118,17 +129,83 @@ pub fn parse_fn(p: *Parser) -> *Stmt {
     p.expect_op(")");
 
     let mut ret_ty: *Type = null;
-    if p.eat_op("-") {
-        if p.eat_op(">") {
-            ret_ty = parse_type(p);
-        }
-    }
+    if p.eat_op("->") { ret_ty = parse_type(p); }
 
     let body: *Vector<Stmt> = parse_block(p);
     return stmt_fn(name, params, ret_ty, body, line, col);
 }
 
-pub fn parse_block(p: *Parser) -> *Vector<Stmt> {
+fn skip_type_params(p: *Parser) {
+    p.advance(); // '<'
+    while !p.at_op(">") && !p.at_eof() {
+        p.advance();
+    }
+    p.eat_op(">");
+}
+
+fn parse_struct(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'struct'
+    let name: string = p.expect_ident();
+    if p.at_op("<") { skip_type_params(p); }
+    p.expect_op("{");
+    let fields: *Vector<Field> = Vector::new();
+    while !p.at_op("}") && !p.at_eof() {
+        let fname: string = p.expect_ident();
+        p.expect_op(":");
+        let fty: *Type = parse_type(p);
+        let f: Field = Field { name: fname, ty: fty };
+        fields.push(f);
+        if !p.eat_op(",") { break; }
+    }
+    p.expect_op("}");
+    return stmt_struct(name, fields, line, col);
+}
+
+fn parse_impl(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'impl'
+    if p.at_op("<") { skip_type_params(p); }
+    let target: *Type = parse_type(p);
+    p.expect_op("{");
+    let methods: *Vector<Stmt> = Vector::new();
+    while !p.at_op("}") && !p.at_eof() {
+        let mut is_pub: bool = false;
+        if p.eat_kw("pub") { is_pub = true; }
+        if p.at_kw("fn") {
+            let m: *Stmt = parse_fn(p);
+            if m != null { m.is_pub = is_pub; methods.push(*m); }
+        } else {
+            p.err("expected fn inside impl"); p.advance();
+        }
+    }
+    p.expect_op("}");
+    return stmt_impl(target, methods, line, col);
+}
+
+fn parse_import(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'import'
+    let mut path: string = "";
+    if p.current.kind == TOK_STRING {
+        path = p.current.lexeme;
+        p.advance();
+    } else {
+        // identifier path: foo::bar
+        path = p.expect_ident();
+        while p.eat_op("::") {
+            let part: string = p.expect_ident();
+            path = path.concat("/").concat(part);
+        }
+    }
+    p.expect_op(";");
+    return stmt_import(path, line, col);
+}
+
+fn parse_block(p: *Parser) -> *Vector<Stmt> {
     let stmts: *Vector<Stmt> = Vector::new();
     if !p.expect_op("{") { return stmts; }
     while !p.at_op("}") && !p.at_eof() {
@@ -139,83 +216,223 @@ pub fn parse_block(p: *Parser) -> *Vector<Stmt> {
     return stmts;
 }
 
-pub fn parse_stmt(p: *Parser) -> *Stmt {
-    if p.at_kw("let") || p.at_kw("const") {
-        return parse_let(p);
+fn parse_stmt(p: *Parser) -> *Stmt {
+    if p.at_kw("let") { return parse_let(p); }
+    if p.at_kw("const") { return parse_const(p); }
+    if p.at_kw("return") { return parse_return(p); }
+    if p.at_kw("if") { return parse_if(p); }
+    if p.at_kw("while") { return parse_while(p); }
+    if p.at_kw("for") { return parse_for(p); }
+    if p.at_kw("break") {
+        let line: int = p.current.line;
+        let col: int = p.current.column;
+        p.advance();
+        p.expect_op(";");
+        return stmt_break(line, col);
     }
-    if p.at_kw("return") {
-        return parse_return(p);
+    if p.at_kw("continue") {
+        let line: int = p.current.line;
+        let col: int = p.current.column;
+        p.advance();
+        p.expect_op(";");
+        return stmt_continue(line, col);
     }
-    // expression statement
-    let line: int = p.current.line;
-    let col: int = p.current.column;
+    if p.at_op("{") {
+        let body: *Vector<Stmt> = parse_block(p);
+        let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+        s.kind = ST_BLOCK;
+        s.then_body = body;
+        return s;
+    }
+    // expression statement (with possible assign)
     let e: *Expr = parse_expr(p, 0);
     if e == null { return null; }
+    let assigned: *Expr = parse_maybe_assign(p, e);
     p.expect_op(";");
-    return stmt_expr(e);
+    return stmt_expr(assigned);
 }
 
-pub fn parse_let(p: *Parser) -> *Stmt {
+fn parse_maybe_assign(p: *Parser, lhs: *Expr) -> *Expr {
+    let mut op: int = 0;
+    if p.at_op("=")  { op = OP_ASSIGN; }
+    else if p.at_op("+=") { op = OP_PLUS_ASSIGN; }
+    else if p.at_op("-=") { op = OP_MINUS_ASSIGN; }
+    else if p.at_op("*=") { op = OP_STAR_ASSIGN; }
+    else if p.at_op("/=") { op = OP_SLASH_ASSIGN; }
+    if op == 0 { return lhs; }
+    p.advance();
+    let rhs_raw: *Expr = parse_expr(p, 0);
+    let rhs: *Expr = parse_maybe_assign(p, rhs_raw);
+    return expr_assign(op, lhs, rhs);
+}
+
+fn parse_let(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
-    p.advance(); // let / const
-
+    p.advance(); // 'let'
     let mut is_mut: bool = false;
     if p.eat_kw("mut") { is_mut = true; }
-
     let name: string = p.expect_ident();
-
     let mut ty: *Type = null;
-    if p.eat_op(":") {
-        ty = parse_type(p);
-    }
-
+    if p.eat_op(":") { ty = parse_type(p); }
     let mut value: *Expr = null;
-    if p.eat_op("=") {
-        value = parse_expr(p, 0);
-    }
+    if p.eat_op("=") { value = parse_expr(p, 0); }
     p.expect_op(";");
     return stmt_let(name, ty, value, is_mut, line, col);
 }
 
-pub fn parse_return(p: *Parser) -> *Stmt {
+fn parse_const(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'const'
+    let name: string = p.expect_ident();
+    let mut ty: *Type = null;
+    if p.eat_op(":") { ty = parse_type(p); }
+    p.expect_op("=");
+    let value: *Expr = parse_expr(p, 0);
+    p.expect_op(";");
+    return stmt_const(name, ty, value, line, col);
+}
+
+fn parse_return(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
     p.advance(); // 'return'
-
     let mut value: *Expr = null;
-    if !p.at_op(";") {
-        value = parse_expr(p, 0);
-    }
+    if !p.at_op(";") { value = parse_expr(p, 0); }
     p.expect_op(";");
     return stmt_return(value, line, col);
 }
 
+fn parse_if(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'if'
+    let saved: bool = p.no_struct_lit;
+    p.no_struct_lit = true;
+    let cond: *Expr = parse_expr(p, 0);
+    p.no_struct_lit = saved;
+    let then_body: *Vector<Stmt> = parse_block(p);
+    let mut else_body: *Vector<Stmt> = null;
+    if p.eat_kw("else") {
+        if p.at_kw("if") {
+            let inner: *Stmt = parse_if(p);
+            let one: *Vector<Stmt> = Vector::new();
+            if inner != null { one.push(*inner); }
+            else_body = one;
+        } else {
+            else_body = parse_block(p);
+        }
+    }
+    return stmt_if(cond, then_body, else_body, line, col);
+}
+
+fn parse_while(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'while'
+    let saved: bool = p.no_struct_lit;
+    p.no_struct_lit = true;
+    let cond: *Expr = parse_expr(p, 0);
+    p.no_struct_lit = saved;
+    let body: *Vector<Stmt> = parse_block(p);
+    return stmt_while(cond, body, line, col);
+}
+
+fn parse_for(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'for'
+
+    let saved: bool = p.no_struct_lit;
+    p.no_struct_lit = true;
+
+    let mut init: *Stmt = null;
+    if !p.at_op(";") {
+        if p.at_kw("let") {
+            // parse let WITHOUT the trailing semicolon
+            let l_line: int = p.current.line;
+            let l_col: int = p.current.column;
+            p.advance(); // 'let'
+            let mut is_mut: bool = false;
+            if p.eat_kw("mut") { is_mut = true; }
+            let lname: string = p.expect_ident();
+            let mut lty: *Type = null;
+            if p.eat_op(":") { lty = parse_type(p); }
+            let mut lval: *Expr = null;
+            if p.eat_op("=") { lval = parse_expr(p, 0); }
+            init = stmt_let(lname, lty, lval, is_mut, l_line, l_col);
+        } else {
+            let e: *Expr = parse_expr(p, 0);
+            let assigned: *Expr = parse_maybe_assign(p, e);
+            init = stmt_expr(assigned);
+        }
+    }
+    p.expect_op(";");
+
+    let mut cond: *Expr = null;
+    if !p.at_op(";") { cond = parse_expr(p, 0); }
+    p.expect_op(";");
+
+    let mut step: *Expr = null;
+    if !p.at_op("{") {
+        let e: *Expr = parse_expr(p, 0);
+        step = parse_maybe_assign(p, e);
+    }
+
+    p.no_struct_lit = saved;
+    let body: *Vector<Stmt> = parse_block(p);
+    return stmt_for(init, cond, step, body, line, col);
+}
+
 // ---- types ---------------------------------------------------------------
 
-pub fn parse_type(p: *Parser) -> *Type {
+fn parse_type(p: *Parser) -> *Type {
     if p.eat_op("*") {
         let inner: *Type = parse_type(p);
         return ty_pointer(inner);
     }
-    if p.current.kind == TOK_IDENT {
+    if p.eat_op("&") {
+        if p.eat_kw("mut") {
+            let inner: *Type = parse_type(p);
+            let t: *Type = malloc(sizeof(Type)) as *Type;
+            t.kind = TY_BORROW_MUT;
+            t.inner = inner;
+            return t;
+        }
+        let inner: *Type = parse_type(p);
+        let t: *Type = malloc(sizeof(Type)) as *Type;
+        t.kind = TY_BORROW;
+        t.inner = inner;
+        return t;
+    }
+    if p.at_op("[") && p.peek_op("]") {
+        p.advance(); p.advance();
+        let inner: *Type = parse_type(p);
+        let t: *Type = malloc(sizeof(Type)) as *Type;
+        t.kind = TY_SLICE;
+        t.inner = inner;
+        return t;
+    }
+    if p.current.kind == TOK_IDENT || p.current.kind == TOK_KEYWORD {
         let name: string = p.current.lexeme;
         p.advance();
+        // Skip generic args <...> if present (not represented in this AST yet)
+        if p.at_op("<") { skip_type_params(p); }
         return ty_named(name);
     }
-    println!("parse error at", p.current.line, ":", p.current.column,
-             "- expected type but found '", p.current.lexeme, "'");
+    p.err("expected type");
     return ty_named("__error__");
 }
 
 // ---- expressions (Pratt) -------------------------------------------------
 
-pub fn parse_expr(p: *Parser, min_bp: int) -> *Expr {
+fn parse_expr(p: *Parser, min_bp: int) -> *Expr {
     let mut left: *Expr = parse_prefix(p);
     if left == null { return null; }
 
     while true {
-        // postfix: call
+        // postfix call ()
         if p.at_op("(") {
             p.advance();
             let args: *Vector<Expr> = Vector::new();
@@ -226,6 +443,31 @@ pub fn parse_expr(p: *Parser, min_bp: int) -> *Expr {
             }
             p.expect_op(")");
             left = expr_call(left, args);
+            continue;
+        }
+        // index []
+        if p.at_op("[") {
+            p.advance();
+            let idx: *Expr = parse_expr(p, 0);
+            p.expect_op("]");
+            left = expr_index(left, idx);
+            continue;
+        }
+        // member .
+        if p.at_op(".") {
+            p.advance();
+            let name: string = p.expect_ident();
+            left = expr_member(left, name);
+            continue;
+        }
+        // postfix ++ / --
+        if p.at_op("++") { p.advance(); left = expr_postinc(left); continue; }
+        if p.at_op("--") { p.advance(); left = expr_postdec(left); continue; }
+        // cast: as Type
+        if p.at_kw("as") {
+            p.advance();
+            let target: *Type = parse_type(p);
+            left = expr_cast(left, target);
             continue;
         }
 
@@ -241,7 +483,6 @@ pub fn parse_expr(p: *Parser, min_bp: int) -> *Expr {
         if right == null { break; }
         left = expr_binary(op, left, right);
     }
-
     return left;
 }
 
@@ -249,34 +490,119 @@ pub fn parse_expr(p: *Parser, min_bp: int) -> *Expr {
 fn peek_binop_bp(p: *Parser) -> int {
     if p.current.kind != TOK_OP { return 0; }
     let lex: string = p.current.lexeme;
-    if lex.eq("+") { return 100 * 10 + OP_ADD; }
-    if lex.eq("-") { return 100 * 10 + OP_SUB; }
-    if lex.eq("*") { return 100 * 11 + OP_MUL; }
-    if lex.eq("/") { return 100 * 11 + OP_DIV; }
-    if lex.eq("%") { return 100 * 11 + OP_MOD; }
-    if lex.eq("<") { return 100 * 8 + OP_LT; }
-    if lex.eq(">") { return 100 * 8 + OP_GT; }
+    if lex.eq("||") { return 100 * 2  + OP_OR; }
+    if lex.eq("&&") { return 100 * 3  + OP_AND; }
+    if lex.eq("|")  { return 100 * 4  + OP_BIT_OR; }
+    if lex.eq("^")  { return 100 * 5  + OP_BIT_XOR; }
+    if lex.eq("&")  { return 100 * 6  + OP_BIT_AND; }
+    if lex.eq("==") { return 100 * 7  + OP_EQ; }
+    if lex.eq("!=") { return 100 * 7  + OP_NE; }
+    if lex.eq("<")  { return 100 * 8  + OP_LT; }
+    if lex.eq("<=") { return 100 * 8  + OP_LE; }
+    if lex.eq(">")  { return 100 * 8  + OP_GT; }
+    if lex.eq(">=") { return 100 * 8  + OP_GE; }
+    if lex.eq("<<") { return 100 * 9  + OP_SHL; }
+    if lex.eq(">>") { return 100 * 9  + OP_SHR; }
+    if lex.eq("+")  { return 100 * 10 + OP_ADD; }
+    if lex.eq("-")  { return 100 * 10 + OP_SUB; }
+    if lex.eq("*")  { return 100 * 11 + OP_MUL; }
+    if lex.eq("/")  { return 100 * 11 + OP_DIV; }
+    if lex.eq("%")  { return 100 * 11 + OP_MOD; }
     return 0;
 }
 
-pub fn parse_prefix(p: *Parser) -> *Expr {
+fn parse_prefix(p: *Parser) -> *Expr {
     let tok: Token = p.current;
+    let line: int = tok.line;
+    let col: int = tok.column;
 
     if tok.kind == TOK_INT {
         p.advance();
-        return expr_int(parse_int_lexeme(tok.lexeme), tok.line, tok.column);
+        return expr_int(parse_int_lexeme(tok.lexeme), line, col);
     }
     if tok.kind == TOK_STRING {
         p.advance();
-        return expr_string(tok.lexeme, tok.line, tok.column);
+        // strip quotes
+        let len: int = tok.lexeme.len();
+        let inner: string = tok.lexeme.substring(1, len - 1);
+        return expr_string(inner, line, col);
+    }
+    if tok.kind == TOK_CHAR {
+        p.advance();
+        // 'x' or '\x'
+        let len: int = tok.lexeme.len();
+        let inner: string = tok.lexeme.substring(1, len - 1);
+        let c: char = decode_char_inner(inner);
+        return expr_char(c, line, col);
+    }
+    if tok.kind == TOK_KEYWORD {
+        if tok.lexeme.eq("true") { p.advance(); return expr_bool(true, line, col); }
+        if tok.lexeme.eq("false") { p.advance(); return expr_bool(false, line, col); }
+        if tok.lexeme.eq("null") { p.advance(); return expr_null(line, col); }
+        if tok.lexeme.eq("sizeof") {
+            p.advance();
+            p.expect_op("(");
+            let _t: *Type = parse_type(p);
+            p.expect_op(")");
+            // We don't have EX_SIZEOF yet — encode as a 0 int placeholder.
+            // (typer will produce the real value; for now just shape.)
+            return expr_int(0, line, col);
+        }
+        if tok.lexeme.eq("new") {
+            p.advance();
+            // new TypeName { ... }  — we encode as a Macro-like for now
+            let tn: string = p.expect_ident();
+            if p.at_op("<") { skip_type_params(p); }
+            p.expect_op("{");
+            let args: *Vector<Expr> = Vector::new();
+            while !p.at_op("}") && !p.at_eof() {
+                let _name: string = p.expect_ident();
+                p.expect_op(":");
+                let v: *Expr = parse_expr(p, 0);
+                if v != null { args.push(*v); }
+                if !p.eat_op(",") { break; }
+            }
+            p.expect_op("}");
+            return expr_macro(tn.concat("__new"), args, line, col);
+        }
     }
     if tok.kind == TOK_IDENT {
         p.advance();
-        return expr_ident(tok.lexeme, tok.line, tok.column);
-    }
-    if tok.kind == TOK_KEYWORD {
-        if tok.lexeme.eq("true") { p.advance(); return expr_bool(true, tok.line, tok.column); }
-        if tok.lexeme.eq("false") { p.advance(); return expr_bool(false, tok.line, tok.column); }
+        // `name::member`?
+        if p.at_op("::") {
+            p.advance();
+            let member: string = p.expect_ident();
+            return expr_path(tok.lexeme, member, line, col);
+        }
+        // `name!(...)` macro call?
+        if p.at_op("!") && p.peek_op("(") {
+            p.advance(); // '!'
+            p.advance(); // '('
+            let args: *Vector<Expr> = Vector::new();
+            while !p.at_op(")") && !p.at_eof() {
+                let a: *Expr = parse_expr(p, 0);
+                if a != null { args.push(*a); }
+                if !p.eat_op(",") { break; }
+            }
+            p.expect_op(")");
+            return expr_macro(tok.lexeme, args, line, col);
+        }
+        // Struct literal: `TypeName { name: value, ... }`. Heuristic: only when
+        // the identifier starts with a capital letter (convention for types).
+        if p.at_op("{") && starts_uppercase(tok.lexeme) && !p.no_struct_lit {
+            p.advance();
+            let args: *Vector<Expr> = Vector::new();
+            while !p.at_op("}") && !p.at_eof() {
+                let _fname: string = p.expect_ident();
+                p.expect_op(":");
+                let v: *Expr = parse_expr(p, 0);
+                if v != null { args.push(*v); }
+                if !p.eat_op(",") { break; }
+            }
+            p.expect_op("}");
+            return expr_struct_lit(tok.lexeme, null, line, col);
+        }
+        return expr_ident(tok.lexeme, line, col);
     }
     if p.at_op("(") {
         p.advance();
@@ -284,15 +610,29 @@ pub fn parse_prefix(p: *Parser) -> *Expr {
         p.expect_op(")");
         return e;
     }
-    println!("parse error at", tok.line, ":", tok.column,
-             "- unexpected token '", tok.lexeme, "' at start of expression");
+    // unary ops
+    if p.at_op("-") { p.advance(); let r: *Expr = parse_expr(p, 13); return expr_unary(UN_NEG, r, line, col); }
+    if p.at_op("!") { p.advance(); let r: *Expr = parse_expr(p, 13); return expr_unary(UN_NOT, r, line, col); }
+    if p.at_op("~") { p.advance(); let r: *Expr = parse_expr(p, 13); return expr_unary(UN_BIT_NOT, r, line, col); }
+    if p.at_op("*") { p.advance(); let r: *Expr = parse_expr(p, 13); return expr_unary(UN_DEREF, r, line, col); }
+    if p.at_op("&") {
+        p.advance();
+        if p.eat_kw("mut") {
+            let r: *Expr = parse_expr(p, 13);
+            return expr_unary(UN_ADDR_MUT, r, line, col);
+        }
+        let r: *Expr = parse_expr(p, 13);
+        return expr_unary(UN_ADDR, r, line, col);
+    }
+
+    p.err("unexpected token at start of expression");
     p.advance();
     return null;
 }
 
 // ---- helpers -------------------------------------------------------------
 
-pub fn parse_int_lexeme(s: string) -> int {
+fn parse_int_lexeme(s: string) -> int {
     let n: int = s.len();
     let mut v: int = 0;
     for let i: int = 0; i < n; i++ {
@@ -302,4 +642,28 @@ pub fn parse_int_lexeme(s: string) -> int {
         v = v * 10 + (ci - 48);
     }
     return v;
+}
+
+fn starts_uppercase(s: string) -> bool {
+    if s.len() == 0 { return false; }
+    let c: char = s.at(0);
+    let ci: int = c.to_int();
+    return ci >= 65 && ci <= 90;
+}
+
+fn decode_char_inner(s: string) -> char {
+    if s.len() == 0 { return '\0'; }
+    let first: char = s.at(0);
+    if first.to_int() != 92 { return first; } // not '\'
+    if s.len() < 2 { return '\0'; }
+    let esc: char = s.at(1);
+    let ei: int = esc.to_int();
+    if ei == 110 { return '\n'; }
+    if ei == 116 { return '\t'; }
+    if ei == 114 { return '\r'; }
+    if ei == 48  { return '\0'; }
+    if ei == 92  { return '\\'; }
+    if ei == 39  { return '\''; }
+    if ei == 34  { return '"'; }
+    return esc;
 }
