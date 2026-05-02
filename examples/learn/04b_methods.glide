@@ -11,7 +11,7 @@ struct Point {
 // STYLE 1: free function with `<Type>_<method>` name.
 // The typer treats it as a method automatically.
 fn Point_show(p: *Point) {
-    printf("(%d, %d)\n", p->x, p->y);
+    printf("(%d, %d)\n", p.x, p.y);
 }
 
 // STYLE 2: `impl <Type> { ... }` block.
@@ -25,13 +25,13 @@ impl Point {
     }
 
     fn translate(p: *Point, dx: int, dy: int) {
-        p->x += dx;
-        p->y += dy;
+        p.x += dx;
+        p.y += dy;
     }
 
     fn scale(p: *Point, k: int) {
-        p->x *= k;
-        p->y *= k;
+        p.x *= k;
+        p.y *= k;
     }
 }
 

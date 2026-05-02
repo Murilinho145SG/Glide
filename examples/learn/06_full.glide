@@ -10,10 +10,10 @@ struct Student {
 impl Student {
     pub fn print(self: *Student) {
         let status: string = "fail".red();
-        if self->grade >= 60 {
+        if self.grade >= 60 {
             status = "pass".green();
         }
-        println!(self->name, "-", self->grade, status);
+        println!(self.name, "-", self.grade, status);
     }
 }
 

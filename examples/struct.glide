@@ -20,8 +20,8 @@ fn distance_sq(a: Point, b: Point) -> int {
 }
 
 fn translate(p: *Point, dx: int, dy: int) {
-    p->x += dx;
-    p->y += dy;
+    p.x += dx;
+    p.y += dy;
 }
 
 fn area(r: Rect) -> int {

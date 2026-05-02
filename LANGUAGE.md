@@ -110,7 +110,6 @@ spawn worker(arg1, arg2);
 | Postfix    | `++ --` |
 | Unary      | `- ! ~ * &` |
 | Member     | `obj.field` (auto-deref on `*Struct`) |
-| Arrow      | `obj->field` (explicit deref) |
 | Index      | `arr[i]` |
 | Call       | `f(args)` |
 | Cast       | `expr as Type` |

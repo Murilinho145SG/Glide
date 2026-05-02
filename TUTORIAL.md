@@ -137,7 +137,7 @@ fn main() -> int {
     printf("(%d, %d)\n", p.x, p.y);
 
     let h: *Point = new Point { x: 10, y: 20 };  // heap-allocated
-    printf("(%d, %d)\n", h->x, h->y);
+    printf("(%d, %d)\n", h.x, h.y);
     free(h as *void);
 
     return 0;
@@ -146,7 +146,7 @@ fn main() -> int {
 
 `new T { ... }` is `malloc + struct init` in one expression. Returns `*T`.
 
-`a.x` works on values; `a->x` works on pointers. Glide also auto-derefs `.` on pointers, so `h.x` works too.
+`.` is the only field access. It works on values and auto-derefs on pointers, so `h.x` works whether `h` is `Point` or `*Point`.
 
 ---
 
@@ -179,8 +179,8 @@ impl Point {
     }
 
     fn translate(self: *Point, dx: int, dy: int) {
-        self->x += dx;
-        self->y += dy;
+        self.x += dx;
+        self.y += dy;
     }
 
     // no self: associated function
@@ -327,10 +327,10 @@ struct Task {
 
 fn print_task(t: *Task) {
     let mark: string = "[ ]";
-    if t->done {
+    if t.done {
         mark = "[x]".green();
     }
-    println!(mark.concat(" ").concat(t->name));
+    println!(mark.concat(" ").concat(t.name));
 }
 
 fn main() -> int {

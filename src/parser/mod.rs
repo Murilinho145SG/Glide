@@ -576,17 +576,6 @@ impl Parser {
                 left = Expr::new(ExprKind::Member(Box::new(left), name), pos);
                 continue;
             }
-            if self.at_op(Operator::Arrow) {
-                if POSTFIX_BP < min_bp { break; }
-                self.advance();
-                let name = self.expect_ident()?;
-                let derefed = Expr::new(
-                    ExprKind::Unary(UnaryOp::Deref, Box::new(left)),
-                    pos,
-                );
-                left = Expr::new(ExprKind::Member(Box::new(derefed), name), pos);
-                continue;
-            }
             if self.at_op(Operator::Increment) {
                 if POSTFIX_BP < min_bp { break; }
                 self.advance();

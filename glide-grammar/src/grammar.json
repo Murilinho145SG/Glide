@@ -1883,10 +1883,6 @@
         },
         {
           "type": "SYMBOL",
-          "name": "arrow_member_expr"
-        },
-        {
-          "type": "SYMBOL",
           "name": "postfix_expr"
         }
       ]
@@ -2024,35 +2020,6 @@
           {
             "type": "STRING",
             "value": "."
-          },
-          {
-            "type": "FIELD",
-            "name": "field",
-            "content": {
-              "type": "SYMBOL",
-              "name": "identifier"
-            }
-          }
-        ]
-      }
-    },
-    "arrow_member_expr": {
-      "type": "PREC",
-      "value": 14,
-      "content": {
-        "type": "SEQ",
-        "members": [
-          {
-            "type": "FIELD",
-            "name": "object",
-            "content": {
-              "type": "SYMBOL",
-              "name": "_postfix_chain"
-            }
-          },
-          {
-            "type": "STRING",
-            "value": "->"
           },
           {
             "type": "FIELD",

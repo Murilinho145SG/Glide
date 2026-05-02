@@ -4,8 +4,8 @@ struct Point {
 }
 
 fn Point_distance(a: *Point, b: *Point) -> int {
-    let dx: int = a->x - b->x;
-    let dy: int = a->y - b->y;
+    let dx: int = a.x - b.x;
+    let dy: int = a.y - b.y;
     return dx * dx + dy * dy;
 }
 

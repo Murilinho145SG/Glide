@@ -17,9 +17,9 @@ fn main() -> int {
     printf("sizeof(Point)  = %d\n", sizeof(Point));
 
     let p: *Point = malloc(sizeof(Point)) as *Point;
-    p->x = 10;
-    p->y = 20;
-    printf("heap point = (%d, %d)\n", p->x, p->y);
+    p.x = 10;
+    p.y = 20;
+    printf("heap point = (%d, %d)\n", p.x, p.y);
     free(p);
 
     return 0;

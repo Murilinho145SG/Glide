@@ -436,13 +436,11 @@ impl Formatter {
             ExprKind::Member(obj, name) => {
                 if let ExprKind::Unary(UnaryOp::Deref, inner) = &obj.kind {
                     self.emit_expr(inner, PREC_POSTFIX);
-                    self.write("->");
-                    self.write(name);
                 } else {
                     self.emit_expr(obj, PREC_POSTFIX);
-                    self.write(".");
-                    self.write(name);
                 }
+                self.write(".");
+                self.write(name);
             }
 
             ExprKind::Cast(inner, ty) => {

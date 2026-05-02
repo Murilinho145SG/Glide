@@ -274,7 +274,6 @@ module.exports = grammar({
       $.call_expr,
       $.index_expr,
       $.member_expr,
-      $.arrow_member_expr,
       $.postfix_expr,
     ),
 
@@ -303,12 +302,6 @@ module.exports = grammar({
     member_expr: $ => prec(PREC.postfix, seq(
       field('object', $._postfix_chain),
       '.',
-      field('field', $.identifier),
-    )),
-
-    arrow_member_expr: $ => prec(PREC.postfix, seq(
-      field('object', $._postfix_chain),
-      '->',
       field('field', $.identifier),
     )),
 
