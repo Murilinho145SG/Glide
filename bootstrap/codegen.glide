@@ -84,6 +84,18 @@ fn emit_stdlib_runtime() {
     println!("    return out;");
     println!("}");
     println!("static const char* __glide_bool_to_string(bool b) { return b ? \"true\" : \"false\"; }");
+    println!("#include <stdarg.h>");
+    println!("static const char* __glide_format(const char* fmt, ...) {");
+    println!("    va_list ap1, ap2;");
+    println!("    va_start(ap1, fmt);");
+    println!("    va_copy(ap2, ap1);");
+    println!("    int n = vsnprintf(NULL, 0, fmt, ap1);");
+    println!("    va_end(ap1);");
+    println!("    char* out = (char*)malloc((size_t)n + 1);");
+    println!("    vsnprintf(out, (size_t)n + 1, fmt, ap2);");
+    println!("    va_end(ap2);");
+    println!("    return out;");
+    println!("}");
     println!("static int __glide_argc_g = 0;");
     println!("static char** __glide_argv_g = NULL;");
     println!("static void __glide_args_init(int argc, char** argv) { __glide_argc_g = argc; __glide_argv_g = argv; }");
@@ -973,13 +985,47 @@ pub fn emit_expr(g: *CG, e: *Expr) {
             return;
         }
         if e.str_val.eq("format") {
-            // Approximate: just concat the first string arg verbatim.
+            print!("__glide_format(");
+            // First arg: format string with {} converted to appropriate %fmt.
             if e.args != null && e.args.len() > 0 {
                 let first: Expr = e.args.get(0);
-                emit_expr(g, &first);
-            } else {
-                print!("\"\"");
+                if first.kind == EX_STRING {
+                    print!("\"");
+                    let raw: string = first.str_val;
+                    let mut arg_idx: int = 1;
+                    let n: int = raw.len();
+                    let mut i: int = 0;
+                    while i < n {
+                        let c: char = raw.at(i);
+                        if c.to_int() == 123 && i + 1 < n && raw.at(i + 1).to_int() == 125 {
+                            if e.args != null && arg_idx < e.args.len() {
+                                let a: Expr = e.args.get(arg_idx);
+                                let at: *Type = infer_for_codegen(g, &a);
+                                print!(format_spec_for(at));
+                            } else {
+                                print!("%s");
+                            }
+                            arg_idx = arg_idx + 1;
+                            i = i + 2;
+                        } else {
+                            // emit char literal-safe
+                            if c.to_int() == 34 { print!("\\\""); }
+                            else if c.to_int() == 92 { print!("\\\\"); }
+                            else { print!(c); }
+                            i = i + 1;
+                        }
+                    }
+                    print!("\"");
+                } else {
+                    emit_expr(g, &first);
+                }
+                for let j: int = 1; j < e.args.len(); j++ {
+                    print!(", ");
+                    let a: Expr = e.args.get(j);
+                    emit_expr(g, &a);
+                }
             }
+            print!(")");
             return;
         }
         print!("/* macro ", e.str_val, " */ 0");

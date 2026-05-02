@@ -1,0 +1,7 @@
+fn main() -> int {
+    let name: string = "world";
+    let n: int = 42;
+    let msg: string = format!("hello {} answer={}", name, n);
+    println!(msg);
+    return msg.len();
+}
