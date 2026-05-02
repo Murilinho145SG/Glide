@@ -65,20 +65,36 @@ fn strip_ptr(t: *Type) -> *Type {
     return t;
 }
 
-// Best-effort inference of an expression's type for codegen's method dispatch.
-// Only handles the patterns we need: idents (look up scope) and pointer derefs.
+// Best-effort inference of an expression's type for codegen.
 fn infer_for_codegen(g: *CG, e: *Expr) -> *Type {
     if e == null { return null; }
+    if e.kind == EX_INT { return ty_named("int"); }
+    if e.kind == EX_FLOAT { return ty_named("float"); }
+    if e.kind == EX_STRING { return ty_named("string"); }
+    if e.kind == EX_BOOL { return ty_named("bool"); }
+    if e.kind == EX_CHAR { return ty_named("char"); }
+    if e.kind == EX_NULL { return ty_pointer(ty_named("void")); }
     if e.kind == EX_IDENT { return g.lookup(e.str_val); }
     if e.kind == EX_UNARY {
         let inner: *Type = infer_for_codegen(g, e.operand);
         if e.op_code == UN_DEREF && inner != null && inner.kind == TY_POINTER {
             return inner.inner;
         }
+        if e.op_code == UN_ADDR || e.op_code == UN_ADDR_MUT {
+            return ty_pointer(inner);
+        }
         return inner;
     }
     if e.kind == EX_MEMBER { return null; } // would need struct field registry
     if e.kind == EX_CAST { return e.cast_to; }
+    if e.kind == EX_BINARY {
+        let op: int = e.op_code;
+        if op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_LE
+            || op == OP_GT || op == OP_GE || op == OP_AND || op == OP_OR {
+            return ty_named("bool");
+        }
+        return infer_for_codegen(g, e.lhs);
+    }
     return null;
 }
 
@@ -140,6 +156,173 @@ fn mangle_type(t: *Type) -> string {
     if t.kind == TY_SLICE { return "slice_".concat(mangle_type(t.inner)); }
     if t.kind == TY_GENERIC { return mangle_generic(t.name, t.args); }
     return "void";
+}
+
+// Try to monomorphize a Call expression. Returns true if the callee was
+// rewritten to a mangled mono name. Uses both args and an optional return-
+// type hint for inference.
+fn try_mono_call(g: *CG, call: *Expr, ret_hint: *Type) -> bool {
+    if call == null { return false; }
+    if call.kind != EX_CALL { return false; }
+    let callee: *Expr = call.lhs;
+    let mut gname: string = "";
+    if callee != null {
+        if callee.kind == EX_IDENT { gname = callee.str_val; }
+        if callee.kind == EX_PATH { gname = callee.str_val.concat("_").concat(callee.field); }
+    }
+    if gname.len() == 0 { return false; }
+    if !g.generic_fns.contains(gname) { return false; }
+    let template: Stmt = g.generic_fns.get(gname);
+
+    let bindings: *HashMap<Type> = HashMap::new();
+
+    // Infer from return-type hint (if provided).
+    if ret_hint != null && template.fn_ret_ty != null {
+        unify_for_inference(template.fn_ret_ty, ret_hint, template.type_params, bindings);
+    }
+
+    // Infer from arg types.
+    if call.args != null && template.fn_params != null {
+        let n: int = template.fn_params.len();
+        if call.args.len() < n { n = call.args.len(); }
+        for let i: int = 0; i < n; i++ {
+            let p: Param = template.fn_params.get(i);
+            let a: Expr = call.args.get(i);
+            let at: *Type = infer_for_codegen(g, &a);
+            if at != null && p.ty != null {
+                unify_for_inference(p.ty, at, template.type_params, bindings);
+            }
+        }
+    }
+
+    // Build args in declared param order.
+    let derived: *Vector<Type> = Vector::new();
+    let mut all: bool = true;
+    if template.type_params != null {
+        for let i: int = 0; i < template.type_params.len(); i++ {
+            let tn: string = template.type_params.get(i);
+            if bindings.contains(tn) {
+                derived.push(bindings.get(tn));
+            } else {
+                all = false;
+            }
+        }
+    }
+    if !all || derived.len() == 0 {
+        bindings.free();
+        return false;
+    }
+
+    let mangled: string = mangle_generic(gname, derived);
+    callee.kind = EX_IDENT;
+    callee.str_val = mangled;
+    callee.field = "";
+    if !g.emitted_monos.contains(mangled) {
+        g.emitted_monos.insert(mangled, true);
+        let entry: FnMonoEntry = FnMonoEntry { name: template.name, args: derived };
+        g.fn_mono_queue.push(entry);
+    }
+    bindings.free();
+    return true;
+}
+
+// Recursively walks expr/stmt trees, calling try_mono_call on every generic
+// call to queue monos and emit forward decls. Called as a pre-pass before
+// emitting any fn body so forward decls don't interleave with code.
+fn prescan_expr(g: *CG, e: *Expr, ret_hint: *Type) {
+    if e == null { return; }
+    if e.kind == EX_CALL {
+        let _ok: bool = try_mono_call(g, e, ret_hint);
+    }
+    // Method call on generic receiver: also queue.
+    if e.kind == EX_CALL && e.lhs != null && e.lhs.kind == EX_MEMBER {
+        let recv: *Expr = e.lhs.lhs;
+        let method: string = e.lhs.field;
+        let rt: *Type = infer_for_codegen(g, recv);
+        let stripped: *Type = strip_ptr(rt);
+        if stripped != null && stripped.kind == TY_GENERIC {
+            let mname: string = stripped.name.concat("_").concat(method);
+            if g.generic_fns.contains(mname) {
+                let template: Stmt = g.generic_fns.get(mname);
+                let mangled: string = mangle_generic(mname, stripped.args);
+                if !g.emitted_monos.contains(mangled) {
+                    g.emitted_monos.insert(mangled, true);
+                    let entry: FnMonoEntry = FnMonoEntry { name: template.name, args: stripped.args };
+                    g.fn_mono_queue.push(entry);
+                }
+            }
+        }
+    }
+    if e.lhs != null { prescan_expr(g, e.lhs, null); }
+    if e.rhs != null { prescan_expr(g, e.rhs, null); }
+    if e.operand != null { prescan_expr(g, e.operand, null); }
+    if e.args != null {
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            prescan_expr(g, &a, null);
+        }
+    }
+}
+
+fn prescan_stmt(g: *CG, s: *Stmt) {
+    if s == null { return; }
+    if s.kind == ST_LET || s.kind == ST_CONST {
+        // Declare in scope so receiver-type lookup works.
+        if s.let_ty != null { g.declare(s.name, s.let_ty); }
+        if s.let_value != null { prescan_expr(g, s.let_value, s.let_ty); }
+        return;
+    }
+    if s.expr_value != null { prescan_expr(g, s.expr_value, null); }
+    if s.cond != null { prescan_expr(g, s.cond, null); }
+    if s.for_init != null { prescan_stmt(g, s.for_init); }
+    if s.for_step != null { prescan_expr(g, s.for_step, null); }
+    if s.then_body != null {
+        for let i: int = 0; i < s.then_body.len(); i++ {
+            let b: Stmt = s.then_body.get(i);
+            prescan_stmt(g, &b);
+        }
+    }
+    if s.else_body != null {
+        for let i: int = 0; i < s.else_body.len(); i++ {
+            let b: Stmt = s.else_body.get(i);
+            prescan_stmt(g, &b);
+        }
+    }
+    if s.fn_body != null {
+        g.scope.clear();
+        if s.fn_params != null {
+            for let i: int = 0; i < s.fn_params.len(); i++ {
+                let p: Param = s.fn_params.get(i);
+                g.declare(p.name, p.ty);
+            }
+        }
+        for let i: int = 0; i < s.fn_body.len(); i++ {
+            let b: Stmt = s.fn_body.get(i);
+            prescan_stmt(g, &b);
+        }
+    }
+    if s.impl_methods != null {
+        for let i: int = 0; i < s.impl_methods.len(); i++ {
+            let m: Stmt = s.impl_methods.get(i);
+            prescan_stmt(g, &m);
+        }
+    }
+}
+
+fn emit_mono_forward_decl(g: *CG, mangled: string, template: *Stmt, args: *Vector<Type>) {
+    let new_ret: *Type = subst_type(template.fn_ret_ty, template.type_params, args);
+    print!(type_to_c(new_ret), " ", mangled, "(");
+    if template.fn_params == null || template.fn_params.len() == 0 {
+        print!("void");
+    } else {
+        for let j: int = 0; j < template.fn_params.len(); j++ {
+            if j > 0 { print!(", "); }
+            let pp: Param = template.fn_params.get(j);
+            let pt: *Type = subst_type(pp.ty, template.type_params, args);
+            print!(type_to_c(pt), " ", pp.name);
+        }
+    }
+    println!(");");
 }
 
 // Unify a generic pattern type against a concrete type. Adds bindings for
@@ -386,17 +569,54 @@ pub fn emit_expr(g: *CG, e: *Expr) {
         return;
     }
     if e.kind == EX_CALL {
+        // Try generic monomorphization based on arg types (no ret-hint here).
+        let _mono_ok: bool = try_mono_call(g, e, null);
+
         // Method call: callee is a Member. Rewrite to Type_method(receiver, args).
         if e.lhs != null && e.lhs.kind == EX_MEMBER {
             let recv: *Expr = e.lhs.lhs;
             let method: string = e.lhs.field;
             let recv_ty: *Type = infer_for_codegen(g, recv);
             let stripped: *Type = strip_ptr(recv_ty);
+
+            // Generic method on a generic receiver (e.g. `v.push(x)` on
+            // `*Vector<int>`). The receiver's type args bind the impl's
+            // type params; mangle accordingly.
+            if stripped != null && stripped.kind == TY_GENERIC {
+                let base: string = stripped.name;
+                let mname: string = base.concat("_").concat(method);
+                if g.generic_fns.contains(mname) {
+                    let template: Stmt = g.generic_fns.get(mname);
+                    // Receiver supplies the impl's type args directly.
+                    let mangled: string = mangle_generic(mname, stripped.args);
+                    if !g.emitted_monos.contains(mangled) {
+                        g.emitted_monos.insert(mangled, true);
+                        let entry: FnMonoEntry = FnMonoEntry { name: template.name, args: stripped.args };
+                        g.fn_mono_queue.push(entry);
+                    }
+                    print!(mangled);
+                    print!("(");
+                    let needs_addr: bool = recv_ty != null
+                        && recv_ty.kind != TY_POINTER
+                        && recv_ty.kind != TY_BORROW
+                        && recv_ty.kind != TY_BORROW_MUT;
+                    if needs_addr { print!("&"); }
+                    emit_expr(g, recv);
+                    if e.args != null {
+                        for let i: int = 0; i < e.args.len(); i++ {
+                            print!(", ");
+                            let a: Expr = e.args.get(i);
+                            emit_expr(g, &a);
+                        }
+                    }
+                    print!(")");
+                    return;
+                }
+            }
+
             if stripped != null && stripped.kind == TY_NAMED {
                 print!(stripped.name.concat("_").concat(method));
                 print!("(");
-                // If receiver is a value type, take its address so it matches
-                // the conventional `*Self` first param.
                 let needs_addr: bool = recv_ty != null
                     && recv_ty.kind != TY_POINTER
                     && recv_ty.kind != TY_BORROW
@@ -521,73 +741,9 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
                 s.let_value.str_val = mangle_generic(s.let_ty.name, s.let_ty.args);
             }
         }
-        // Generic fn call hint: `let v: *Vector<int> = Vector::new();` or
-        // `let r: int = id(42);`. Unify let-annot with the generic fn's
-        // ret_type, mangle, queue mono.
-        if s.let_value != null && s.let_value.kind == EX_CALL && s.let_ty != null {
-            let callee: *Expr = s.let_value.lhs;
-            // Resolve the generic fn name from either Ident or Path callee.
-            let mut gname: string = "";
-            if callee != null {
-                if callee.kind == EX_IDENT { gname = callee.str_val; }
-                if callee.kind == EX_PATH {
-                    gname = callee.str_val.concat("_").concat(callee.field);
-                }
-            }
-            if gname.len() > 0 && g.generic_fns.contains(gname) {
-                let template: Stmt = g.generic_fns.get(gname);
-                let bindings: *HashMap<Type> = HashMap::new();
-                if template.fn_ret_ty != null {
-                    unify_for_inference(template.fn_ret_ty, s.let_ty, template.type_params, bindings);
-                }
-                // Try also from arg types vs param types.
-                if s.let_value.args != null && template.fn_params != null {
-                    let n: int = template.fn_params.len();
-                    if s.let_value.args.len() < n { n = s.let_value.args.len(); }
-                    // skip — we don't have arg types in codegen easily
-                }
-                // Build args vector in template type_param order.
-                let derived: *Vector<Type> = Vector::new();
-                let mut all: bool = true;
-                if template.type_params != null {
-                    for let i: int = 0; i < template.type_params.len(); i++ {
-                        let tn: string = template.type_params.get(i);
-                        if bindings.contains(tn) {
-                            derived.push(bindings.get(tn));
-                        } else {
-                            all = false;
-                        }
-                    }
-                }
-                if all && derived.len() > 0 {
-                    let mangled: string = mangle_generic(gname, derived);
-                    // Rewrite the callee to a plain ident with mangled name.
-                    callee.kind = EX_IDENT;
-                    callee.str_val = mangled;
-                    callee.field = "";
-                    if !g.emitted_monos.contains(mangled) {
-                        g.emitted_monos.insert(mangled, true);
-                        let entry: FnMonoEntry = FnMonoEntry { name: template.name, args: derived };
-                        g.fn_mono_queue.push(entry);
-                        // Emit a forward declaration immediately so the mono can be
-                        // called before its body is emitted at the end of the file.
-                        let new_ret_h: *Type = subst_type(template.fn_ret_ty, template.type_params, derived);
-                        print!(type_to_c(new_ret_h), " ", mangled, "(");
-                        if template.fn_params == null || template.fn_params.len() == 0 {
-                            print!("void");
-                        } else {
-                            for let j: int = 0; j < template.fn_params.len(); j++ {
-                                if j > 0 { print!(", "); }
-                                let pp: Param = template.fn_params.get(j);
-                                let pt: *Type = subst_type(pp.ty, template.type_params, derived);
-                                print!(type_to_c(pt), " ", pp.name);
-                            }
-                        }
-                        println!(");");
-                    }
-                }
-                bindings.free();
-            }
+        // Generic fn call mono attempt — uses let-annot as ret-hint plus args.
+        if s.let_value != null && s.let_value.kind == EX_CALL {
+            let _ok: bool = try_mono_call(g, s.let_value, s.let_ty);
         }
 
         // ---- now emit the let stmt itself ----
@@ -883,6 +1039,50 @@ pub fn emit_program(program: *Vector<Stmt>) {
         let s: Stmt = program.get(i);
         if s.kind == ST_FN && (s.type_params == null || s.type_params.len() == 0) {
             emit_fn_signature(&s); println!(";");
+        }
+    }
+
+    // Pre-scan: walk every concrete fn / impl method to discover all generic
+    // call sites. Emit forward declarations for each mono so their later
+    // bodies can be called from anywhere.
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN && (s.type_params == null || s.type_params.len() == 0) {
+            prescan_stmt(g, &s);
+        }
+        if s.kind == ST_IMPL && (s.type_params == null || s.type_params.len() == 0) {
+            if s.impl_methods != null {
+                for let j: int = 0; j < s.impl_methods.len(); j++ {
+                    let m: Stmt = s.impl_methods.get(j);
+                    prescan_stmt(g, &m);
+                }
+            }
+        }
+    }
+    // Walk the queued monos transitively (a mono body may call other generics).
+    let mut idx: int = 0;
+    while idx < g.fn_mono_queue.len() {
+        let entry: FnMonoEntry = g.fn_mono_queue.get(idx);
+        if g.generic_fns.contains(entry.name) {
+            let template: Stmt = g.generic_fns.get(entry.name);
+            // Substitute body to surface generic uses, then prescan.
+            if template.fn_body != null {
+                for let j: int = 0; j < template.fn_body.len(); j++ {
+                    let b: Stmt = template.fn_body.get(j);
+                    let nb: *Stmt = subst_stmt(&b, template.type_params, entry.args, g.generic_structs);
+                    if nb != null { prescan_stmt(g, nb); }
+                }
+            }
+        }
+        idx = idx + 1;
+    }
+    // Now emit forward declarations for every queued mono.
+    for let i: int = 0; i < g.fn_mono_queue.len(); i++ {
+        let entry: FnMonoEntry = g.fn_mono_queue.get(i);
+        if g.generic_fns.contains(entry.name) {
+            let template: Stmt = g.generic_fns.get(entry.name);
+            let mangled: string = mangle_generic(entry.name, entry.args);
+            emit_mono_forward_decl(g, mangled, &template, entry.args);
         }
     }
     println!("");
