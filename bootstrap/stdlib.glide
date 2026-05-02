@@ -1,0 +1,52 @@
+// Bootstrap stdlib: Vector<T> growable array. Compiled by the bootstrap
+// compiler itself — no special-casing.
+
+struct Vector<T> {
+    data: *T,
+    len: int,
+    cap: int,
+}
+
+impl<T> Vector<T> {
+    fn new() -> *Vector<T> {
+        let v: *Vector<T> = malloc(sizeof(Vector<T>)) as *Vector<T>;
+        v.data = null;
+        v.len = 0;
+        v.cap = 0;
+        return v;
+    }
+
+    fn push(self: *Vector<T>, x: T) {
+        if self.len == self.cap {
+            let mut nc: int = 4;
+            if self.cap > 0 { nc = self.cap * 2; }
+            let nd: *T = malloc(nc * sizeof(T)) as *T;
+            for let i: int = 0; i < self.len; i++ {
+                nd[i] = self.data[i];
+            }
+            if self.cap > 0 { free(self.data as *void); }
+            self.data = nd;
+            self.cap = nc;
+        }
+        self.data[self.len] = x;
+        self.len = self.len + 1;
+    }
+
+    fn pop(self: *Vector<T>) -> T {
+        self.len = self.len - 1;
+        return self.data[self.len];
+    }
+
+    fn get(self: *Vector<T>, i: int) -> T {
+        return self.data[i];
+    }
+
+    fn len(self: *Vector<T>) -> int {
+        return self.len;
+    }
+
+    fn free(self: *Vector<T>) {
+        if self.cap > 0 { free(self.data as *void); }
+        free(self as *void);
+    }
+}

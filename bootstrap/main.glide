@@ -109,9 +109,24 @@ fn main() -> int {
         if args_at(i).eq("--emit") { emit_mode = true; }
     }
 
+    // Load embedded stdlib (Vector<T>) and prepend.
+    let std_src: string = read_file("bootstrap/stdlib.glide");
+    let stmts: *Vector<Stmt> = Vector::new();
+    if !std_src.eq("") {
+        let stdlex: *Lexer = Lexer::new(std_src);
+        let stdp: *Parser = Parser::new(stdlex);
+        let stdstmts: *Vector<Stmt> = parse_program(stdp);
+        for let i: int = 0; i < stdstmts.len(); i++ {
+            stmts.push(stdstmts.get(i));
+        }
+    }
+
     let lex: *Lexer = Lexer::new(src);
     let p: *Parser = Parser::new(lex);
-    let stmts: *Vector<Stmt> = parse_program(p);
+    let user_stmts: *Vector<Stmt> = parse_program(p);
+    for let i: int = 0; i < user_stmts.len(); i++ {
+        stmts.push(user_stmts.get(i));
+    }
 
     if !emit_mode {
         println!("=== AST (", stmts.len(), " top-level stmts) ===");

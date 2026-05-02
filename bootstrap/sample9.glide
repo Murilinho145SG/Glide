@@ -1,0 +1,11 @@
+fn main() -> int {
+    let v: *Vector<int> = Vector::new();
+    v.push(10);
+    v.push(20);
+    v.push(30);
+    let mut total: int = 0;
+    for let i: int = 0; i < v.len(); i++ {
+        total = total + v.get(i);
+    }
+    return total;
+}
