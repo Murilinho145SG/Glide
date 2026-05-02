@@ -2,6 +2,75 @@
 
 import "ast.glide";
 
+fn is_stdlib_primitive(name: string) -> bool {
+    if name.eq("int") { return true; }
+    if name.eq("uint") { return true; }
+    if name.eq("long") { return true; }
+    if name.eq("float") { return true; }
+    if name.eq("char") { return true; }
+    if name.eq("bool") { return true; }
+    if name.eq("string") { return true; }
+    return false;
+}
+
+fn emit_stdlib_runtime() {
+    println!("// ---- glide runtime ----");
+    println!("static int __glide_string_len(const char* s) { return (int)strlen(s); }");
+    println!("static bool __glide_string_eq(const char* a, const char* b) { return strcmp(a, b) == 0; }");
+    println!("static char __glide_string_at(const char* s, int i) { return s[i]; }");
+    println!("static const char* __glide_string_concat(const char* a, const char* b) {");
+    println!("    size_t la = strlen(a), lb = strlen(b);");
+    println!("    char* out = (char*)malloc(la + lb + 1);");
+    println!("    memcpy(out, a, la); memcpy(out + la, b, lb); out[la + lb] = 0;");
+    println!("    return out;");
+    println!("}");
+    println!("static const char* __glide_string_substring(const char* s, int start, int end) {");
+    println!("    int n = (int)strlen(s);");
+    println!("    if (start < 0) start = 0;");
+    println!("    if (end > n) end = n;");
+    println!("    if (start > end) start = end;");
+    println!("    int len = end - start;");
+    println!("    char* out = (char*)malloc((size_t)len + 1);");
+    println!("    memcpy(out, s + start, (size_t)len); out[len] = 0;");
+    println!("    return out;");
+    println!("}");
+    println!("static int __glide_char_to_int(char c) { return (int)(unsigned char)c; }");
+    println!("static bool __glide_char_is_digit(char c) { return c >= '0' && c <= '9'; }");
+    println!("static bool __glide_char_is_alpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }");
+    println!("static int __glide_int_abs(int n) { return n < 0 ? -n : n; }");
+    println!("static const char* __glide_int_to_string(int n) {");
+    println!("    char buf[32];");
+    println!("    int len = snprintf(buf, sizeof(buf), \"%d\", n);");
+    println!("    char* out = (char*)malloc((size_t)len + 1);");
+    println!("    memcpy(out, buf, (size_t)len + 1);");
+    println!("    return out;");
+    println!("}");
+    println!("static const char* __glide_bool_to_string(bool b) { return b ? \"true\" : \"false\"; }");
+    println!("static int __glide_argc_g = 0;");
+    println!("static char** __glide_argv_g = NULL;");
+    println!("static void __glide_args_init(int argc, char** argv) { __glide_argc_g = argc; __glide_argv_g = argv; }");
+    println!("static int args_count(void) { return __glide_argc_g; }");
+    println!("static const char* args_at(int i) {");
+    println!("    if (i < 0 || i >= __glide_argc_g) return \"\";");
+    println!("    return __glide_argv_g[i];");
+    println!("}");
+    println!("static const char* read_file(const char* path) {");
+    println!("    FILE* f = fopen(path, \"rb\");");
+    println!("    if (!f) return \"\";");
+    println!("    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);");
+    println!("    char* buf = (char*)malloc((size_t)n + 1);");
+    println!("    size_t got = fread(buf, 1, (size_t)n, f); fclose(f); buf[got] = 0;");
+    println!("    return buf;");
+    println!("}");
+    println!("static bool write_file(const char* path, const char* content) {");
+    println!("    FILE* f = fopen(path, \"wb\"); if (!f) return false;");
+    println!("    size_t n = strlen(content);");
+    println!("    size_t wrote = fwrite(content, 1, n, f); fclose(f);");
+    println!("    return wrote == n;");
+    println!("}");
+    println!("");
+}
+
 // Track variable types per scope so method calls (obj.method()) can be
 // resolved to Type_method(obj, ...) by stripping pointers and using the
 // receiver's named type as the prefix.
@@ -615,9 +684,18 @@ pub fn emit_expr(g: *CG, e: *Expr) {
             }
 
             if stripped != null && stripped.kind == TY_NAMED {
-                print!(stripped.name.concat("_").concat(method));
+                let mut prefix: string = stripped.name;
+                let mut fn_name: string = "";
+                if is_stdlib_primitive(stripped.name) {
+                    fn_name = "__glide_".concat(prefix).concat("_").concat(method);
+                } else {
+                    fn_name = prefix.concat("_").concat(method);
+                }
+                print!(fn_name);
                 print!("(");
-                let needs_addr: bool = recv_ty != null
+                // Primitives are passed by value (no auto-`&`).
+                let is_prim: bool = is_stdlib_primitive(stripped.name);
+                let needs_addr: bool = !is_prim && recv_ty != null
                     && recv_ty.kind != TY_POINTER
                     && recv_ty.kind != TY_BORROW
                     && recv_ty.kind != TY_BORROW_MUT;
@@ -955,6 +1033,8 @@ pub fn emit_program(program: *Vector<Stmt>) {
     println!("#include <stddef.h>");
     println!("#include <string.h>");
     println!("");
+
+    emit_stdlib_runtime();
 
     let g: *CG = CG::new();
 
