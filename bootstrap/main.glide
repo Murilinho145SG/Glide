@@ -122,22 +122,21 @@ fn main() -> int {
 
         println!("=== Type checking ===");
     }
-    let t: *Typer = Typer::new();
-    check_program(t, stmts);
-    if t.error_count > 0 {
-        println!(t.error_count, "type error(s)");
+    if !emit_mode {
+        let t: *Typer = Typer::new();
+        check_program(t, stmts);
+        if t.error_count > 0 {
+            println!(t.error_count, "type error(s)");
+        } else {
+            println!("ok — no type errors");
+        }
         t.free();
-        p.free();
-        lex.free();
-        return 1;
     }
-    if !emit_mode { println!("ok — no type errors"); }
 
     if emit_mode {
         emit_program(stmts);
     }
 
-    t.free();
     p.free();
     lex.free();
     return 0;

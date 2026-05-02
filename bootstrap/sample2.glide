@@ -1,0 +1,18 @@
+struct Point {
+    x: int,
+    y: int,
+}
+
+impl Point {
+    fn make(x: int, y: int) -> Point {
+        return Point { x: x, y: y };
+    }
+    fn sum(self: *Point) -> int {
+        return self.x + self.y;
+    }
+}
+
+fn main() -> int {
+    let p: Point = Point::make(10, 32);
+    return p.sum();
+}

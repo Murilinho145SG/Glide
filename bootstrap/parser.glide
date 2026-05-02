@@ -591,16 +591,20 @@ fn parse_prefix(p: *Parser) -> *Expr {
         // the identifier starts with a capital letter (convention for types).
         if p.at_op("{") && starts_uppercase(tok.lexeme) && !p.no_struct_lit {
             p.advance();
-            let args: *Vector<Expr> = Vector::new();
+            let names: *Vector<string> = Vector::new();
+            let values: *Vector<Expr> = Vector::new();
             while !p.at_op("}") && !p.at_eof() {
-                let _fname: string = p.expect_ident();
+                let fname: string = p.expect_ident();
                 p.expect_op(":");
                 let v: *Expr = parse_expr(p, 0);
-                if v != null { args.push(*v); }
+                if v != null {
+                    names.push(fname);
+                    values.push(*v);
+                }
                 if !p.eat_op(",") { break; }
             }
             p.expect_op("}");
-            return expr_struct_lit(tok.lexeme, null, line, col);
+            return expr_struct_lit(tok.lexeme, names, values, line, col);
         }
         return expr_ident(tok.lexeme, line, col);
     }

@@ -93,6 +93,9 @@ pub struct Expr {
     args: *Vector<Expr>, // Call args (we keep them by-value in Vector for simplicity)
     field: string,       // Member field, Cast target encoded via type
     cast_to: *Type,
+
+    // For EX_STRUCT_LIT: parallel to args, holds field names
+    field_names: *Vector<string>,
 }
 
 // ---- Stmt kinds ----------------------------------------------------------
@@ -476,13 +479,14 @@ pub struct StructLitField {
     value: *Expr,
 }
 
-pub fn expr_struct_lit(type_name: string, fields: *Vector<StructLitField>, line: int, col: int) -> *Expr {
+pub fn expr_struct_lit(type_name: string, names: *Vector<string>, values: *Vector<Expr>, line: int, col: int) -> *Expr {
     let e: *Expr = malloc(sizeof(Expr)) as *Expr;
     e.kind = EX_STRUCT_LIT;
     e.line = line;
     e.column = col;
     e.str_val = type_name;
-    e.args = null;
+    e.field_names = names;
+    e.args = values;
     e.field = "";
     return e;
 }

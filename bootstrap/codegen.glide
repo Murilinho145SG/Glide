@@ -2,6 +2,64 @@
 
 import "ast.glide";
 
+// Track variable types per scope so method calls (obj.method()) can be
+// resolved to Type_method(obj, ...) by stripping pointers and using the
+// receiver's named type as the prefix.
+pub struct CG {
+    scope: *HashMap<Type>,
+}
+
+impl CG {
+    pub fn new() -> *CG {
+        let g: *CG = malloc(sizeof(CG)) as *CG;
+        let s: *HashMap<Type> = HashMap::new();
+        g.scope = s;
+        return g;
+    }
+
+    pub fn free(self: *CG) {
+        self.scope.free();
+        free(self as *void);
+    }
+
+    fn declare(self: *CG, name: string, ty: *Type) {
+        if ty != null { self.scope.insert(name, *ty); }
+    }
+
+    fn lookup(self: *CG, name: string) -> *Type {
+        if !self.scope.contains(name) { return null; }
+        let t: Type = self.scope.get(name);
+        let p: *Type = malloc(sizeof(Type)) as *Type;
+        *p = t;
+        return p;
+    }
+}
+
+fn strip_ptr(t: *Type) -> *Type {
+    if t == null { return null; }
+    if t.kind == TY_POINTER || t.kind == TY_BORROW || t.kind == TY_BORROW_MUT {
+        return strip_ptr(t.inner);
+    }
+    return t;
+}
+
+// Best-effort inference of an expression's type for codegen's method dispatch.
+// Only handles the patterns we need: idents (look up scope) and pointer derefs.
+fn infer_for_codegen(g: *CG, e: *Expr) -> *Type {
+    if e == null { return null; }
+    if e.kind == EX_IDENT { return g.lookup(e.str_val); }
+    if e.kind == EX_UNARY {
+        let inner: *Type = infer_for_codegen(g, e.operand);
+        if e.op_code == UN_DEREF && inner != null && inner.kind == TY_POINTER {
+            return inner.inner;
+        }
+        return inner;
+    }
+    if e.kind == EX_MEMBER { return null; } // would need struct field registry
+    if e.kind == EX_CAST { return e.cast_to; }
+    return null;
+}
+
 // ---- type to C name ------------------------------------------------------
 
 pub fn type_to_c(t: *Type) -> string {
@@ -83,7 +141,7 @@ fn ind(n: int) {
 
 // ---- expressions ---------------------------------------------------------
 
-pub fn emit_expr(e: *Expr) {
+pub fn emit_expr(g: *CG, e: *Expr) {
     if e == null { print!("/* null */"); return; }
     if e.kind == EX_INT { print!(e.int_val); return; }
     if e.kind == EX_FLOAT { print!(e.int_val); return; }   // float not modelled in payload yet
@@ -94,67 +152,106 @@ pub fn emit_expr(e: *Expr) {
     if e.kind == EX_IDENT { print!(e.str_val); return; }
     if e.kind == EX_BINARY {
         print!("(");
-        emit_expr(e.lhs);
+        emit_expr(g, e.lhs);
         print!(" ", op_to_c(e.op_code), " ");
-        emit_expr(e.rhs);
+        emit_expr(g, e.rhs);
         print!(")");
         return;
     }
     if e.kind == EX_UNARY {
         print!("(", unop_to_c(e.op_code));
-        emit_expr(e.operand);
+        emit_expr(g, e.operand);
         print!(")");
         return;
     }
     if e.kind == EX_ASSIGN {
         print!("(");
-        emit_expr(e.lhs);
+        emit_expr(g, e.lhs);
         print!(" ", op_to_c(e.op_code), " ");
-        emit_expr(e.rhs);
+        emit_expr(g, e.rhs);
         print!(")");
         return;
     }
     if e.kind == EX_CALL {
-        emit_expr(e.lhs);
+        // Method call: callee is a Member. Rewrite to Type_method(receiver, args).
+        if e.lhs != null && e.lhs.kind == EX_MEMBER {
+            let recv: *Expr = e.lhs.lhs;
+            let method: string = e.lhs.field;
+            let recv_ty: *Type = infer_for_codegen(g, recv);
+            let stripped: *Type = strip_ptr(recv_ty);
+            if stripped != null && stripped.kind == TY_NAMED {
+                print!(stripped.name.concat("_").concat(method));
+                print!("(");
+                // If receiver is a value type, take its address so it matches
+                // the conventional `*Self` first param.
+                let needs_addr: bool = recv_ty != null
+                    && recv_ty.kind != TY_POINTER
+                    && recv_ty.kind != TY_BORROW
+                    && recv_ty.kind != TY_BORROW_MUT;
+                if needs_addr { print!("&"); }
+                emit_expr(g, recv);
+                if e.args != null {
+                    for let i: int = 0; i < e.args.len(); i++ {
+                        print!(", ");
+                        let a: Expr = e.args.get(i);
+                        emit_expr(g, &a);
+                    }
+                }
+                print!(")");
+                return;
+            }
+            // Fallback: emit as plain member call.
+        }
+        emit_expr(g, e.lhs);
         print!("(");
         if e.args != null {
             for let i: int = 0; i < e.args.len(); i++ {
                 if i > 0 { print!(", "); }
                 let a: Expr = e.args.get(i);
-                emit_expr(&a);
+                emit_expr(g, &a);
             }
         }
         print!(")");
         return;
     }
     if e.kind == EX_MEMBER {
+        // Auto-deref for pointer receivers: `p.x` -> `p->x` for *T,
+        // but C also allows `(*p).x`. Emit `->` when receiver is pointer.
+        let recv_ty: *Type = infer_for_codegen(g, e.lhs);
+        if recv_ty != null
+            && (recv_ty.kind == TY_POINTER
+                || recv_ty.kind == TY_BORROW
+                || recv_ty.kind == TY_BORROW_MUT) {
+            print!("(");
+            emit_expr(g, e.lhs);
+            print!("->", e.field, ")");
+            return;
+        }
         print!("(");
-        emit_expr(e.lhs);
-        print!(".", e.field);
-        print!(")");
+        emit_expr(g, e.lhs);
+        print!(".", e.field, ")");
         return;
     }
     if e.kind == EX_INDEX {
-        emit_expr(e.lhs);
+        emit_expr(g, e.lhs);
         print!("[");
-        emit_expr(e.rhs);
+        emit_expr(g, e.rhs);
         print!("]");
         return;
     }
     if e.kind == EX_CAST {
         print!("((", type_to_c(e.cast_to), ")");
-        emit_expr(e.lhs);
+        emit_expr(g, e.lhs);
         print!(")");
         return;
     }
     if e.kind == EX_PATH {
-        print!(e.str_val, "_", e.field);
+        print!(e.str_val.concat("_").concat(e.field));
         return;
     }
-    if e.kind == EX_POSTINC { emit_expr(e.lhs); print!("++"); return; }
-    if e.kind == EX_POSTDEC { emit_expr(e.lhs); print!("--"); return; }
+    if e.kind == EX_POSTINC { emit_expr(g, e.lhs); print!("++"); return; }
+    if e.kind == EX_POSTDEC { emit_expr(g, e.lhs); print!("--"); return; }
     if e.kind == EX_MACRO {
-        // Simple println!/print! handling.
         if e.str_val.eq("println") || e.str_val.eq("print") {
             print!("printf(");
             if e.args != null && e.args.len() > 0 {
@@ -163,12 +260,12 @@ pub fn emit_expr(e: *Expr) {
                     print!("\"%s");
                     if e.str_val.eq("println") { print!("\\n"); }
                     print!("\", ");
-                    emit_expr(&first);
+                    emit_expr(g, &first);
                 } else {
                     print!("\"%d");
                     if e.str_val.eq("println") { print!("\\n"); }
                     print!("\", ");
-                    emit_expr(&first);
+                    emit_expr(g, &first);
                 }
             } else {
                 print!("\"\\n\"");
@@ -180,7 +277,16 @@ pub fn emit_expr(e: *Expr) {
         return;
     }
     if e.kind == EX_STRUCT_LIT {
-        print!("(", e.str_val, "){0}");  // placeholder
+        print!("((", e.str_val, "){");
+        if e.field_names != null && e.args != null {
+            for let i: int = 0; i < e.args.len(); i++ {
+                if i > 0 { print!(", "); }
+                print!(".", e.field_names.get(i), " = ");
+                let v: Expr = e.args.get(i);
+                emit_expr(g, &v);
+            }
+        }
+        print!("})");
         return;
     }
     print!("/* unknown expr ", e.kind, " */ 0");
@@ -188,18 +294,19 @@ pub fn emit_expr(e: *Expr) {
 
 // ---- statements ----------------------------------------------------------
 
-pub fn emit_stmt(s: *Stmt, depth: int) {
+pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
     if s == null { return; }
     if s.kind == ST_LET || s.kind == ST_CONST {
         ind(depth);
         if s.let_ty != null {
             print!(type_to_c(s.let_ty), " ", s.name);
+            g.declare(s.name, s.let_ty);
         } else {
             print!("/* infer */ int ", s.name);
         }
         if s.let_value != null {
             print!(" = ");
-            emit_expr(s.let_value);
+            emit_expr(g, s.let_value);
         }
         println!(";");
         return;
@@ -207,13 +314,13 @@ pub fn emit_stmt(s: *Stmt, depth: int) {
     if s.kind == ST_RETURN {
         ind(depth);
         print!("return");
-        if s.expr_value != null { print!(" "); emit_expr(s.expr_value); }
+        if s.expr_value != null { print!(" "); emit_expr(g, s.expr_value); }
         println!(";");
         return;
     }
     if s.kind == ST_EXPR {
         ind(depth);
-        emit_expr(s.expr_value);
+        emit_expr(g, s.expr_value);
         println!(";");
         return;
     }
@@ -221,12 +328,12 @@ pub fn emit_stmt(s: *Stmt, depth: int) {
     if s.kind == ST_CONTINUE { ind(depth); println!("continue;"); return; }
     if s.kind == ST_IF {
         ind(depth); print!("if (");
-        emit_expr(s.cond);
+        emit_expr(g, s.cond);
         println!(") {");
         if s.then_body != null {
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
-                emit_stmt(&b, depth + 1);
+                emit_stmt(g, &b, depth + 1);
             }
         }
         ind(depth);
@@ -234,7 +341,7 @@ pub fn emit_stmt(s: *Stmt, depth: int) {
             println!("} else {");
             for let i: int = 0; i < s.else_body.len(); i++ {
                 let b: Stmt = s.else_body.get(i);
-                emit_stmt(&b, depth + 1);
+                emit_stmt(g, &b, depth + 1);
             }
             ind(depth); println!("}");
         } else {
@@ -244,12 +351,12 @@ pub fn emit_stmt(s: *Stmt, depth: int) {
     }
     if s.kind == ST_WHILE {
         ind(depth); print!("while (");
-        emit_expr(s.cond);
+        emit_expr(g, s.cond);
         println!(") {");
         if s.then_body != null {
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
-                emit_stmt(&b, depth + 1);
+                emit_stmt(g, &b, depth + 1);
             }
         }
         ind(depth); println!("}");
@@ -258,29 +365,29 @@ pub fn emit_stmt(s: *Stmt, depth: int) {
     if s.kind == ST_FOR {
         ind(depth); print!("for (");
         if s.for_init != null {
-            // Inline emit without trailing ; since C requires single ; here
             if s.for_init.kind == ST_LET {
                 if s.for_init.let_ty != null {
                     print!(type_to_c(s.for_init.let_ty), " ", s.for_init.name);
+                    g.declare(s.for_init.name, s.for_init.let_ty);
                 } else {
                     print!("int ", s.for_init.name);
                 }
                 if s.for_init.let_value != null {
-                    print!(" = "); emit_expr(s.for_init.let_value);
+                    print!(" = "); emit_expr(g, s.for_init.let_value);
                 }
             } else {
-                if s.for_init.expr_value != null { emit_expr(s.for_init.expr_value); }
+                if s.for_init.expr_value != null { emit_expr(g, s.for_init.expr_value); }
             }
         }
         print!("; ");
-        if s.cond != null { emit_expr(s.cond); }
+        if s.cond != null { emit_expr(g, s.cond); }
         print!("; ");
-        if s.for_step != null { emit_expr(s.for_step); }
+        if s.for_step != null { emit_expr(g, s.for_step); }
         println!(") {");
         if s.then_body != null {
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
-                emit_stmt(&b, depth + 1);
+                emit_stmt(g, &b, depth + 1);
             }
         }
         ind(depth); println!("}");
@@ -291,7 +398,7 @@ pub fn emit_stmt(s: *Stmt, depth: int) {
         if s.then_body != null {
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
-                emit_stmt(&b, depth + 1);
+                emit_stmt(g, &b, depth + 1);
             }
         }
         ind(depth); println!("}");
@@ -316,16 +423,66 @@ fn emit_fn_signature(s: *Stmt) {
     print!(")");
 }
 
-fn emit_fn(s: *Stmt) {
+fn emit_fn(g: *CG, s: *Stmt) {
     emit_fn_signature(s);
     println!(" {");
+    // Add params to scope so method calls inside the body work.
+    g.scope.clear();
+    if s.fn_params != null {
+        for let i: int = 0; i < s.fn_params.len(); i++ {
+            let p: Param = s.fn_params.get(i);
+            g.declare(p.name, p.ty);
+        }
+    }
     if s.fn_body != null {
         for let i: int = 0; i < s.fn_body.len(); i++ {
             let b: Stmt = s.fn_body.get(i);
-            emit_stmt(&b, 1);
+            emit_stmt(g, &b, 1);
         }
     }
     println!("}");
+}
+
+fn emit_impl(g: *CG, s: *Stmt) {
+    if s.impl_methods == null { return; }
+    let prefix: string = "X";
+    if s.impl_target != null && s.impl_target.kind == TY_NAMED {
+        prefix = s.impl_target.name;
+    }
+    for let i: int = 0; i < s.impl_methods.len(); i++ {
+        let m: Stmt = s.impl_methods.get(i);
+        // Mangle method name: Type_method.
+        let mangled: string = prefix.concat("_").concat(m.name);
+        // Emit a fn with mangled name.
+        let mut saved_name: string = m.name;
+        // We can't mutate the Stmt easily here; emit signature inline then body.
+        print!(type_to_c(m.fn_ret_ty), " ", mangled, "(");
+        if m.fn_params == null || m.fn_params.len() == 0 {
+            print!("void");
+        } else {
+            for let j: int = 0; j < m.fn_params.len(); j++ {
+                if j > 0 { print!(", "); }
+                let p: Param = m.fn_params.get(j);
+                print!(type_to_c(p.ty), " ", p.name);
+            }
+        }
+        println!(") {");
+        g.scope.clear();
+        if m.fn_params != null {
+            for let j: int = 0; j < m.fn_params.len(); j++ {
+                let p: Param = m.fn_params.get(j);
+                g.declare(p.name, p.ty);
+            }
+        }
+        if m.fn_body != null {
+            for let j: int = 0; j < m.fn_body.len(); j++ {
+                let b: Stmt = m.fn_body.get(j);
+                emit_stmt(g, &b, 1);
+            }
+        }
+        println!("}");
+        println!("");
+    }
 }
 
 fn emit_struct(s: *Stmt) {
@@ -349,22 +506,34 @@ pub fn emit_program(program: *Vector<Stmt>) {
     println!("#include <string.h>");
     println!("");
 
-    // Struct definitions first.
+    let g: *CG = CG::new();
+
+    // Forward typedef structs (for self-referential pointers).
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_STRUCT { println!("typedef struct ", s.name, " ", s.name, ";"); }
+    }
+    println!("");
+
+    // Struct definitions.
     for let i: int = 0; i < program.len(); i++ {
         let s: Stmt = program.get(i);
         if s.kind == ST_STRUCT { emit_struct(&s); }
     }
 
-    // Forward declarations.
+    // Forward fn declarations.
     for let i: int = 0; i < program.len(); i++ {
         let s: Stmt = program.get(i);
         if s.kind == ST_FN { emit_fn_signature(&s); println!(";"); }
     }
     println!("");
 
-    // Function definitions.
+    // Function + impl definitions.
     for let i: int = 0; i < program.len(); i++ {
         let s: Stmt = program.get(i);
-        if s.kind == ST_FN { emit_fn(&s); println!(""); }
+        if s.kind == ST_FN { emit_fn(g, &s); println!(""); }
+        if s.kind == ST_IMPL { emit_impl(g, &s); }
     }
+
+    g.free();
 }
