@@ -39,6 +39,13 @@ struct StructInfo {
 }
 
 #[derive(Debug, Clone)]
+struct EnumInfo {
+    variants: Vec<EnumVariant>,
+    home_file: Option<std::path::PathBuf>,
+    is_pub: bool,
+}
+
+#[derive(Debug, Clone)]
 struct LocalSlot {
     ty: Type,
     decl_pos: Pos,
@@ -105,6 +112,7 @@ impl SymbolIndex {
 
 pub struct Typer {
     structs: HashMap<String, StructInfo>,
+    enums: HashMap<String, EnumInfo>,
     fns: HashMap<String, FnSig>,
     scopes: Vec<HashMap<String, LocalSlot>>,
     current_ret: Option<Type>,
@@ -125,6 +133,7 @@ impl Typer {
     pub fn new() -> Self {
         let mut t = Self {
             structs: HashMap::new(),
+            enums: HashMap::new(),
             fns: HashMap::new(),
             scopes: Vec::new(),
             current_ret: None,
@@ -336,6 +345,26 @@ impl Typer {
                     is_method: false,
                 });
             }
+            StmtKind::Enum { name, variants } => {
+                self.enums.insert(
+                    name.clone(),
+                    EnumInfo {
+                        variants: variants.clone(),
+                        home_file: file.clone(),
+                        is_pub: stmt.is_pub,
+                    },
+                );
+                self.index.decls.push(DeclInfo {
+                    pos: stmt.pos,
+                    name: name.clone(),
+                    kind: DeclKind::Struct,
+                    ty: None,
+                    detail: format!("enum {}", name),
+                    module: module.clone(),
+                    file: file.clone(),
+                    is_method: false,
+                });
+            }
             StmtKind::Impl { target, methods, .. } => {
                 let prefix = target.mangle();
                 for m in methods {
@@ -399,6 +428,8 @@ impl Typer {
                 self.check_impl(interface, target, methods)
             }
             StmtKind::Import(p) => StmtKind::Import(p),
+            StmtKind::Enum { name, variants } => StmtKind::Enum { name, variants },
+            StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
             other => {
                 self.error("unsupported top-level statement".into());
                 other
@@ -584,7 +615,84 @@ impl Typer {
                 self.error("`import` only allowed at top level".into());
                 StmtKind::Break
             }
+            StmtKind::Enum { .. } => {
+                self.error("`enum` only allowed at top level".into());
+                StmtKind::Break
+            }
+            StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
         }
+    }
+
+    fn check_match(&mut self, scrutinee: Expr, arms: Vec<MatchArm>) -> StmtKind {
+        let (sc_new, sc_ty) = self.check_expr(scrutinee);
+        let enum_name = match &sc_ty {
+            Type::Named(n) if self.enums.contains_key(n) => Some(n.clone()),
+            _ => None,
+        };
+        let mut new_arms = Vec::with_capacity(arms.len());
+        for arm in arms {
+            self.scopes.push(HashMap::new());
+            let pat = self.check_pattern(arm.pattern, &sc_ty, enum_name.as_deref());
+            let body: Vec<Stmt> = arm.body.into_iter().map(|s| self.check_stmt(s)).collect();
+            self.scopes.pop();
+            new_arms.push(MatchArm { pattern: pat, body });
+        }
+        StmtKind::Match { scrutinee: sc_new, arms: new_arms }
+    }
+
+    fn check_pattern(&mut self, pat: Pattern, scrut_ty: &Type, enum_hint: Option<&str>) -> Pattern {
+        let pos = pat.pos;
+        let kind = match pat.kind {
+            PatternKind::Wildcard => PatternKind::Wildcard,
+            PatternKind::Bind(name) => {
+                self.declare(name.clone(), scrut_ty.clone(), pos);
+                PatternKind::Bind(name)
+            }
+            PatternKind::Literal(e) => {
+                let (e_new, e_ty) = self.check_expr(*e);
+                self.expect_type(scrut_ty, &e_ty, "match literal pattern");
+                PatternKind::Literal(Box::new(e_new))
+            }
+            PatternKind::Variant { enum_name, variant, bindings } => {
+                let resolved_enum = enum_name.clone()
+                    .or_else(|| enum_hint.map(|s| s.to_string()));
+                let info = match resolved_enum.as_ref().and_then(|n| self.enums.get(n).cloned()) {
+                    Some(i) => i,
+                    None => {
+                        self.error(format!("unknown enum for variant `{}`", variant));
+                        return Pattern { kind: PatternKind::Wildcard, pos };
+                    }
+                };
+                let v = match info.variants.iter().find(|v| v.name == variant) {
+                    Some(v) => v.clone(),
+                    None => {
+                        self.error(format!(
+                            "enum `{}` has no variant `{}`",
+                            resolved_enum.as_deref().unwrap_or("?"), variant
+                        ));
+                        return Pattern { kind: PatternKind::Wildcard, pos };
+                    }
+                };
+                if v.fields.len() != bindings.len() {
+                    self.error(format!(
+                        "variant `{}::{}` expects {} field(s), got {}",
+                        resolved_enum.as_deref().unwrap_or("?"), variant,
+                        v.fields.len(), bindings.len(),
+                    ));
+                }
+                let mut new_bindings = Vec::with_capacity(bindings.len());
+                for (i, b) in bindings.into_iter().enumerate() {
+                    let field_ty = v.fields.get(i).cloned().unwrap_or_else(error_ty);
+                    new_bindings.push(self.check_pattern(b, &field_ty, None));
+                }
+                PatternKind::Variant {
+                    enum_name: resolved_enum,
+                    variant,
+                    bindings: new_bindings,
+                }
+            }
+        };
+        Pattern { kind, pos }
     }
 
     fn check_let(
@@ -914,8 +1022,60 @@ impl Typer {
             }
 
             ExprKind::Path { ty, member } => {
+                if let Some(info) = self.enums.get(&ty).cloned() {
+                    if let Some(v) = info.variants.iter().find(|v| v.name == member) {
+                        if !v.fields.is_empty() {
+                            self.error(format!(
+                                "variant `{}::{}` requires {} arg(s)",
+                                ty, member, v.fields.len()
+                            ));
+                        }
+                        return (
+                            ExprKind::EnumCtor { enum_name: ty.clone(), variant: member, args: Vec::new() },
+                            Type::Named(ty),
+                        );
+                    }
+                    self.error(format!("enum `{}` has no variant `{}`", ty, member));
+                    return (ExprKind::Ident(format!("{}_{}", ty, member)), error_ty());
+                }
                 let mangled = format!("{}_{}", ty, member);
                 self.check_expr_kind(ExprKind::Ident(mangled), pos)
+            }
+
+            ExprKind::EnumCtor { enum_name, variant, args } => {
+                let info = match self.enums.get(&enum_name).cloned() {
+                    Some(i) => i,
+                    None => {
+                        self.error(format!("unknown enum `{}`", enum_name));
+                        return (ExprKind::EnumCtor { enum_name, variant, args }, error_ty());
+                    }
+                };
+                let v = match info.variants.iter().find(|v| v.name == variant) {
+                    Some(v) => v.clone(),
+                    None => {
+                        self.error(format!("enum `{}` has no variant `{}`", enum_name, variant));
+                        return (ExprKind::EnumCtor { enum_name, variant, args }, error_ty());
+                    }
+                };
+                if v.fields.len() != args.len() {
+                    self.error(format!(
+                        "variant `{}::{}` expects {} arg(s), got {}",
+                        enum_name, variant, v.fields.len(), args.len()
+                    ));
+                }
+                let mut new_args = Vec::with_capacity(args.len());
+                for (i, a) in args.into_iter().enumerate() {
+                    let (a_new, a_ty) = self.check_expr(a);
+                    if let Some(expected) = v.fields.get(i) {
+                        self.expect_type(expected, &a_ty, &format!("variant `{}::{}` field {}", enum_name, variant, i));
+                    }
+                    new_args.push(a_new);
+                }
+                let result_ty = Type::Named(enum_name.clone());
+                (
+                    ExprKind::EnumCtor { enum_name, variant, args: new_args },
+                    result_ty,
+                )
             }
 
             ExprKind::ArrayLit { elements, .. } => {
@@ -954,6 +1114,20 @@ impl Typer {
     fn check_call(&mut self, callee: Expr, args: Vec<Expr>, pos: Pos) -> (Expr, Type) {
         if let ExprKind::Member(_, _) = &callee.kind {
             return self.check_method_call(callee, args, pos);
+        }
+
+        if let ExprKind::Path { ty, member } = &callee.kind {
+            if self.enums.contains_key(ty) {
+                let (kind, ret_ty) = self.check_expr_kind(
+                    ExprKind::EnumCtor {
+                        enum_name: ty.clone(),
+                        variant: member.clone(),
+                        args,
+                    },
+                    pos,
+                );
+                return (Expr::new(kind, pos), ret_ty);
+            }
         }
 
         let fn_name = match &callee.kind {

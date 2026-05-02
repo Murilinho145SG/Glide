@@ -8,6 +8,8 @@
   "impl"
   "import"
   "pub"
+  "enum"
+  "match"
   "if"
   "else"
   "while"

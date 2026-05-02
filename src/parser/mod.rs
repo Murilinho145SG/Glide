@@ -134,6 +134,10 @@ impl Parser {
             self.parse_fn()
         } else if self.at_keyword(Keyword::Struct) {
             self.parse_struct_decl()
+        } else if self.at_keyword(Keyword::Enum) {
+            self.parse_enum()
+        } else if self.at_keyword(Keyword::Match) {
+            self.parse_match()
         } else if self.at_keyword(Keyword::Interface) {
             self.parse_interface()
         } else if self.at_keyword(Keyword::Impl) {
@@ -188,6 +192,159 @@ impl Parser {
         };
         self.expect_op(Operator::Semicolon)?;
         Ok(StmtKind::Import(path))
+    }
+
+    fn parse_enum(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'enum'
+        let name = self.expect_ident()?;
+        self.expect_op(Operator::LBrace)?;
+        let mut variants = Vec::new();
+        while !self.at_op(Operator::RBrace) && !self.at_eof() {
+            if let TokenKind::Error(msg) = &self.current.token {
+                return Err(self.err(format!("lexer error: {}", msg)));
+            }
+            let pos = self.current_pos();
+            let vname = self.expect_ident()?;
+            let mut fields = Vec::new();
+            if self.eat_op(Operator::LParen) {
+                if !self.at_op(Operator::RParen) {
+                    loop {
+                        fields.push(self.parse_type()?);
+                        if !self.eat_op(Operator::Comma) {
+                            break;
+                        }
+                    }
+                }
+                self.expect_op(Operator::RParen)?;
+            }
+            variants.push(EnumVariant { name: vname, fields, pos });
+            if !self.eat_op(Operator::Comma) {
+                break;
+            }
+        }
+        self.expect_op(Operator::RBrace)?;
+        Ok(StmtKind::Enum { name, variants })
+    }
+
+    fn parse_match(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'match'
+        let scrutinee = self.parse_cond_expr()?;
+        self.expect_op(Operator::LBrace)?;
+        let mut arms = Vec::new();
+        while !self.at_op(Operator::RBrace) && !self.at_eof() {
+            if let TokenKind::Error(msg) = &self.current.token {
+                return Err(self.err(format!("lexer error: {}", msg)));
+            }
+            let pattern = self.parse_pattern()?;
+            self.expect_op(Operator::ArrowFunction)?; // '=>'
+            let body = if self.at_op(Operator::LBrace) {
+                self.parse_block()?
+            } else {
+                let pos = self.current_pos();
+                let lhs = self.parse_expr(0)?;
+                let expr = self.parse_assign_chain(lhs)?;
+                vec![Stmt {
+                    kind: StmtKind::Expr(expr),
+                    pos,
+                    is_pub: false,
+                    source_file: None,
+                }]
+            };
+            arms.push(MatchArm { pattern, body });
+            self.eat_op(Operator::Comma);
+        }
+        self.expect_op(Operator::RBrace)?;
+        Ok(StmtKind::Match { scrutinee, arms })
+    }
+
+    fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let pos = self.current_pos();
+        if let TokenKind::Operator(Operator::BitAnd) = self.current.token {
+            // Reserved for &-patterns later; not supported now.
+        }
+        match &self.current.token {
+            TokenKind::Identifier(name) if name == "_" => {
+                self.advance();
+                Ok(Pattern { kind: PatternKind::Wildcard, pos })
+            }
+            TokenKind::Identifier(_) => {
+                let first = self.expect_ident()?;
+                if self.at_op(Operator::DoubleColon) {
+                    self.advance();
+                    let variant = self.expect_ident()?;
+                    let bindings = self.parse_pattern_args()?;
+                    Ok(Pattern {
+                        kind: PatternKind::Variant {
+                            enum_name: Some(first),
+                            variant,
+                            bindings,
+                        },
+                        pos,
+                    })
+                } else if self.at_op(Operator::LParen) {
+                    // bare variant constructor with args: Some(x)
+                    let bindings = self.parse_pattern_args()?;
+                    Ok(Pattern {
+                        kind: PatternKind::Variant {
+                            enum_name: None,
+                            variant: first,
+                            bindings,
+                        },
+                        pos,
+                    })
+                } else {
+                    // Bare ident: could be a variant (no args) OR a binding.
+                    // Resolution: if name starts with uppercase letter, treat as variant.
+                    // Otherwise, treat as binding.
+                    let is_variant = first.chars().next()
+                        .map(|c| c.is_ascii_uppercase())
+                        .unwrap_or(false);
+                    if is_variant {
+                        Ok(Pattern {
+                            kind: PatternKind::Variant {
+                                enum_name: None,
+                                variant: first,
+                                bindings: Vec::new(),
+                            },
+                            pos,
+                        })
+                    } else {
+                        Ok(Pattern { kind: PatternKind::Bind(first), pos })
+                    }
+                }
+            }
+            TokenKind::Int(_) | TokenKind::Float(_) | TokenKind::String(_)
+            | TokenKind::Char(_)
+            | TokenKind::Keyword(Keyword::True) | TokenKind::Keyword(Keyword::False)
+            | TokenKind::Keyword(Keyword::Null) => {
+                let lit = self.parse_prefix()?;
+                Ok(Pattern {
+                    kind: PatternKind::Literal(Box::new(lit)),
+                    pos,
+                })
+            }
+            _ => Err(self.err(format!(
+                "expected a pattern but found '{}'",
+                self.current.lexeme
+            ))),
+        }
+    }
+
+    fn parse_pattern_args(&mut self) -> Result<Vec<Pattern>, ParseError> {
+        if !self.eat_op(Operator::LParen) {
+            return Ok(Vec::new());
+        }
+        let mut out = Vec::new();
+        if !self.at_op(Operator::RParen) {
+            loop {
+                out.push(self.parse_pattern()?);
+                if !self.eat_op(Operator::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect_op(Operator::RParen)?;
+        Ok(out)
     }
 
     fn parse_interface(&mut self) -> Result<StmtKind, ParseError> {

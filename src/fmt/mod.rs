@@ -188,6 +188,34 @@ impl Formatter {
                 self.write_indent();
                 self.write("}\n");
             }
+            StmtKind::Enum { name, variants } => {
+                self.write_indent();
+                if s.is_pub { self.write("pub "); }
+                self.write("enum ");
+                self.write(name);
+                if variants.is_empty() {
+                    self.write(" {}\n");
+                    return;
+                }
+                self.write(" {\n");
+                self.indent += 1;
+                for v in variants {
+                    self.write_indent();
+                    self.write(&v.name);
+                    if !v.fields.is_empty() {
+                        self.write("(");
+                        for (i, f) in v.fields.iter().enumerate() {
+                            if i > 0 { self.write(", "); }
+                            self.write(&format_type(f));
+                        }
+                        self.write(")");
+                    }
+                    self.write(",\n");
+                }
+                self.indent -= 1;
+                self.write_indent();
+                self.write("}\n");
+            }
             _ => {
                 self.write_indent();
                 self.emit_simple_stmt(s);
@@ -197,6 +225,36 @@ impl Formatter {
 
     fn emit_stmt(&mut self, s: &Stmt) {
         match &s.kind {
+            StmtKind::Match { scrutinee, arms } => {
+                self.write_indent();
+                self.write("match ");
+                self.emit_expr(scrutinee, PREC_NONE);
+                self.write(" {\n");
+                self.indent += 1;
+                for arm in arms {
+                    self.write_indent();
+                    self.emit_pattern(&arm.pattern);
+                    self.write(" => ");
+                    if arm.body.len() == 1 {
+                        if let StmtKind::Expr(e) = &arm.body[0].kind {
+                            self.emit_expr(e, PREC_NONE);
+                            self.write(",\n");
+                            continue;
+                        }
+                    }
+                    self.write("{\n");
+                    self.indent += 1;
+                    for s in &arm.body {
+                        self.emit_stmt(s);
+                    }
+                    self.indent -= 1;
+                    self.write_indent();
+                    self.write("}\n");
+                }
+                self.indent -= 1;
+                self.write_indent();
+                self.write("}\n");
+            }
             StmtKind::Block(stmts) => {
                 self.write_indent();
                 self.write("{\n");
@@ -283,6 +341,29 @@ impl Formatter {
         self.indent -= 1;
         self.write_indent();
         self.write("}");
+    }
+
+    fn emit_pattern(&mut self, pat: &Pattern) {
+        match &pat.kind {
+            PatternKind::Wildcard => self.write("_"),
+            PatternKind::Bind(name) => self.write(name),
+            PatternKind::Literal(e) => self.emit_expr(e, PREC_NONE),
+            PatternKind::Variant { enum_name, variant, bindings } => {
+                if let Some(en) = enum_name {
+                    self.write(en);
+                    self.write("::");
+                }
+                self.write(variant);
+                if !bindings.is_empty() {
+                    self.write("(");
+                    for (i, b) in bindings.iter().enumerate() {
+                        if i > 0 { self.write(", "); }
+                        self.emit_pattern(b);
+                    }
+                    self.write(")");
+                }
+            }
+        }
     }
 
     fn emit_simple_stmt(&mut self, s: &Stmt) {
@@ -497,6 +578,20 @@ impl Formatter {
                 self.write(ty);
                 self.write("::");
                 self.write(member);
+            }
+
+            ExprKind::EnumCtor { enum_name, variant, args } => {
+                self.write(enum_name);
+                self.write("::");
+                self.write(variant);
+                if !args.is_empty() {
+                    self.write("(");
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 { self.write(", "); }
+                        self.emit_expr(a, PREC_NONE);
+                    }
+                    self.write(")");
+                }
             }
         }
     }

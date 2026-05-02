@@ -1,0 +1,33 @@
+enum Shape {
+    Circle(int),
+    Rectangle(int, int),
+    Empty,
+}
+
+fn area(s: Shape) -> int {
+    let result: int = 0;
+    match s {
+        Shape::Circle(r) => {
+            result = r * r * 3;
+        }
+        Shape::Rectangle(w, h) => {
+            result = w * h;
+        }
+        Shape::Empty => {
+            result = 0;
+        }
+    }
+    return result;
+}
+
+fn main() -> int {
+    let c: Shape = Shape::Circle(5);
+    let r: Shape = Shape::Rectangle(3, 4);
+    let e: Shape = Shape::Empty;
+
+    printf("circle area = %d\n", area(c));
+    printf("rect area   = %d\n", area(r));
+    printf("empty area  = %d\n", area(e));
+
+    return 0;
+}

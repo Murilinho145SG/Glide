@@ -33,6 +33,9 @@ pub struct Codegen {
     spawn_stubs: String,
     uses_concurrency: bool,
     new_count: usize,
+    match_count: usize,
+    known_enums: std::collections::HashSet<String>,
+    enum_infos: HashMap<String, Vec<(String, Vec<Type>)>>,
 }
 
 impl Codegen {
@@ -45,6 +48,9 @@ impl Codegen {
             spawn_stubs: String::new(),
             uses_concurrency: false,
             new_count: 0,
+            match_count: 0,
+            known_enums: std::collections::HashSet::new(),
+            enum_infos: HashMap::new(),
         }
     }
 
@@ -62,9 +68,24 @@ impl Codegen {
 
         self.write_prelude();
 
+        for stmt in program {
+            if let StmtKind::Enum { name, variants } = &stmt.kind {
+                self.known_enums.insert(name.clone());
+                let info: Vec<(String, Vec<Type>)> = variants
+                    .iter()
+                    .map(|v| (v.name.clone(), v.fields.clone()))
+                    .collect();
+                self.enum_infos.insert(name.clone(), info);
+            }
+        }
+
         let mut any_struct = false;
         for stmt in program {
             if let StmtKind::Struct { name, .. } = &stmt.kind {
+                self.push(&format!("typedef struct {} {};\n", name, name));
+                any_struct = true;
+            }
+            if let StmtKind::Enum { name, .. } = &stmt.kind {
                 self.push(&format!("typedef struct {} {};\n", name, name));
                 any_struct = true;
             }
@@ -74,6 +95,9 @@ impl Codegen {
         for stmt in program {
             if let StmtKind::Struct { name, fields } = &stmt.kind {
                 self.emit_struct_def(name, fields)?;
+            }
+            if let StmtKind::Enum { name, variants } = &stmt.kind {
+                self.emit_enum_def(name, variants)?;
             }
         }
 
@@ -126,6 +150,38 @@ impl Codegen {
         }
         self.indent -= 1;
         self.push("};\n\n");
+        Ok(())
+    }
+
+    fn emit_enum_def(&mut self, name: &str, variants: &[EnumVariant]) -> Result<(), CodegenError> {
+        let has_payload = variants.iter().any(|v| !v.fields.is_empty());
+
+        self.push(&format!("struct {} {{\n", name));
+        self.push("    int tag;\n");
+        if has_payload {
+            self.push("    union {\n");
+            for v in variants {
+                if v.fields.is_empty() { continue; }
+                if v.fields.len() == 1 {
+                    let ty = self.type_to_c(&v.fields[0]);
+                    self.push(&format!("        {} v_{};\n", ty, v.name));
+                } else {
+                    self.push(&format!("        struct {{\n"));
+                    for (i, f) in v.fields.iter().enumerate() {
+                        let ty = self.type_to_c(f);
+                        self.push(&format!("            {} f{};\n", ty, i));
+                    }
+                    self.push(&format!("        }} v_{};\n", v.name));
+                }
+            }
+            self.push("    } data;\n");
+        }
+        self.push("};\n");
+        for (i, v) in variants.iter().enumerate() {
+            let upper = enum_tag_name(name, &v.name);
+            self.push(&format!("#define {} {}\n", upper, i));
+        }
+        self.push("\n");
         Ok(())
     }
 
@@ -246,7 +302,7 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::Let { .. } | StmtKind::Const { .. } => self.emit_stmt(stmt),
             StmtKind::Struct { name, fields } => self.emit_struct_def(name, fields),
-            StmtKind::Interface { .. } | StmtKind::Import(_) => Ok(()),
+            StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } => Ok(()),
             StmtKind::Impl { methods, .. } => {
                 for m in methods {
                     self.emit_top_level(m)?;
@@ -483,8 +539,166 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             StmtKind::Import(_) => {
                 return Err(self.err("`import` should have been resolved before codegen".into()));
             }
+            StmtKind::Enum { .. } => {
+                return Err(self.err("`enum` only allowed at top level".into()));
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                self.emit_match(scrutinee, arms)?;
+            }
         }
         Ok(())
+    }
+
+    fn emit_match(&mut self, scrutinee: &Expr, arms: &[MatchArm]) -> Result<(), CodegenError> {
+        self.match_count += 1;
+        let var = format!("__glide_match_{}", self.match_count);
+
+        let enum_name: Option<String> = arms.iter().find_map(|a| {
+            if let PatternKind::Variant { enum_name: Some(n), .. } = &a.pattern.kind {
+                Some(n.clone())
+            } else {
+                None
+            }
+        });
+
+        self.write_indent();
+        self.push("{\n");
+        self.indent += 1;
+        self.write_indent();
+        if let Some(en) = &enum_name {
+            self.push(&format!("{} {} = ", en, var));
+        } else {
+            self.push(&format!("__typeof__("));
+            self.emit_expr(scrutinee)?;
+            self.push(&format!(") {} = ", var));
+        }
+        self.emit_expr(scrutinee)?;
+        self.push(";\n");
+
+        if let Some(enum_name) = enum_name {
+            self.write_indent();
+            self.push(&format!("switch ({}.tag) {{\n", var));
+            self.indent += 1;
+            for arm in arms {
+                self.emit_match_arm(arm, &var, &enum_name)?;
+            }
+            self.indent -= 1;
+            self.write_indent();
+            self.push("}\n");
+        } else {
+            for arm in arms {
+                self.emit_match_arm_value(arm, &var)?;
+            }
+        }
+
+        self.indent -= 1;
+        self.write_indent();
+        self.push("}\n");
+        Ok(())
+    }
+
+    fn emit_match_arm(&mut self, arm: &MatchArm, var: &str, enum_name: &str) -> Result<(), CodegenError> {
+        match &arm.pattern.kind {
+            PatternKind::Wildcard | PatternKind::Bind(_) => {
+                self.write_indent();
+                self.push("default: {\n");
+                self.indent += 1;
+                if let PatternKind::Bind(name) = &arm.pattern.kind {
+                    self.write_indent();
+                    let ty = self.match_scrutinee_type_string(enum_name);
+                    self.push(&format!("{} {} = {};\n", ty, name, var));
+                }
+                for s in &arm.body { self.emit_stmt(s)?; }
+                self.write_indent();
+                self.push("break;\n");
+                self.indent -= 1;
+                self.write_indent();
+                self.push("}\n");
+            }
+            PatternKind::Variant { variant, bindings, .. } => {
+                self.write_indent();
+                self.push(&format!("case {}: {{\n", enum_tag_name(enum_name, variant)));
+                self.indent += 1;
+                for (i, b) in bindings.iter().enumerate() {
+                    if let PatternKind::Bind(bname) = &b.kind {
+                        self.write_indent();
+                        let ty = self.variant_field_type(enum_name, variant, i);
+                        if bindings.len() == 1 {
+                            self.push(&format!("{} {} = {}.data.v_{};\n", ty, bname, var, variant));
+                        } else {
+                            self.push(&format!("{} {} = {}.data.v_{}.f{};\n", ty, bname, var, variant, i));
+                        }
+                    }
+                }
+                for s in &arm.body { self.emit_stmt(s)?; }
+                self.write_indent();
+                self.push("break;\n");
+                self.indent -= 1;
+                self.write_indent();
+                self.push("}\n");
+            }
+            PatternKind::Literal(_) => {
+                return Err(self.err("literal patterns not yet supported in enum match".into()));
+            }
+        }
+        Ok(())
+    }
+
+    fn emit_match_arm_value(&mut self, arm: &MatchArm, var: &str) -> Result<(), CodegenError> {
+        match &arm.pattern.kind {
+            PatternKind::Wildcard => {
+                self.write_indent();
+                self.push("{\n");
+                self.indent += 1;
+                for s in &arm.body { self.emit_stmt(s)?; }
+                self.indent -= 1;
+                self.write_indent();
+                self.push("}\n");
+                Ok(())
+            }
+            PatternKind::Bind(name) => {
+                self.write_indent();
+                self.push(&format!("{{\n"));
+                self.indent += 1;
+                self.write_indent();
+                self.push(&format!("__typeof__({}) {} = {};\n", var, name, var));
+                for s in &arm.body { self.emit_stmt(s)?; }
+                self.indent -= 1;
+                self.write_indent();
+                self.push("}\n");
+                Ok(())
+            }
+            PatternKind::Literal(lit) => {
+                self.write_indent();
+                self.push(&format!("if ({} == ", var));
+                self.emit_expr(lit)?;
+                self.push(") {\n");
+                self.indent += 1;
+                for s in &arm.body { self.emit_stmt(s)?; }
+                self.indent -= 1;
+                self.write_indent();
+                self.push("}\n");
+                Ok(())
+            }
+            PatternKind::Variant { .. } => {
+                Err(self.err("variant pattern requires the scrutinee to be an enum".into()))
+            }
+        }
+    }
+
+    fn match_scrutinee_type_string(&self, enum_name: &str) -> String {
+        enum_name.into()
+    }
+
+    fn variant_field_type(&self, enum_name: &str, variant: &str, idx: usize) -> String {
+        if let Some(info) = self.enum_infos.get(enum_name) {
+            if let Some(v) = info.iter().find(|v| v.0 == variant) {
+                if let Some(ty) = v.1.get(idx) {
+                    return self.type_to_c(ty);
+                }
+            }
+        }
+        "void*".into()
     }
 
     fn emit_spawn(&mut self, expr: &Expr) -> Result<(), CodegenError> {
@@ -746,6 +960,28 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 self.push("}))");
             }
 
+            ExprKind::EnumCtor { enum_name, variant, args } => {
+                self.push("((");
+                self.push(enum_name);
+                self.push("){ .tag = ");
+                self.push(&enum_tag_name(enum_name, variant));
+                if !args.is_empty() {
+                    self.push(&format!(", .data.v_{} = ", variant));
+                    if args.len() == 1 {
+                        self.emit_expr(&args[0])?;
+                    } else {
+                        self.push("{ ");
+                        for (i, a) in args.iter().enumerate() {
+                            if i > 0 { self.push(", "); }
+                            self.push(&format!(".f{} = ", i));
+                            self.emit_expr(a)?;
+                        }
+                        self.push(" }");
+                    }
+                }
+                self.push(" })");
+            }
+
             ExprKind::ArrayLit { elements, elem_type } => {
                 let elem_c = match elem_type {
                     Some(t) => self.type_to_c(t),
@@ -818,6 +1054,10 @@ impl Default for Codegen {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn enum_tag_name(enum_name: &str, variant: &str) -> String {
+    format!("__GLIDE_TAG_{}_{}", enum_name.to_uppercase(), variant.to_uppercase())
 }
 
 fn binop_to_c(op: &BinaryOp) -> &'static str {
@@ -933,8 +1173,12 @@ fn stmt_uses_concurrency(stmt: &Stmt) -> bool {
         StmtKind::Expr(e) => expr_uses_chan(e),
         StmtKind::Struct { fields, .. } => fields.iter().any(|f| ty_has_chan(&f.ty)),
         StmtKind::Break | StmtKind::Continue => false,
-        StmtKind::Interface { .. } | StmtKind::Import(_) => false,
+        StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } => false,
         StmtKind::Impl { methods, .. } => methods.iter().any(stmt_uses_concurrency),
+        StmtKind::Match { scrutinee, arms } => {
+            expr_uses_chan(scrutinee)
+                || arms.iter().any(|a| a.body.iter().any(stmt_uses_concurrency))
+        }
     }
 }
 

@@ -33,10 +33,34 @@ module.exports = grammar({
       $.import_stmt,
       $.fn_decl,
       $.struct_decl,
+      $.enum_decl,
       $.interface_decl,
       $.impl_decl,
       $.let_stmt,
       $.const_stmt,
+    ),
+
+    enum_decl: $ => seq(
+      optional('pub'),
+      'enum',
+      field('name', $.identifier),
+      '{',
+      optional(seq(
+        $.enum_variant,
+        repeat(seq(',', $.enum_variant)),
+        optional(','),
+      )),
+      '}',
+    ),
+
+    enum_variant: $ => seq(
+      field('name', $.identifier),
+      optional(seq(
+        '(',
+        $._type,
+        repeat(seq(',', $._type)),
+        ')',
+      )),
     ),
 
     import_stmt: $ => seq(
@@ -131,6 +155,7 @@ module.exports = grammar({
       $.if_stmt,
       $.while_stmt,
       $.for_stmt,
+      $.match_stmt,
       $.return_stmt,
       $.spawn_stmt,
       $.break_stmt,
@@ -138,6 +163,52 @@ module.exports = grammar({
       $.block,
       $.expression_statement,
     ),
+
+    match_stmt: $ => seq(
+      'match',
+      field('scrutinee', $._expression),
+      '{',
+      repeat($.match_arm),
+      '}',
+    ),
+
+    match_arm: $ => seq(
+      field('pattern', $._pattern),
+      '=>',
+      field('body', choice($._expression, $.block)),
+      optional(','),
+    ),
+
+    _pattern: $ => choice(
+      $.wildcard_pattern,
+      $.variant_pattern,
+      $.literal_pattern,
+      $.bind_pattern,
+    ),
+
+    wildcard_pattern: _ => '_',
+    bind_pattern: $ => prec(1, $.identifier),
+    literal_pattern: $ => choice(
+      $.number_literal,
+      $.float_literal,
+      $.string_literal,
+      $.char_literal,
+      $.bool_literal,
+      $.null_literal,
+    ),
+    variant_pattern: $ => prec(2, seq(
+      optional(seq($.identifier, '::')),
+      $.identifier,
+      optional(seq(
+        '(',
+        optional(seq(
+          $._pattern,
+          repeat(seq(',', $._pattern)),
+          optional(','),
+        )),
+        ')',
+      )),
+    )),
 
     let_stmt: $ => seq(
       'let',

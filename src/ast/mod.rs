@@ -108,6 +108,12 @@ pub enum ExprKind {
         ty: String,
         member: String,
     },
+
+    EnumCtor {
+        enum_name: String,
+        variant: String,
+        args: Vec<Expr>,
+    },
 }
 
 impl Expr {
@@ -198,6 +204,45 @@ pub enum StmtKind {
         methods: Vec<Stmt>,
     },
     Import(String),
+    Enum {
+        name: String,
+        variants: Vec<EnumVariant>,
+    },
+    Match {
+        scrutinee: Expr,
+        arms: Vec<MatchArm>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumVariant {
+    pub name: String,
+    pub fields: Vec<Type>,
+    pub pos: Pos,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: Vec<Stmt>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub pos: Pos,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatternKind {
+    Wildcard,
+    Bind(String),
+    Literal(Box<Expr>),
+    Variant {
+        enum_name: Option<String>,
+        variant: String,
+        bindings: Vec<Pattern>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

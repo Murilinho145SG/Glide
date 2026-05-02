@@ -29,6 +29,8 @@ pub enum Keyword {
     Impl,
     Import,
     Pub,
+    Enum,
+    Match,
 }
 
 impl Keyword {
@@ -58,6 +60,8 @@ impl Keyword {
             Keyword::Impl      => "impl",
             Keyword::Import    => "import",
             Keyword::Pub       => "pub",
+            Keyword::Enum      => "enum",
+            Keyword::Match     => "match",
         }
     }
 
@@ -87,6 +91,8 @@ impl Keyword {
             "impl"      => Some(Keyword::Impl),
             "import"    => Some(Keyword::Import),
             "pub"       => Some(Keyword::Pub),
+            "enum"      => Some(Keyword::Enum),
+            "match"     => Some(Keyword::Match),
             _ => None,
         }
     }
