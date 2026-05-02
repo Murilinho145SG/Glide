@@ -12,5 +12,5 @@ languages = ["Glide"]
 
 [grammars.glide]
 repository = "file:///C:/Users/bye45/Desktop/desktop/works/javascomp"
-commit     = "17fd12033c378f7027d9884751ef1787cc1cf098"
+commit     = "356754d9c7d9e8b9aa29a240d325c01ea012192c"
 path       = "glide-grammar"
