@@ -2,6 +2,21 @@
 
 import "ast.glide";
 
+fn format_spec_for(t: *Type) -> string {
+    if t == null { return "%p"; }
+    if t.kind != TY_NAMED { return "%p"; }
+    let n: string = t.name;
+    if n.eq("int") || n.eq("i8") || n.eq("i16") || n.eq("i32") { return "%d"; }
+    if n.eq("uint") || n.eq("u8") || n.eq("u16") || n.eq("u32") { return "%u"; }
+    if n.eq("i64") || n.eq("isize") || n.eq("long") { return "%lld"; }
+    if n.eq("u64") || n.eq("usize") || n.eq("ulong") { return "%llu"; }
+    if n.eq("float") || n.eq("f32") || n.eq("f64") { return "%g"; }
+    if n.eq("char") { return "%c"; }
+    if n.eq("string") { return "%s"; }
+    if n.eq("bool") { return "%s"; }
+    return "%p";
+}
+
 fn is_stdlib_primitive(name: string) -> bool {
     if name.eq("int") { return true; }
     if name.eq("uint") { return true; }
@@ -764,24 +779,44 @@ pub fn emit_expr(g: *CG, e: *Expr) {
     if e.kind == EX_POSTDEC { emit_expr(g, e.lhs); print!("--"); return; }
     if e.kind == EX_MACRO {
         if e.str_val.eq("println") || e.str_val.eq("print") {
-            print!("printf(");
-            if e.args != null && e.args.len() > 0 {
-                let first: Expr = e.args.get(0);
-                if first.kind == EX_STRING {
-                    print!("\"%s");
-                    if e.str_val.eq("println") { print!("\\n"); }
-                    print!("\", ");
-                    emit_expr(g, &first);
-                } else {
-                    print!("\"%d");
-                    if e.str_val.eq("println") { print!("\\n"); }
-                    print!("\", ");
-                    emit_expr(g, &first);
+            print!("printf(\"");
+            // Build a format string by walking args, joining with spaces.
+            if e.args != null {
+                for let i: int = 0; i < e.args.len(); i++ {
+                    if i > 0 { print!(" "); }
+                    let a: Expr = e.args.get(i);
+                    let at: *Type = infer_for_codegen(g, &a);
+                    print!(format_spec_for(at));
                 }
-            } else {
-                print!("\"\\n\"");
+            }
+            if e.str_val.eq("println") { print!("\\n"); }
+            print!("\"");
+            // Then emit args (with bool→string conversion).
+            if e.args != null {
+                for let i: int = 0; i < e.args.len(); i++ {
+                    print!(", ");
+                    let a: Expr = e.args.get(i);
+                    let at: *Type = infer_for_codegen(g, &a);
+                    if at != null && at.kind == TY_NAMED && at.name.eq("bool") {
+                        print!("__glide_bool_to_string(");
+                        emit_expr(g, &a);
+                        print!(")");
+                    } else {
+                        emit_expr(g, &a);
+                    }
+                }
             }
             print!(")");
+            return;
+        }
+        if e.str_val.eq("format") {
+            // Approximate: just concat the first string arg verbatim.
+            if e.args != null && e.args.len() > 0 {
+                let first: Expr = e.args.get(0);
+                emit_expr(g, &first);
+            } else {
+                print!("\"\"");
+            }
             return;
         }
         print!("/* macro ", e.str_val, " */ 0");
