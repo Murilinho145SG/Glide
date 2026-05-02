@@ -141,6 +141,13 @@ impl<V> HashMap<V> {
         self.values[i] = v;
     }
 
+    fn clear(self: *HashMap<V>) {
+        for let i: int = 0; i < self.cap; i++ {
+            self.occupied[i] = false;
+        }
+        self.len = 0;
+    }
+
     fn free(self: *HashMap<V>) {
         if self.cap > 0 {
             free(self.keys as *void);
