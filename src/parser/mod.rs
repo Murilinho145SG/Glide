@@ -435,11 +435,24 @@ impl Parser {
     fn parse_impl(&mut self) -> Result<StmtKind, ParseError> {
         self.advance(); // 'impl'
 
+        // Optional type params: `impl<T> Vector<T> { ... }`.
+        let type_params = self.parse_type_params()?;
+
         let first_name = self.expect_ident()?;
         let (interface, target) = if self.at_keyword(Keyword::For) {
             self.advance();
             let target = self.parse_type()?;
             (Some(first_name), target)
+        } else if self.at_op(Operator::LessThan) {
+            // Generic target: `impl<T> Vector<T>`.
+            self.advance(); // '<'
+            let mut args = Vec::new();
+            loop {
+                args.push(self.parse_type()?);
+                if !self.eat_op(Operator::Comma) { break; }
+            }
+            self.expect_close_gt()?;
+            (None, Type::Generic { name: first_name, args })
         } else {
             (None, Type::Named(first_name))
         };
@@ -466,7 +479,7 @@ impl Parser {
             methods.push(Stmt { kind, pos, is_pub, source_file: None });
         }
         self.expect_op(Operator::RBrace)?;
-        Ok(StmtKind::Impl { interface, target, methods })
+        Ok(StmtKind::Impl { interface, type_params, target, methods })
     }
 
     fn parse_struct_decl(&mut self) -> Result<StmtKind, ParseError> {
@@ -624,7 +637,9 @@ impl Parser {
 
     fn parse_fn(&mut self) -> Result<StmtKind, ParseError> {
         self.advance(); // 'fn'
-        let name = self.expect_ident()?;
+        // Allow keywords as fn names (e.g. `fn new`, `fn match`) since the
+        // context after `fn` is unambiguous.
+        let name = self.expect_ident_or_keyword()?;
         let type_params = self.parse_type_params()?;
 
         self.expect_op(Operator::LParen)?;

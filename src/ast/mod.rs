@@ -213,6 +213,7 @@ pub enum StmtKind {
     },
     Impl {
         interface: Option<String>,
+        type_params: Vec<String>,
         target: Type,
         methods: Vec<Stmt>,
     },

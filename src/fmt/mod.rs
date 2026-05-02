@@ -167,9 +167,18 @@ impl Formatter {
                 self.write_indent();
                 self.write("}\n");
             }
-            StmtKind::Impl { interface, target, methods } => {
+            StmtKind::Impl { interface, type_params, target, methods } => {
                 self.write_indent();
-                self.write("impl ");
+                self.write("impl");
+                if !type_params.is_empty() {
+                    self.write("<");
+                    for (i, tp) in type_params.iter().enumerate() {
+                        if i > 0 { self.write(", "); }
+                        self.write(tp);
+                    }
+                    self.write(">");
+                }
+                self.write(" ");
                 if let Some(iface) = interface {
                     self.write(iface);
                     self.write(" for ");

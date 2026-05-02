@@ -137,6 +137,10 @@ pub struct Typer {
     mono_queue: Vec<(String, Vec<Type>)>,
     struct_mono_queue: Vec<(String, Vec<Type>)>,
     mono_done: std::collections::HashSet<String>,
+    /// Maps a monomorphized struct name (e.g. "Vector__int") back to its
+    /// generic origin: ("Vector", [Type::Named("int")]). Lets method-call
+    /// resolution unify `*Vector<T>` against `*Named("Vector__int")`.
+    mono_origin: HashMap<String, (String, Vec<Type>)>,
     type_aliases: HashMap<String, Type>,
     scopes: Vec<HashMap<String, LocalSlot>>,
     current_ret: Option<Type>,
@@ -169,6 +173,7 @@ impl Typer {
             mono_queue: Vec::new(),
             struct_mono_queue: Vec::new(),
             mono_done: std::collections::HashSet::new(),
+            mono_origin: HashMap::new(),
             type_aliases: HashMap::new(),
             scopes: Vec::new(),
             current_ret: None,
@@ -448,19 +453,40 @@ impl Typer {
                     is_method: false,
                 });
             }
-            StmtKind::Impl { target, methods, .. } => {
-                let prefix = target.mangle();
+            StmtKind::Impl { type_params: impl_tps, target, methods, .. } => {
+                let prefix = if !impl_tps.is_empty() {
+                    match target {
+                        Type::Generic { name, .. } => name.clone(),
+                        _ => target.mangle(),
+                    }
+                } else {
+                    target.mangle()
+                };
                 for m in methods {
-                    if let StmtKind::Fn { name, params, ret_type, .. } = &m.kind {
+                    if let StmtKind::Fn { name, type_params, params, ret_type, body } = &m.kind {
                         let mangled = format!("{}_{}", prefix, name);
-                        self.fns.insert(mangled.clone(), FnSig {
-                            params: params.clone(),
-                            ret_type: ret_type.clone(),
-                            variadic: false,
-                            decl_pos: Some(m.pos),
-                            home_file: file.clone(),
-                            is_pub: true,
-                        });
+                        let mut combined_tps = impl_tps.clone();
+                        for tp in type_params {
+                            if !combined_tps.contains(tp) { combined_tps.push(tp.clone()); }
+                        }
+                        if !combined_tps.is_empty() {
+                            self.generic_fns.insert(mangled.clone(), GenericFnInfo {
+                                type_params: combined_tps,
+                                params: params.clone(),
+                                ret_type: ret_type.clone(),
+                                body: body.clone(),
+                                decl_pos: m.pos,
+                            });
+                        } else {
+                            self.fns.insert(mangled.clone(), FnSig {
+                                params: params.clone(),
+                                ret_type: ret_type.clone(),
+                                variadic: false,
+                                decl_pos: Some(m.pos),
+                                home_file: file.clone(),
+                                is_pub: true,
+                            });
+                        }
                         self.index.decls.push(DeclInfo {
                             pos: m.pos,
                             name: mangled.clone(),
@@ -542,6 +568,8 @@ impl Typer {
                 let new_args: Vec<Type> = args.iter().map(|a| self.finalize_generic(a)).collect();
                 if self.generic_structs.contains_key(name) {
                     let mangled = mono_mangle(name, &new_args);
+                    self.mono_origin.entry(mangled.clone())
+                        .or_insert_with(|| (name.clone(), new_args.clone()));
                     if !self.mono_done.contains(&mangled) {
                         self.mono_done.insert(mangled.clone());
                         self.struct_mono_queue.push((name.clone(), new_args));
@@ -571,6 +599,8 @@ impl Typer {
                 }
                 if self.generic_structs.contains_key(name) {
                     let mangled = mono_mangle(name, args);
+                    self.mono_origin.entry(mangled.clone())
+                        .or_insert_with(|| (name.clone(), args.clone()));
                     if !self.mono_done.contains(&mangled) {
                         self.mono_done.insert(mangled);
                         self.struct_mono_queue.push((name.clone(), args.clone()));
@@ -688,7 +718,10 @@ impl Typer {
                     for s in &a.body { self.collect_generic_uses_in_stmt(s); }
                 }
             }
-            StmtKind::Impl { methods, .. } => for m in methods { self.collect_generic_uses_in_stmt(m); },
+            StmtKind::Impl { type_params, methods, .. } => {
+                if !type_params.is_empty() { return; }
+                for m in methods { self.collect_generic_uses_in_stmt(m); }
+            }
             StmtKind::ExternFn { params, ret_type, .. } => {
                 for p in params { self.collect_generic_uses_in_type(&p.ty); }
                 if let Some(t) = ret_type { self.collect_generic_uses_in_type(t); }
@@ -866,8 +899,8 @@ impl Typer {
             StmtKind::Let { name, ty, value, is_mut, .. } => self.check_let(name, ty, value, is_mut),
             StmtKind::Const { name, ty, value } => self.check_const(name, ty, value),
             StmtKind::Interface { name, methods } => StmtKind::Interface { name, methods },
-            StmtKind::Impl { interface, target, methods } => {
-                self.check_impl(interface, target, methods)
+            StmtKind::Impl { interface, type_params, target, methods } => {
+                self.check_impl(interface, type_params, target, methods)
             }
             StmtKind::Import(p) => StmtKind::Import(p),
             StmtKind::Enum { name, variants } => StmtKind::Enum { name, variants },
@@ -894,23 +927,39 @@ impl Typer {
     fn check_impl(
         &mut self,
         interface: Option<String>,
+        impl_type_params: Vec<String>,
         target: Type,
         methods: Vec<Stmt>,
     ) -> StmtKind {
-        let prefix = target.mangle();
+        // For generic impls (`impl<T> Vector<T>`), use the bare struct name as
+        // the prefix so `Vector::new` mangles to `Vector_new`. Concrete impls
+        // use target.mangle() as before.
+        let prefix = if !impl_type_params.is_empty() {
+            match &target {
+                Type::Generic { name, .. } => name.clone(),
+                _ => target.mangle(),
+            }
+        } else {
+            target.mangle()
+        };
         let mut new_methods = Vec::with_capacity(methods.len());
         for m in methods {
             let pos = m.pos;
             let m_pub = m.is_pub;
             if let StmtKind::Fn { name, type_params, params, ret_type, body } = m.kind {
                 let mangled = format!("{}_{}", prefix, name);
-                let new_kind = self.check_fn(mangled, type_params, params, ret_type, body);
+                // Combine impl-level and method-level type params.
+                let mut combined_tps = impl_type_params.clone();
+                for tp in type_params {
+                    if !combined_tps.contains(&tp) { combined_tps.push(tp); }
+                }
+                let new_kind = self.check_fn(mangled, combined_tps, params, ret_type, body);
                 new_methods.push(Stmt { kind: new_kind, pos, is_pub: m_pub, source_file: None });
             } else {
                 self.error("only `fn` declarations are allowed inside `impl`".into());
             }
         }
-        StmtKind::Impl { interface, target, methods: new_methods }
+        StmtKind::Impl { interface, type_params: impl_type_params, target, methods: new_methods }
     }
 
     fn check_fn(
@@ -1959,7 +2008,10 @@ impl Typer {
         let pset: std::collections::HashSet<&String> = type_params.iter().collect();
         let n = params.len().min(arg_tys.len());
         for i in 0..n {
-            unify_for_inference(&params[i].ty, &arg_tys[i], &pset, &mut bindings);
+            // Reconstruct generic origins on the actual side so `*Vector<T>`
+            // can unify against `*Vector__int` (which we lower from `*Vector<int>`).
+            let actual = self.reconstruct_generic(&arg_tys[i]);
+            unify_for_inference(&params[i].ty, &actual, &pset, &mut bindings);
         }
         let mut out = Vec::with_capacity(type_params.len());
         for tp in type_params {
@@ -1969,6 +2021,36 @@ impl Typer {
             }
         }
         Some(out)
+    }
+
+    /// Walks a type, replacing any Type::Named whose name is a known
+    /// monomorphized struct with its original Type::Generic { name, args }.
+    /// Inverse of finalize_generic.
+    fn reconstruct_generic(&self, t: &Type) -> Type {
+        match t {
+            Type::Named(n) => {
+                if let Some((orig, args)) = self.mono_origin.get(n) {
+                    return Type::Generic {
+                        name: orig.clone(),
+                        args: args.iter().map(|a| self.reconstruct_generic(a)).collect(),
+                    };
+                }
+                t.clone()
+            }
+            Type::Pointer(inner) => Type::Pointer(Box::new(self.reconstruct_generic(inner))),
+            Type::Borrow(inner) => Type::Borrow(Box::new(self.reconstruct_generic(inner))),
+            Type::BorrowMut(inner) => Type::BorrowMut(Box::new(self.reconstruct_generic(inner))),
+            Type::Chan(inner) => Type::Chan(Box::new(self.reconstruct_generic(inner))),
+            Type::Slice(inner) => Type::Slice(Box::new(self.reconstruct_generic(inner))),
+            Type::Generic { name, args } => Type::Generic {
+                name: name.clone(),
+                args: args.iter().map(|a| self.reconstruct_generic(a)).collect(),
+            },
+            Type::FnPtr { params, ret } => Type::FnPtr {
+                params: params.iter().map(|p| self.reconstruct_generic(p)).collect(),
+                ret: ret.as_ref().map(|r| Box::new(self.reconstruct_generic(r))),
+            },
+        }
     }
 
     fn check_call(&mut self, callee: Expr, args: Vec<Expr>, pos: Pos) -> (Expr, Type) {
@@ -2464,6 +2546,68 @@ impl Typer {
                 }
             })
         });
+
+        // Generic method on a generic struct: e.g. `v.push(x)` where v is
+        // *Vector<int>. Look up the generic fn `Vector_push` and infer T from
+        // the call args (the receiver's reconstructed Generic shape supplies T).
+        if resolved.is_none() {
+            // Determine the original generic struct name from the receiver type.
+            let recv_origin: Option<String> = {
+                let r = self.resolve_alias(&obj_ty);
+                let stripped = match &r {
+                    Type::Pointer(inner) | Type::Borrow(inner) | Type::BorrowMut(inner) => (**inner).clone(),
+                    _ => r.clone(),
+                };
+                if let Type::Named(n) = &stripped {
+                    self.mono_origin.get(n).map(|(o, _)| o.clone())
+                } else if let Type::Generic { name, .. } = &stripped {
+                    Some(name.clone())
+                } else {
+                    None
+                }
+            };
+            if let Some(origin) = recv_origin {
+                let generic_name = format!("{}_{}", origin, method);
+                if let Some(g) = self.generic_fns.get(&generic_name).cloned() {
+                    let inferred = self.infer_type_args(&g.type_params, &g.params, &arg_tys);
+                    if let Some(args_ty) = inferred {
+                        let mangled = mono_mangle(&generic_name, &args_ty);
+                        if !self.mono_done.contains(&mangled) {
+                            self.mono_done.insert(mangled.clone());
+                            self.mono_queue.push((generic_name.clone(), args_ty.clone()));
+                        }
+                        let subst: HashMap<String, Type> = g.type_params.iter()
+                            .cloned()
+                            .zip(args_ty.iter().cloned())
+                            .collect();
+                        let new_params: Vec<Param> = g.params.iter().map(|p| Param {
+                            name: p.name.clone(),
+                            ty: self.finalize_generic(&subst_type(&p.ty, &subst)),
+                            pos: p.pos,
+                        }).collect();
+                        let new_ret = g.ret_type.as_ref()
+                            .map(|t| self.finalize_generic(&subst_type(t, &subst)));
+                        if new_params.len() == new_args.len() {
+                            for (i, p) in new_params.iter().enumerate() {
+                                let saved = self.current_pos;
+                                self.current_pos = new_args[i].pos;
+                                self.expect_type(
+                                    &p.ty,
+                                    &arg_tys[i],
+                                    &format!("argument `{}` of `{}`", p.name, method),
+                                );
+                                self.current_pos = saved;
+                            }
+                        }
+                        let mangled_callee = Expr::new(ExprKind::Ident(mangled), pos);
+                        return (
+                            Expr::new(ExprKind::Call(Box::new(mangled_callee), new_args), pos),
+                            new_ret.unwrap_or_else(void_ty),
+                        );
+                    }
+                }
+            }
+        }
 
         let (resolved_name, sig) = match resolved {
             Some(x) => x,
