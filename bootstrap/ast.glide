@@ -1,0 +1,232 @@
+// AST types for the Glide-in-Glide compiler.
+//
+// Glide enums use positional payloads only, so we group struct-shape data
+// behind a *T (heap-allocated boxed payload) when there are 3+ fields.
+
+// ---- Type kinds ----------------------------------------------------------
+
+pub const TY_NAMED: int = 0;       // payload: name (string)
+pub const TY_POINTER: int = 1;     // payload: inner (*Type)
+pub const TY_BORROW: int = 2;      // payload: inner (*Type)
+pub const TY_BORROW_MUT: int = 3;  // payload: inner (*Type)
+pub const TY_SLICE: int = 4;       // payload: inner (*Type)
+
+pub struct Type {
+    kind: int,
+    name: string,    // valid when kind == TY_NAMED
+    inner: *Type,    // valid for pointer/borrow/slice
+}
+
+// ---- Expr kinds ----------------------------------------------------------
+
+pub const EX_INT: int = 0;
+pub const EX_FLOAT: int = 1;
+pub const EX_STRING: int = 2;
+pub const EX_BOOL: int = 3;
+pub const EX_NULL: int = 4;
+pub const EX_IDENT: int = 5;
+pub const EX_BINARY: int = 6;       // op (int), lhs, rhs
+pub const EX_UNARY: int = 7;        // op (int), operand
+pub const EX_CALL: int = 8;         // callee, args
+pub const EX_ASSIGN: int = 9;       // op, lhs, rhs
+pub const EX_MEMBER: int = 10;      // obj, field name
+pub const EX_INDEX: int = 11;       // obj, idx
+pub const EX_CAST: int = 12;        // expr, target type
+
+// Binary op codes (subset; extend as needed)
+pub const OP_ADD: int = 1;
+pub const OP_SUB: int = 2;
+pub const OP_MUL: int = 3;
+pub const OP_DIV: int = 4;
+pub const OP_MOD: int = 5;
+pub const OP_EQ: int = 6;
+pub const OP_NE: int = 7;
+pub const OP_LT: int = 8;
+pub const OP_LE: int = 9;
+pub const OP_GT: int = 10;
+pub const OP_GE: int = 11;
+pub const OP_AND: int = 12;
+pub const OP_OR: int = 13;
+pub const OP_ASSIGN: int = 14;
+pub const OP_PLUS_ASSIGN: int = 15;
+
+pub struct Expr {
+    kind: int,
+    line: int,
+    column: int,
+
+    // primitive payloads (used per kind)
+    int_val: int,
+    str_val: string,
+    bool_val: bool,
+    op_code: int,        // for Binary, Unary, Assign
+
+    // child expressions (used per kind)
+    lhs: *Expr,          // Binary, Assign, Member, Index, Cast, Call(callee)
+    rhs: *Expr,          // Binary, Assign, Index
+    operand: *Expr,      // Unary
+
+    // call args / member field name
+    args: *Vector<Expr>, // Call args (we keep them by-value in Vector for simplicity)
+    field: string,       // Member field, Cast target encoded via type
+    cast_to: *Type,
+}
+
+// ---- Stmt kinds ----------------------------------------------------------
+
+pub const ST_LET: int = 0;
+pub const ST_RETURN: int = 1;
+pub const ST_EXPR: int = 2;
+pub const ST_IF: int = 3;
+pub const ST_WHILE: int = 4;
+pub const ST_BLOCK: int = 5;
+pub const ST_FN: int = 6;
+pub const ST_BREAK: int = 7;
+pub const ST_CONTINUE: int = 8;
+
+pub struct Param {
+    name: string,
+    ty: *Type,
+}
+
+pub struct Stmt {
+    kind: int,
+    line: int,
+    column: int,
+
+    // Let / Const
+    name: string,
+    let_ty: *Type,
+    let_value: *Expr,
+    is_mut: bool,
+
+    // Return / Expr stmt
+    expr_value: *Expr,
+
+    // If / While
+    cond: *Expr,
+    then_body: *Vector<Stmt>,
+    else_body: *Vector<Stmt>,
+
+    // Fn
+    fn_params: *Vector<Param>,
+    fn_ret_ty: *Type,
+    fn_body: *Vector<Stmt>,
+}
+
+// ---- Constructors --------------------------------------------------------
+
+pub fn ty_named(name: string) -> *Type {
+    let t: *Type = malloc(sizeof(Type)) as *Type;
+    t.kind = TY_NAMED;
+    t.name = name;
+    t.inner = null;
+    return t;
+}
+
+pub fn ty_pointer(inner: *Type) -> *Type {
+    let t: *Type = malloc(sizeof(Type)) as *Type;
+    t.kind = TY_POINTER;
+    t.name = "";
+    t.inner = inner;
+    return t;
+}
+
+pub fn expr_int(n: int, line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_INT;
+    e.line = line;
+    e.column = col;
+    e.int_val = n;
+    return e;
+}
+
+pub fn expr_string(s: string, line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_STRING;
+    e.line = line;
+    e.column = col;
+    e.str_val = s;
+    return e;
+}
+
+pub fn expr_ident(name: string, line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_IDENT;
+    e.line = line;
+    e.column = col;
+    e.str_val = name;
+    return e;
+}
+
+pub fn expr_bool(b: bool, line: int, col: int) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_BOOL;
+    e.line = line;
+    e.column = col;
+    e.bool_val = b;
+    return e;
+}
+
+pub fn expr_binary(op: int, lhs: *Expr, rhs: *Expr) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_BINARY;
+    e.line = lhs.line;
+    e.column = lhs.column;
+    e.op_code = op;
+    e.lhs = lhs;
+    e.rhs = rhs;
+    return e;
+}
+
+pub fn expr_call(callee: *Expr, args: *Vector<Expr>) -> *Expr {
+    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    e.kind = EX_CALL;
+    e.line = callee.line;
+    e.column = callee.column;
+    e.lhs = callee;
+    e.args = args;
+    return e;
+}
+
+pub fn stmt_let(name: string, ty: *Type, value: *Expr, is_mut: bool, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_LET;
+    s.line = line;
+    s.column = col;
+    s.name = name;
+    s.let_ty = ty;
+    s.let_value = value;
+    s.is_mut = is_mut;
+    return s;
+}
+
+pub fn stmt_return(v: *Expr, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_RETURN;
+    s.line = line;
+    s.column = col;
+    s.expr_value = v;
+    return s;
+}
+
+pub fn stmt_expr(e: *Expr) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_EXPR;
+    s.line = e.line;
+    s.column = e.column;
+    s.expr_value = e;
+    return s;
+}
+
+pub fn stmt_fn(name: string, params: *Vector<Param>, ret_ty: *Type, body: *Vector<Stmt>, line: int, col: int) -> *Stmt {
+    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    s.kind = ST_FN;
+    s.line = line;
+    s.column = col;
+    s.name = name;
+    s.fn_params = params;
+    s.fn_ret_ty = ret_ty;
+    s.fn_body = body;
+    return s;
+}

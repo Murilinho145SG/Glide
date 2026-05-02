@@ -1,8 +1,92 @@
-// Drives the Glide-in-Glide lexer over a source file.
-//
+// Drives the Glide-in-Glide lexer + parser over a source file.
 // Usage: glide run bootstrap/main.glide -- path/to/source.glide
 
 import "lexer.glide";
+import "ast.glide";
+import "parser.glide";
+
+fn print_indent(n: int) {
+    for let i: int = 0; i < n; i++ { print!("  "); }
+}
+
+fn print_type(t: *Type) {
+    if t == null { print!("<none>"); return; }
+    if t.kind == TY_POINTER { print!("*"); print_type(t.inner); return; }
+    if t.kind == TY_NAMED { print!(t.name); return; }
+    print!("<ty?>");
+}
+
+fn op_name(op: int) -> string {
+    if op == OP_ADD { return "+"; }
+    if op == OP_SUB { return "-"; }
+    if op == OP_MUL { return "*"; }
+    if op == OP_DIV { return "/"; }
+    if op == OP_MOD { return "%"; }
+    if op == OP_LT  { return "<"; }
+    if op == OP_GT  { return ">"; }
+    return "?";
+}
+
+fn print_expr(e: *Expr, indent: int) {
+    if e == null { print_indent(indent); println!("<null>"); return; }
+    print_indent(indent);
+    if e.kind == EX_INT { println!("Int", e.int_val); return; }
+    if e.kind == EX_STRING { println!("String \"", e.str_val, "\""); return; }
+    if e.kind == EX_BOOL { println!("Bool", e.bool_val); return; }
+    if e.kind == EX_IDENT { println!("Ident", e.str_val); return; }
+    if e.kind == EX_BINARY {
+        println!("Binary", op_name(e.op_code));
+        print_expr(e.lhs, indent + 1);
+        print_expr(e.rhs, indent + 1);
+        return;
+    }
+    if e.kind == EX_CALL {
+        println!("Call");
+        print_expr(e.lhs, indent + 1);
+        print_indent(indent + 1); println!("args:", e.args.len());
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            print_expr(&a, indent + 2);
+        }
+        return;
+    }
+    println!("<expr kind ", e.kind, ">");
+}
+
+fn print_stmt(s: *Stmt, indent: int) {
+    if s == null { print_indent(indent); println!("<null stmt>"); return; }
+    print_indent(indent);
+    if s.kind == ST_FN {
+        print!("Fn ", s.name, " (");
+        for let i: int = 0; i < s.fn_params.len(); i++ {
+            if i > 0 { print!(", "); }
+            let prm: Param = s.fn_params.get(i);
+            print!(prm.name, ": "); print_type(prm.ty);
+        }
+        print!(") -> "); print_type(s.fn_ret_ty); println!("");
+        for let i: int = 0; i < s.fn_body.len(); i++ {
+            let b: Stmt = s.fn_body.get(i);
+            print_stmt(&b, indent + 1);
+        }
+        return;
+    }
+    if s.kind == ST_LET {
+        print!("Let ", s.name, ": "); print_type(s.let_ty); println!("");
+        if s.let_value != null { print_expr(s.let_value, indent + 1); }
+        return;
+    }
+    if s.kind == ST_RETURN {
+        println!("Return");
+        if s.expr_value != null { print_expr(s.expr_value, indent + 1); }
+        return;
+    }
+    if s.kind == ST_EXPR {
+        println!("Expr");
+        print_expr(s.expr_value, indent + 1);
+        return;
+    }
+    println!("<stmt kind ", s.kind, ">");
+}
 
 fn main() -> int {
     let argc: int = args_count();
@@ -10,7 +94,6 @@ fn main() -> int {
         println!("usage: glide_boot <file>");
         return 1;
     }
-
     let path: string = args_at(argc - 1);
     let src: string = read_file(path);
     if src.eq("") {
@@ -19,19 +102,16 @@ fn main() -> int {
     }
 
     let lex: *Lexer = Lexer::new(src);
-    let mut count: int = 0;
-    while true {
-        let t: Token = lex.next_token();
-        if t.kind == TOK_EOF {
-            println!("EOF at", t.line, ":", t.column);
-            break;
-        }
-        println!(token_kind_name(t.kind), "(", t.lexeme, ") @", t.line, ":", t.column);
-        count = count + 1;
-        if count > 200 { println!("... (truncated)"); break; }
-    }
-    println!("total tokens:", count);
+    let p: *Parser = Parser::new(lex);
 
+    let stmts: *Vector<Stmt> = parse_program(p);
+    println!("=== AST (", stmts.len(), " top-level stmts) ===");
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        print_stmt(&s, 0);
+    }
+
+    p.free();
     lex.free();
     return 0;
 }

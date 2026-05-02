@@ -1,0 +1,305 @@
+// Glide-in-Glide parser. Pratt-style for expressions, recursive-descent
+// for statements. Minimal subset to start: fn decls, let, return, exprs.
+
+import "lexer.glide";
+import "ast.glide";
+
+pub struct Parser {
+    lex: *Lexer,
+    current: Token,
+    peek: Token,
+}
+
+impl Parser {
+    fn new(lex: *Lexer) -> *Parser {
+        let p: *Parser = malloc(sizeof(Parser)) as *Parser;
+        p.lex = lex;
+        p.current = lex.next_token();
+        p.peek = lex.next_token();
+        return p;
+    }
+
+    fn free(self: *Parser) {
+        free(self as *void);
+    }
+
+    fn advance(self: *Parser) -> Token {
+        let prev: Token = self.current;
+        self.current = self.peek;
+        self.peek = self.lex.next_token();
+        return prev;
+    }
+
+    fn at_eof(self: *Parser) -> bool {
+        return self.current.kind == TOK_EOF;
+    }
+
+    fn at_kw(self: *Parser, lexeme: string) -> bool {
+        if self.current.kind != TOK_KEYWORD { return false; }
+        return self.current.lexeme.eq(lexeme);
+    }
+
+    fn at_op(self: *Parser, lexeme: string) -> bool {
+        if self.current.kind != TOK_OP { return false; }
+        return self.current.lexeme.eq(lexeme);
+    }
+
+    fn eat_kw(self: *Parser, lexeme: string) -> bool {
+        if self.at_kw(lexeme) { self.advance(); return true; }
+        return false;
+    }
+
+    fn eat_op(self: *Parser, lexeme: string) -> bool {
+        if self.at_op(lexeme) { self.advance(); return true; }
+        return false;
+    }
+
+    fn expect_op(self: *Parser, lexeme: string) -> bool {
+        if self.at_op(lexeme) { self.advance(); return true; }
+        println!("parse error at", self.current.line, ":", self.current.column,
+                 "- expected '", lexeme, "' but found '", self.current.lexeme, "'");
+        return false;
+    }
+
+    fn expect_ident(self: *Parser) -> string {
+        if self.current.kind != TOK_IDENT {
+            println!("parse error at", self.current.line, ":", self.current.column,
+                     "- expected identifier but found '", self.current.lexeme, "'");
+            return "";
+        }
+        let name: string = self.current.lexeme;
+        self.advance();
+        return name;
+    }
+}
+
+// ---- top-level ------------------------------------------------------------
+
+pub fn parse_program(p: *Parser) -> *Vector<Stmt> {
+    let stmts: *Vector<Stmt> = Vector::new();
+    while !p.at_eof() {
+        let s: *Stmt = parse_top_stmt(p);
+        if s == null { break; }
+        stmts.push(*s);
+    }
+    return stmts;
+}
+
+pub fn parse_top_stmt(p: *Parser) -> *Stmt {
+    if p.at_kw("fn") {
+        return parse_fn(p);
+    }
+    if p.at_kw("let") || p.at_kw("const") {
+        return parse_let(p);
+    }
+    println!("parse error at", p.current.line, ":", p.current.column,
+             "- unexpected token '", p.current.lexeme, "' at top level");
+    p.advance();
+    return null;
+}
+
+pub fn parse_fn(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'fn'
+
+    let name: string = p.expect_ident();
+    p.expect_op("(");
+
+    let params: *Vector<Param> = Vector::new();
+    while !p.at_op(")") && !p.at_eof() {
+        let pname: string = p.expect_ident();
+        p.expect_op(":");
+        let pty: *Type = parse_type(p);
+        let prm: Param = Param { name: pname, ty: pty };
+        params.push(prm);
+        if !p.eat_op(",") { break; }
+    }
+    p.expect_op(")");
+
+    let mut ret_ty: *Type = null;
+    if p.eat_op("-") {
+        if p.eat_op(">") {
+            ret_ty = parse_type(p);
+        }
+    }
+
+    let body: *Vector<Stmt> = parse_block(p);
+    return stmt_fn(name, params, ret_ty, body, line, col);
+}
+
+pub fn parse_block(p: *Parser) -> *Vector<Stmt> {
+    let stmts: *Vector<Stmt> = Vector::new();
+    if !p.expect_op("{") { return stmts; }
+    while !p.at_op("}") && !p.at_eof() {
+        let s: *Stmt = parse_stmt(p);
+        if s != null { stmts.push(*s); }
+    }
+    p.expect_op("}");
+    return stmts;
+}
+
+pub fn parse_stmt(p: *Parser) -> *Stmt {
+    if p.at_kw("let") || p.at_kw("const") {
+        return parse_let(p);
+    }
+    if p.at_kw("return") {
+        return parse_return(p);
+    }
+    // expression statement
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    let e: *Expr = parse_expr(p, 0);
+    if e == null { return null; }
+    p.expect_op(";");
+    return stmt_expr(e);
+}
+
+pub fn parse_let(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // let / const
+
+    let mut is_mut: bool = false;
+    if p.eat_kw("mut") { is_mut = true; }
+
+    let name: string = p.expect_ident();
+
+    let mut ty: *Type = null;
+    if p.eat_op(":") {
+        ty = parse_type(p);
+    }
+
+    let mut value: *Expr = null;
+    if p.eat_op("=") {
+        value = parse_expr(p, 0);
+    }
+    p.expect_op(";");
+    return stmt_let(name, ty, value, is_mut, line, col);
+}
+
+pub fn parse_return(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'return'
+
+    let mut value: *Expr = null;
+    if !p.at_op(";") {
+        value = parse_expr(p, 0);
+    }
+    p.expect_op(";");
+    return stmt_return(value, line, col);
+}
+
+// ---- types ---------------------------------------------------------------
+
+pub fn parse_type(p: *Parser) -> *Type {
+    if p.eat_op("*") {
+        let inner: *Type = parse_type(p);
+        return ty_pointer(inner);
+    }
+    if p.current.kind == TOK_IDENT {
+        let name: string = p.current.lexeme;
+        p.advance();
+        return ty_named(name);
+    }
+    println!("parse error at", p.current.line, ":", p.current.column,
+             "- expected type but found '", p.current.lexeme, "'");
+    return ty_named("__error__");
+}
+
+// ---- expressions (Pratt) -------------------------------------------------
+
+pub fn parse_expr(p: *Parser, min_bp: int) -> *Expr {
+    let mut left: *Expr = parse_prefix(p);
+    if left == null { return null; }
+
+    while true {
+        // postfix: call
+        if p.at_op("(") {
+            p.advance();
+            let args: *Vector<Expr> = Vector::new();
+            while !p.at_op(")") && !p.at_eof() {
+                let a: *Expr = parse_expr(p, 0);
+                if a != null { args.push(*a); }
+                if !p.eat_op(",") { break; }
+            }
+            p.expect_op(")");
+            left = expr_call(left, args);
+            continue;
+        }
+
+        // binary infix
+        let info: int = peek_binop_bp(p);
+        let lbp: int = info / 100;
+        let op: int = info - lbp * 100;
+        if lbp == 0 { break; }
+        if lbp < min_bp { break; }
+        p.advance();
+        let rbp: int = lbp + 1;
+        let right: *Expr = parse_expr(p, rbp);
+        if right == null { break; }
+        left = expr_binary(op, left, right);
+    }
+
+    return left;
+}
+
+// Returns lbp*100 + op_code, or 0 if not a binary operator.
+fn peek_binop_bp(p: *Parser) -> int {
+    if p.current.kind != TOK_OP { return 0; }
+    let lex: string = p.current.lexeme;
+    if lex.eq("+") { return 100 * 10 + OP_ADD; }
+    if lex.eq("-") { return 100 * 10 + OP_SUB; }
+    if lex.eq("*") { return 100 * 11 + OP_MUL; }
+    if lex.eq("/") { return 100 * 11 + OP_DIV; }
+    if lex.eq("%") { return 100 * 11 + OP_MOD; }
+    if lex.eq("<") { return 100 * 8 + OP_LT; }
+    if lex.eq(">") { return 100 * 8 + OP_GT; }
+    return 0;
+}
+
+pub fn parse_prefix(p: *Parser) -> *Expr {
+    let tok: Token = p.current;
+
+    if tok.kind == TOK_INT {
+        p.advance();
+        return expr_int(parse_int_lexeme(tok.lexeme), tok.line, tok.column);
+    }
+    if tok.kind == TOK_STRING {
+        p.advance();
+        return expr_string(tok.lexeme, tok.line, tok.column);
+    }
+    if tok.kind == TOK_IDENT {
+        p.advance();
+        return expr_ident(tok.lexeme, tok.line, tok.column);
+    }
+    if tok.kind == TOK_KEYWORD {
+        if tok.lexeme.eq("true") { p.advance(); return expr_bool(true, tok.line, tok.column); }
+        if tok.lexeme.eq("false") { p.advance(); return expr_bool(false, tok.line, tok.column); }
+    }
+    if p.at_op("(") {
+        p.advance();
+        let e: *Expr = parse_expr(p, 0);
+        p.expect_op(")");
+        return e;
+    }
+    println!("parse error at", tok.line, ":", tok.column,
+             "- unexpected token '", tok.lexeme, "' at start of expression");
+    p.advance();
+    return null;
+}
+
+// ---- helpers -------------------------------------------------------------
+
+pub fn parse_int_lexeme(s: string) -> int {
+    let n: int = s.len();
+    let mut v: int = 0;
+    for let i: int = 0; i < n; i++ {
+        let c: char = s.at(i);
+        let ci: int = c.to_int();
+        if ci == 95 { continue; } // skip _
+        v = v * 10 + (ci - 48);
+    }
+    return v;
+}
