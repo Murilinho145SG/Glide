@@ -1,0 +1,8 @@
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn main() -> int {
+    let r: int = id(42);
+    return r;
+}

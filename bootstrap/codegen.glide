@@ -5,12 +5,19 @@ import "ast.glide";
 // Track variable types per scope so method calls (obj.method()) can be
 // resolved to Type_method(obj, ...) by stripping pointers and using the
 // receiver's named type as the prefix.
+// Pending fn monomorphization: original name + concrete type args.
+pub struct FnMonoEntry {
+    name: string,
+    args: *Vector<Type>,
+}
+
 pub struct CG {
     scope: *HashMap<Type>,
-    // Generic struct templates by name (for mono lookup).
     generic_structs: *HashMap<Stmt>,
-    // Mono of generic structs we've already emitted (mangled name → true).
+    generic_fns: *HashMap<Stmt>,
     emitted_monos: *HashMap<bool>,
+    // Pending generic fn monomorphizations to emit at the end.
+    fn_mono_queue: *Vector<FnMonoEntry>,
 }
 
 impl CG {
@@ -18,16 +25,21 @@ impl CG {
         let g: *CG = malloc(sizeof(CG)) as *CG;
         let s: *HashMap<Type> = HashMap::new();
         let gs: *HashMap<Stmt> = HashMap::new();
+        let gf: *HashMap<Stmt> = HashMap::new();
         let em: *HashMap<bool> = HashMap::new();
+        let q: *Vector<FnMonoEntry> = Vector::new();
         g.scope = s;
         g.generic_structs = gs;
+        g.generic_fns = gf;
         g.emitted_monos = em;
+        g.fn_mono_queue = q;
         return g;
     }
 
     pub fn free(self: *CG) {
         self.scope.free();
         self.generic_structs.free();
+        self.generic_fns.free();
         self.emitted_monos.free();
         free(self as *void);
     }
@@ -130,6 +142,53 @@ fn mangle_type(t: *Type) -> string {
     return "void";
 }
 
+// Unify a generic pattern type against a concrete type. Adds bindings for
+// matching type vars listed in `params`. Returns false on mismatch (currently
+// permissive: doesn't fail, just collects what it can).
+fn unify_for_inference(pat: *Type, actual: *Type, params: *Vector<string>, bindings: *HashMap<Type>) {
+    if pat == null { return; }
+    if actual == null { return; }
+    if pat.kind == TY_NAMED {
+        // Type var?
+        if params != null {
+            for let i: int = 0; i < params.len(); i++ {
+                if pat.name.eq(params.get(i)) {
+                    if !bindings.contains(pat.name) {
+                        bindings.insert(pat.name, *actual);
+                    }
+                    return;
+                }
+            }
+        }
+    }
+    if pat.kind == TY_POINTER && actual.kind == TY_POINTER {
+        unify_for_inference(pat.inner, actual.inner, params, bindings);
+        return;
+    }
+    if pat.kind == TY_BORROW && actual.kind == TY_BORROW {
+        unify_for_inference(pat.inner, actual.inner, params, bindings);
+        return;
+    }
+    if pat.kind == TY_BORROW_MUT && actual.kind == TY_BORROW_MUT {
+        unify_for_inference(pat.inner, actual.inner, params, bindings);
+        return;
+    }
+    if pat.kind == TY_SLICE && actual.kind == TY_SLICE {
+        unify_for_inference(pat.inner, actual.inner, params, bindings);
+        return;
+    }
+    if pat.kind == TY_GENERIC && actual.kind == TY_GENERIC {
+        if pat.name.eq(actual.name) && pat.args != null && actual.args != null
+            && pat.args.len() == actual.args.len() {
+            for let i: int = 0; i < pat.args.len(); i++ {
+                let pa: Type = pat.args.get(i);
+                let aa: Type = actual.args.get(i);
+                unify_for_inference(&pa, &aa, params, bindings);
+            }
+        }
+    }
+}
+
 // Recursive type substitution: walk t, replacing Type::Named(n) with the
 // matching arg from `params -> args` mapping.
 fn subst_type(t: *Type, params: *Vector<string>, args: *Vector<Type>) -> *Type {
@@ -175,6 +234,70 @@ fn subst_type(t: *Type, params: *Vector<string>, args: *Vector<Type>) -> *Type {
         return ty_generic(t.name, new_args);
     }
     return t;
+}
+
+// Substitute type params in an expression's type annotations (e.g. casts,
+// sizeof targets). Most expression kinds don't carry a type, so it's
+// mostly a structural walk.
+fn subst_expr(e: *Expr, params: *Vector<string>, args: *Vector<Type>) -> *Expr {
+    if e == null { return null; }
+    let n: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+    *n = *e;
+    if e.cast_to != null { n.cast_to = subst_type(e.cast_to, params, args); }
+    if e.lhs != null { n.lhs = subst_expr(e.lhs, params, args); }
+    if e.rhs != null { n.rhs = subst_expr(e.rhs, params, args); }
+    if e.operand != null { n.operand = subst_expr(e.operand, params, args); }
+    if e.args != null {
+        let new_args: *Vector<Expr> = Vector::new();
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            let nu: *Expr = subst_expr(&a, params, args);
+            if nu != null { new_args.push(*nu); }
+        }
+        n.args = new_args;
+    }
+    return n;
+}
+
+fn subst_stmt(s: *Stmt, params: *Vector<string>, args: *Vector<Type>) -> *Stmt {
+    if s == null { return null; }
+    let n: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+    *n = *s;
+    if s.let_ty != null { n.let_ty = subst_type(s.let_ty, params, args); }
+    if s.let_value != null { n.let_value = subst_expr(s.let_value, params, args); }
+    if s.expr_value != null { n.expr_value = subst_expr(s.expr_value, params, args); }
+    if s.cond != null { n.cond = subst_expr(s.cond, params, args); }
+    if s.for_init != null { n.for_init = subst_stmt(s.for_init, params, args); }
+    if s.for_step != null { n.for_step = subst_expr(s.for_step, params, args); }
+    if s.fn_ret_ty != null { n.fn_ret_ty = subst_type(s.fn_ret_ty, params, args); }
+    if s.then_body != null {
+        let nb: *Vector<Stmt> = Vector::new();
+        for let i: int = 0; i < s.then_body.len(); i++ {
+            let b: Stmt = s.then_body.get(i);
+            let nu: *Stmt = subst_stmt(&b, params, args);
+            if nu != null { nb.push(*nu); }
+        }
+        n.then_body = nb;
+    }
+    if s.else_body != null {
+        let nb: *Vector<Stmt> = Vector::new();
+        for let i: int = 0; i < s.else_body.len(); i++ {
+            let b: Stmt = s.else_body.get(i);
+            let nu: *Stmt = subst_stmt(&b, params, args);
+            if nu != null { nb.push(*nu); }
+        }
+        n.else_body = nb;
+    }
+    if s.fn_body != null {
+        let nb: *Vector<Stmt> = Vector::new();
+        for let i: int = 0; i < s.fn_body.len(); i++ {
+            let b: Stmt = s.fn_body.get(i);
+            let nu: *Stmt = subst_stmt(&b, params, args);
+            if nu != null { nb.push(*nu); }
+        }
+        n.fn_body = nb;
+    }
+    return n;
 }
 
 fn op_to_c(op: int) -> string {
@@ -378,13 +501,9 @@ pub fn emit_expr(g: *CG, e: *Expr) {
 pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
     if s == null { return; }
     if s.kind == ST_LET || s.kind == ST_CONST {
-        ind(depth);
-        if s.let_ty != null {
-            print!(type_to_c(s.let_ty), " ", s.name);
-            g.declare(s.name, s.let_ty);
-        } else {
-            print!("/* infer */ int ", s.name);
-        }
+        // ---- pre-pass: detect generic fn call BEFORE we emit anything,
+        //      since we may need to print a forward decl on its own line.
+
         // Generic struct literal hint: `let b: Box<int> = Box { ... }` →
         // rewrite the struct lit type_name to the mangled mono name.
         if s.let_value != null && s.let_ty != null && s.let_ty.kind == TY_GENERIC {
@@ -392,6 +511,73 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
                 && s.let_value.str_val.eq(s.let_ty.name) {
                 s.let_value.str_val = mangle_generic(s.let_ty.name, s.let_ty.args);
             }
+        }
+        // Generic fn call hint: `let v: *Vector<int> = vec_new();` —
+        // unify let-annot against the generic fn's ret_type to derive args,
+        // mangle the call name, queue mono.
+        if s.let_value != null && s.let_value.kind == EX_CALL && s.let_ty != null {
+            let callee: *Expr = s.let_value.lhs;
+            if callee != null && callee.kind == EX_IDENT
+                && g.generic_fns.contains(callee.str_val) {
+                let template: Stmt = g.generic_fns.get(callee.str_val);
+                let bindings: *HashMap<Type> = HashMap::new();
+                if template.fn_ret_ty != null {
+                    unify_for_inference(template.fn_ret_ty, s.let_ty, template.type_params, bindings);
+                }
+                // Try also from arg types vs param types.
+                if s.let_value.args != null && template.fn_params != null {
+                    let n: int = template.fn_params.len();
+                    if s.let_value.args.len() < n { n = s.let_value.args.len(); }
+                    // skip — we don't have arg types in codegen easily
+                }
+                // Build args vector in template type_param order.
+                let derived: *Vector<Type> = Vector::new();
+                let mut all: bool = true;
+                if template.type_params != null {
+                    for let i: int = 0; i < template.type_params.len(); i++ {
+                        let tn: string = template.type_params.get(i);
+                        if bindings.contains(tn) {
+                            derived.push(bindings.get(tn));
+                        } else {
+                            all = false;
+                        }
+                    }
+                }
+                if all && derived.len() > 0 {
+                    let mangled: string = mangle_generic(callee.str_val, derived);
+                    callee.str_val = mangled;
+                    if !g.emitted_monos.contains(mangled) {
+                        g.emitted_monos.insert(mangled, true);
+                        let entry: FnMonoEntry = FnMonoEntry { name: template.name, args: derived };
+                        g.fn_mono_queue.push(entry);
+                        // Emit a forward declaration immediately so the mono can be
+                        // called before its body is emitted at the end of the file.
+                        let new_ret_h: *Type = subst_type(template.fn_ret_ty, template.type_params, derived);
+                        print!(type_to_c(new_ret_h), " ", mangled, "(");
+                        if template.fn_params == null || template.fn_params.len() == 0 {
+                            print!("void");
+                        } else {
+                            for let j: int = 0; j < template.fn_params.len(); j++ {
+                                if j > 0 { print!(", "); }
+                                let pp: Param = template.fn_params.get(j);
+                                let pt: *Type = subst_type(pp.ty, template.type_params, derived);
+                                print!(type_to_c(pt), " ", pp.name);
+                            }
+                        }
+                        println!(");");
+                    }
+                }
+                bindings.free();
+            }
+        }
+
+        // ---- now emit the let stmt itself ----
+        ind(depth);
+        if s.let_ty != null {
+            print!(type_to_c(s.let_ty), " ", s.name);
+            g.declare(s.name, s.let_ty);
+        } else {
+            print!("/* infer */ int ", s.name);
         }
         if s.let_value != null {
             print!(" = ");
@@ -603,6 +789,9 @@ pub fn emit_program(program: *Vector<Stmt>) {
         if s.kind == ST_STRUCT && s.type_params != null && s.type_params.len() > 0 {
             g.generic_structs.insert(s.name, s);
         }
+        if s.kind == ST_FN && s.type_params != null && s.type_params.len() > 0 {
+            g.generic_fns.insert(s.name, s);
+        }
     }
 
     // Walk the program collecting Type::Generic uses, emit specialized structs.
@@ -660,6 +849,55 @@ pub fn emit_program(program: *Vector<Stmt>) {
         if s.kind == ST_IMPL { emit_impl(g, &s); }
     }
 
+    // Drain generic fn mono queue. New monos may queue more; loop until empty.
+    while g.fn_mono_queue.len() > 0 {
+        let e: FnMonoEntry = g.fn_mono_queue.pop();
+        if !g.generic_fns.contains(e.name) { continue; }
+        let template: Stmt = g.generic_fns.get(e.name);
+        let mangled: string = mangle_generic(e.name, e.args);
+        // Substitute type params throughout the body / params / ret.
+        let new_params_v: *Vector<Param> = Vector::new();
+        if template.fn_params != null {
+            for let i: int = 0; i < template.fn_params.len(); i++ {
+                let p: Param = template.fn_params.get(i);
+                let np: Param = Param { name: p.name, ty: subst_type(p.ty, template.type_params, e.args) };
+                new_params_v.push(np);
+            }
+        }
+        let new_ret: *Type = subst_type(template.fn_ret_ty, template.type_params, e.args);
+        let new_body: *Vector<Stmt> = Vector::new();
+        if template.fn_body != null {
+            for let i: int = 0; i < template.fn_body.len(); i++ {
+                let b: Stmt = template.fn_body.get(i);
+                let nb: *Stmt = subst_stmt(&b, template.type_params, e.args);
+                if nb != null { new_body.push(*nb); }
+            }
+        }
+        // Emit the specialized fn.
+        print!(type_to_c(new_ret), " ", mangled, "(");
+        if new_params_v.len() == 0 {
+            print!("void");
+        } else {
+            for let j: int = 0; j < new_params_v.len(); j++ {
+                if j > 0 { print!(", "); }
+                let p: Param = new_params_v.get(j);
+                print!(type_to_c(p.ty), " ", p.name);
+            }
+        }
+        println!(") {");
+        g.scope.clear();
+        for let j: int = 0; j < new_params_v.len(); j++ {
+            let p: Param = new_params_v.get(j);
+            g.declare(p.name, p.ty);
+        }
+        for let j: int = 0; j < new_body.len(); j++ {
+            let b: Stmt = new_body.get(j);
+            emit_stmt(g, &b, 1);
+        }
+        println!("}");
+        println!("");
+    }
+
     g.free();
 }
 
@@ -699,6 +937,11 @@ fn collect_generic_uses_in_type(t: *Type, out: *Vector<Type>) {
 
 fn collect_generic_uses_in_stmt(s: *Stmt, out: *Vector<Type>) {
     if s == null { return; }
+    // Skip generic fn signatures and bodies entirely — type vars (T, etc.) are
+    // not concrete uses, and the substituted versions will be collected later.
+    let is_generic: bool = s.type_params != null && s.type_params.len() > 0;
+    if is_generic { return; }
+
     if s.let_ty != null { collect_generic_uses_in_type(s.let_ty, out); }
     if s.fn_ret_ty != null { collect_generic_uses_in_type(s.fn_ret_ty, out); }
     if s.fn_params != null {
@@ -707,13 +950,13 @@ fn collect_generic_uses_in_stmt(s: *Stmt, out: *Vector<Type>) {
             collect_generic_uses_in_type(p.ty, out);
         }
     }
-    if s.struct_fields != null && (s.type_params == null || s.type_params.len() == 0) {
+    if s.struct_fields != null {
         for let i: int = 0; i < s.struct_fields.len(); i++ {
             let f: Field = s.struct_fields.get(i);
             collect_generic_uses_in_type(f.ty, out);
         }
     }
-    if s.fn_body != null && (s.type_params == null || s.type_params.len() == 0) {
+    if s.fn_body != null {
         for let i: int = 0; i < s.fn_body.len(); i++ {
             let b: Stmt = s.fn_body.get(i);
             collect_generic_uses_in_stmt(&b, out);
