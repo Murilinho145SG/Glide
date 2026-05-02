@@ -1,0 +1,40 @@
+fn id<T>(x: T) -> T {
+    return x;
+}
+
+fn max<T>(a: T, b: T) -> T {
+    if a > b {
+        return a;
+    }
+    return b;
+}
+
+fn first<T>(p: *T) -> T {
+    return *p;
+}
+
+fn swap<T>(a: *T, b: *T) {
+    let tmp: T = *a;
+    *a = *b;
+    *b = tmp;
+}
+
+fn main() -> int {
+    let n: int = id(42);
+    let m: int = max(10, 20);
+    let f: float = max(3.14, 2.71);
+
+    let mut x: int = 100;
+    let mut y: int = 200;
+    swap(&mut x, &mut y);
+    println!("after swap: x =", x, "y =", y);
+
+    let val: int = first(&x);
+    println!("first(&x) =", val);
+
+    println!("id(42) =", n);
+    println!("max(10, 20) =", m);
+    println!("max(3.14, 2.71) =", f);
+
+    return 0;
+}

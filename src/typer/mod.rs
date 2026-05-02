@@ -112,10 +112,22 @@ impl SymbolIndex {
     }
 }
 
+#[derive(Clone)]
+struct GenericFnInfo {
+    type_params: Vec<String>,
+    params: Vec<Param>,
+    ret_type: Option<Type>,
+    body: Vec<Stmt>,
+    decl_pos: Pos,
+}
+
 pub struct Typer {
     structs: HashMap<String, StructInfo>,
     enums: HashMap<String, EnumInfo>,
     fns: HashMap<String, FnSig>,
+    generic_fns: HashMap<String, GenericFnInfo>,
+    mono_queue: Vec<(String, Vec<Type>)>,
+    mono_done: std::collections::HashSet<String>,
     type_aliases: HashMap<String, Type>,
     scopes: Vec<HashMap<String, LocalSlot>>,
     current_ret: Option<Type>,
@@ -127,6 +139,7 @@ pub struct Typer {
     synth_stmts: Vec<Stmt>,
     anon_counter: usize,
     closure_struct_names: std::collections::HashSet<String>,
+    type_param_scope: std::collections::HashSet<String>,
 }
 
 impl Default for Typer {
@@ -141,6 +154,9 @@ impl Typer {
             structs: HashMap::new(),
             enums: HashMap::new(),
             fns: HashMap::new(),
+            generic_fns: HashMap::new(),
+            mono_queue: Vec::new(),
+            mono_done: std::collections::HashSet::new(),
             type_aliases: HashMap::new(),
             scopes: Vec::new(),
             current_ret: None,
@@ -152,6 +168,7 @@ impl Typer {
             synth_stmts: Vec::new(),
             anon_counter: 0,
             closure_struct_names: std::collections::HashSet::new(),
+            type_param_scope: std::collections::HashSet::new(),
         };
         t.register_builtins();
         t.register_stdlib();
@@ -306,7 +323,7 @@ impl Typer {
         let module = self.current_module.clone();
         let file = stmt.source_file.clone().or_else(|| self.current_file.clone());
         match &stmt.kind {
-            StmtKind::Struct { name, fields } => {
+            StmtKind::Struct { name, fields, .. } => {
                 self.structs.insert(
                     name.clone(),
                     StructInfo {
@@ -340,7 +357,27 @@ impl Typer {
                     });
                 }
             }
-            StmtKind::Fn { name, params, ret_type, .. } => {
+            StmtKind::Fn { name, type_params, params, ret_type, body } => {
+                if !type_params.is_empty() {
+                    self.generic_fns.insert(name.clone(), GenericFnInfo {
+                        type_params: type_params.clone(),
+                        params: params.clone(),
+                        ret_type: ret_type.clone(),
+                        body: body.clone(),
+                        decl_pos: stmt.pos,
+                    });
+                    self.index.decls.push(DeclInfo {
+                        pos: stmt.pos,
+                        name: name.clone(),
+                        kind: DeclKind::Fn,
+                        ty: ret_type.clone(),
+                        detail: format_fn_detail(name, params, ret_type.as_ref()),
+                        module: module.clone(),
+                        file: file.clone(),
+                        is_method: false,
+                    });
+                    return;
+                }
                 self.fns.insert(name.clone(), FnSig {
                     params: params.clone(),
                     ret_type: ret_type.clone(),
@@ -508,6 +545,50 @@ impl Typer {
             synth = std::mem::take(&mut self.synth_stmts);
         }
 
+        // Drain monomorphization queue. Each instantiation may itself trigger
+        // new generic calls, which append to the queue — keep going until empty.
+        while let Some((orig_name, type_args)) = self.mono_queue.pop() {
+            if let Some(g) = self.generic_fns.get(&orig_name).cloned() {
+                let mangled = mono_mangle(&orig_name, &type_args);
+                let subst: HashMap<String, Type> = g.type_params.iter()
+                    .cloned()
+                    .zip(type_args.iter().cloned())
+                    .collect();
+                let new_params: Vec<Param> = g.params.iter().map(|p| Param {
+                    name: p.name.clone(),
+                    ty: subst_type(&p.ty, &subst),
+                    pos: p.pos,
+                }).collect();
+                let new_ret = g.ret_type.as_ref().map(|t| subst_type(t, &subst));
+                let new_body: Vec<Stmt> = g.body.iter()
+                    .cloned()
+                    .map(|s| subst_stmt(s, &subst))
+                    .collect();
+                self.fns.insert(mangled.clone(), FnSig {
+                    params: new_params.clone(),
+                    ret_type: new_ret.clone(),
+                    variadic: false,
+                    decl_pos: Some(g.decl_pos),
+                    home_file: None,
+                    is_pub: true,
+                });
+                let stmt = Stmt {
+                    kind: StmtKind::Fn {
+                        name: mangled,
+                        type_params: Vec::new(),
+                        params: new_params,
+                        ret_type: new_ret,
+                        body: new_body,
+                    },
+                    pos: g.decl_pos,
+                    is_pub: false,
+                    source_file: None,
+                };
+                let checked = self.check_top(stmt);
+                new_program.insert(0, checked);
+            }
+        }
+
         let result = if self.errors.is_empty() {
             Ok(new_program)
         } else {
@@ -522,10 +603,10 @@ impl Typer {
         self.current_pos = stmt.pos;
         self.current_file = stmt.source_file.clone();
         let kind = match stmt.kind {
-            StmtKind::Fn { name, params, ret_type, body } => {
-                self.check_fn(name, params, ret_type, body)
+            StmtKind::Fn { name, type_params, params, ret_type, body } => {
+                self.check_fn(name, type_params, params, ret_type, body)
             }
-            StmtKind::Struct { name, fields } => {
+            StmtKind::Struct { name, type_params, fields } => {
                 for f in &fields {
                     if matches!(self.resolve_alias(&f.ty), Type::Borrow(_) | Type::BorrowMut(_)) {
                         let saved = self.current_pos;
@@ -537,7 +618,7 @@ impl Typer {
                         self.current_pos = saved;
                     }
                 }
-                StmtKind::Struct { name, fields }
+                StmtKind::Struct { name, type_params, fields }
             }
             StmtKind::Let { name, ty, value, is_mut, .. } => self.check_let(name, ty, value, is_mut),
             StmtKind::Const { name, ty, value } => self.check_const(name, ty, value),
@@ -578,9 +659,9 @@ impl Typer {
         for m in methods {
             let pos = m.pos;
             let m_pub = m.is_pub;
-            if let StmtKind::Fn { name, params, ret_type, body } = m.kind {
+            if let StmtKind::Fn { name, type_params, params, ret_type, body } = m.kind {
                 let mangled = format!("{}_{}", prefix, name);
-                let new_kind = self.check_fn(mangled, params, ret_type, body);
+                let new_kind = self.check_fn(mangled, type_params, params, ret_type, body);
                 new_methods.push(Stmt { kind: new_kind, pos, is_pub: m_pub, source_file: None });
             } else {
                 self.error("only `fn` declarations are allowed inside `impl`".into());
@@ -592,10 +673,17 @@ impl Typer {
     fn check_fn(
         &mut self,
         name: String,
+        type_params: Vec<String>,
         params: Vec<Param>,
         ret_type: Option<Type>,
         body: Vec<Stmt>,
     ) -> StmtKind {
+        // Generic fns: defer body checking. Each monomorphization will be
+        // checked separately after substitution. Pass through unchanged.
+        if !type_params.is_empty() {
+            return StmtKind::Fn { name, type_params, params, ret_type, body };
+        }
+
         self.scopes.push(HashMap::new());
         for p in &params {
             self.scopes.last_mut().unwrap().insert(
@@ -620,7 +708,7 @@ impl Typer {
         self.current_ret = None;
         self.scopes.pop();
 
-        StmtKind::Fn { name, params, ret_type, body: new_body }
+        StmtKind::Fn { name, type_params, params, ret_type, body: new_body }
     }
 
     fn check_stmt(&mut self, stmt: Stmt) -> Stmt {
@@ -1469,6 +1557,7 @@ impl Typer {
             let lifted_fn = Stmt {
                 kind: StmtKind::Fn {
                     name: synth_fn_name.clone(),
+                    type_params: Vec::new(),
                     params: params.clone(),
                     ret_type: ret_type.clone(),
                     body,
@@ -1507,6 +1596,7 @@ impl Typer {
         let struct_decl = Stmt {
             kind: StmtKind::Struct {
                 name: closure_struct_name.clone(),
+                type_params: Vec::new(),
                 fields: struct_fields.clone(),
             },
             pos,
@@ -1547,6 +1637,7 @@ impl Typer {
         let lifted_fn = Stmt {
             kind: StmtKind::Fn {
                 name: lifted_fn_name.clone(),
+                type_params: Vec::new(),
                 params: fn_params.clone(),
                 ret_type: ret_type.clone(),
                 body: new_body,
@@ -1593,6 +1684,28 @@ impl Typer {
             },
             result_ty,
         )
+    }
+
+    fn infer_type_args(
+        &self,
+        type_params: &[String],
+        params: &[Param],
+        arg_tys: &[Type],
+    ) -> Option<Vec<Type>> {
+        let mut bindings: HashMap<String, Type> = HashMap::new();
+        let pset: std::collections::HashSet<&String> = type_params.iter().collect();
+        let n = params.len().min(arg_tys.len());
+        for i in 0..n {
+            unify_for_inference(&params[i].ty, &arg_tys[i], &pset, &mut bindings);
+        }
+        let mut out = Vec::with_capacity(type_params.len());
+        for tp in type_params {
+            match bindings.get(tp) {
+                Some(t) => out.push(t.clone()),
+                None => return None,
+            }
+        }
+        Some(out)
     }
 
     fn check_call(&mut self, callee: Expr, args: Vec<Expr>, pos: Pos) -> (Expr, Type) {
@@ -1728,6 +1841,58 @@ impl Typer {
         if let Some(name) = &fn_name {
             if Self::is_chan_builtin(name) {
                 return self.check_chan_builtin(name, args_new, &arg_tys, pos);
+            }
+        }
+
+        // Generic fn call: infer type args, mangle name, queue monomorphization.
+        if let Some(name) = &fn_name {
+            if let Some(g) = self.generic_fns.get(name).cloned() {
+                let inferred = self.infer_type_args(&g.type_params, &g.params, &arg_tys);
+                if let Some(args_ty) = inferred {
+                    let mangled = mono_mangle(name, &args_ty);
+                    if !self.mono_done.contains(&mangled) {
+                        self.mono_done.insert(mangled.clone());
+                        self.mono_queue.push((name.clone(), args_ty.clone()));
+                    }
+                    // Substitute params/ret for type-check at this call site.
+                    let subst: HashMap<String, Type> = g.type_params.iter()
+                        .cloned()
+                        .zip(args_ty.iter().cloned())
+                        .collect();
+                    let new_params: Vec<Param> = g.params.iter().map(|p| Param {
+                        name: p.name.clone(),
+                        ty: subst_type(&p.ty, &subst),
+                        pos: p.pos,
+                    }).collect();
+                    let new_ret = g.ret_type.as_ref().map(|t| subst_type(t, &subst));
+                    if new_params.len() != args_new.len() {
+                        self.error(format!(
+                            "`{}`: expected {} argument(s), got {}",
+                            name, new_params.len(), args_new.len()
+                        ));
+                    } else {
+                        for (i, p) in new_params.iter().enumerate() {
+                            let saved = self.current_pos;
+                            self.current_pos = args_new[i].pos;
+                            self.expect_type(
+                                &p.ty,
+                                &arg_tys[i],
+                                &format!("argument `{}` of `{}`", p.name, name),
+                            );
+                            self.current_pos = saved;
+                        }
+                    }
+                    let mangled_callee = Expr::new(ExprKind::Ident(mangled), pos);
+                    return (
+                        Expr::new(ExprKind::Call(Box::new(mangled_callee), args_new), pos),
+                        new_ret.unwrap_or_else(void_ty),
+                    );
+                } else {
+                    self.error(format!(
+                        "could not infer type arguments for generic call `{}`",
+                        name
+                    ));
+                }
             }
         }
 
@@ -2464,6 +2629,181 @@ fn pointer_like_inner(t: &Type) -> Option<&Type> {
         Type::BorrowMut(inner) => Some(inner),
         _ => None,
     }
+}
+
+pub fn unify_for_inference(
+    pat: &Type,
+    actual: &Type,
+    type_params: &std::collections::HashSet<&String>,
+    bindings: &mut HashMap<String, Type>,
+) {
+    if let Type::Named(n) = pat {
+        if type_params.contains(n) {
+            bindings.entry(n.clone()).or_insert_with(|| actual.clone());
+            return;
+        }
+    }
+    match (pat, actual) {
+        (Type::Pointer(a), Type::Pointer(b))
+        | (Type::Pointer(a), Type::Borrow(b))
+        | (Type::Pointer(a), Type::BorrowMut(b))
+        | (Type::Borrow(a), Type::Borrow(b))
+        | (Type::Borrow(a), Type::Pointer(b))
+        | (Type::Borrow(a), Type::BorrowMut(b))
+        | (Type::BorrowMut(a), Type::BorrowMut(b))
+        | (Type::BorrowMut(a), Type::Pointer(b))
+        | (Type::Slice(a), Type::Slice(b))
+        | (Type::Chan(a), Type::Chan(b)) => {
+            unify_for_inference(a, b, type_params, bindings);
+        }
+        _ => {}
+    }
+}
+
+fn subst_type(t: &Type, subst: &HashMap<String, Type>) -> Type {
+    match t {
+        Type::Named(n) => {
+            if let Some(rep) = subst.get(n) {
+                return rep.clone();
+            }
+            t.clone()
+        }
+        Type::Pointer(inner) => Type::Pointer(Box::new(subst_type(inner, subst))),
+        Type::Borrow(inner) => Type::Borrow(Box::new(subst_type(inner, subst))),
+        Type::BorrowMut(inner) => Type::BorrowMut(Box::new(subst_type(inner, subst))),
+        Type::Chan(inner) => Type::Chan(Box::new(subst_type(inner, subst))),
+        Type::Slice(inner) => Type::Slice(Box::new(subst_type(inner, subst))),
+        Type::FnPtr { params, ret } => Type::FnPtr {
+            params: params.iter().map(|p| subst_type(p, subst)).collect(),
+            ret: ret.as_ref().map(|r| Box::new(subst_type(r, subst))),
+        },
+    }
+}
+
+fn mono_mangle(base: &str, args: &[Type]) -> String {
+    let mut out = String::from(base);
+    out.push_str("__");
+    for (i, a) in args.iter().enumerate() {
+        if i > 0 { out.push('_'); }
+        out.push_str(&a.mangle());
+    }
+    out
+}
+
+fn subst_stmt(stmt: Stmt, subst: &HashMap<String, Type>) -> Stmt {
+    let kind = match stmt.kind {
+        StmtKind::Let { name, ty, value, is_mut, is_owned } => StmtKind::Let {
+            name,
+            ty: ty.map(|t| subst_type(&t, subst)),
+            value: value.map(|v| subst_expr(v, subst)),
+            is_mut,
+            is_owned,
+        },
+        StmtKind::Const { name, ty, value } => StmtKind::Const {
+            name,
+            ty: ty.map(|t| subst_type(&t, subst)),
+            value: subst_expr(value, subst),
+        },
+        StmtKind::Block(stmts) => StmtKind::Block(
+            stmts.into_iter().map(|s| subst_stmt(s, subst)).collect()
+        ),
+        StmtKind::If { cond, then_block, else_block } => StmtKind::If {
+            cond: subst_expr(cond, subst),
+            then_block: then_block.into_iter().map(|s| subst_stmt(s, subst)).collect(),
+            else_block: else_block.map(|b| b.into_iter().map(|s| subst_stmt(s, subst)).collect()),
+        },
+        StmtKind::While { cond, body } => StmtKind::While {
+            cond: subst_expr(cond, subst),
+            body: body.into_iter().map(|s| subst_stmt(s, subst)).collect(),
+        },
+        StmtKind::For { init, cond, step, body } => StmtKind::For {
+            init: init.map(|s| Box::new(subst_stmt(*s, subst))),
+            cond: cond.map(|c| subst_expr(c, subst)),
+            step: step.map(|s| subst_expr(s, subst)),
+            body: body.into_iter().map(|s| subst_stmt(s, subst)).collect(),
+        },
+        StmtKind::Return(v) => StmtKind::Return(v.map(|e| subst_expr(e, subst))),
+        StmtKind::Expr(e) => StmtKind::Expr(subst_expr(e, subst)),
+        StmtKind::Spawn(e) => StmtKind::Spawn(subst_expr(e, subst)),
+        StmtKind::Defer(e) => StmtKind::Defer(subst_expr(e, subst)),
+        StmtKind::Match { scrutinee, arms } => StmtKind::Match {
+            scrutinee: subst_expr(scrutinee, subst),
+            arms: arms.into_iter().map(|a| MatchArm {
+                pattern: a.pattern,
+                body: a.body.into_iter().map(|s| subst_stmt(s, subst)).collect(),
+            }).collect(),
+        },
+        other => other,
+    };
+    Stmt { kind, pos: stmt.pos, is_pub: stmt.is_pub, source_file: stmt.source_file }
+}
+
+fn subst_expr(expr: Expr, subst: &HashMap<String, Type>) -> Expr {
+    let kind = match expr.kind {
+        ExprKind::Unary(op, inner) => ExprKind::Unary(op, Box::new(subst_expr(*inner, subst))),
+        ExprKind::Binary(op, l, r) => ExprKind::Binary(
+            op,
+            Box::new(subst_expr(*l, subst)),
+            Box::new(subst_expr(*r, subst)),
+        ),
+        ExprKind::Assign(l, op, r) => ExprKind::Assign(
+            Box::new(subst_expr(*l, subst)),
+            op,
+            Box::new(subst_expr(*r, subst)),
+        ),
+        ExprKind::Call(c, args) => ExprKind::Call(
+            Box::new(subst_expr(*c, subst)),
+            args.into_iter().map(|a| subst_expr(a, subst)).collect(),
+        ),
+        ExprKind::Index(o, i) => ExprKind::Index(
+            Box::new(subst_expr(*o, subst)),
+            Box::new(subst_expr(*i, subst)),
+        ),
+        ExprKind::Member(o, name) => ExprKind::Member(Box::new(subst_expr(*o, subst)), name),
+        ExprKind::Cast(inner, t) => ExprKind::Cast(
+            Box::new(subst_expr(*inner, subst)),
+            subst_type(&t, subst),
+        ),
+        ExprKind::Sizeof(t) => ExprKind::Sizeof(subst_type(&t, subst)),
+        ExprKind::StructLit { type_name, fields } => ExprKind::StructLit {
+            type_name,
+            fields: fields.into_iter().map(|(n, v)| (n, subst_expr(v, subst))).collect(),
+        },
+        ExprKind::New { type_name, fields } => ExprKind::New {
+            type_name,
+            fields: fields.into_iter().map(|(n, v)| (n, subst_expr(v, subst))).collect(),
+        },
+        ExprKind::ArrayLit { elements, elem_type, as_slice } => ExprKind::ArrayLit {
+            elements: elements.into_iter().map(|e| subst_expr(e, subst)).collect(),
+            elem_type: elem_type.map(|t| subst_type(&t, subst)),
+            as_slice,
+        },
+        ExprKind::AddrOfTemp { value, ty } => ExprKind::AddrOfTemp {
+            value: Box::new(subst_expr(*value, subst)),
+            ty: subst_type(&ty, subst),
+        },
+        ExprKind::MacroCall { name, args } => ExprKind::MacroCall {
+            name,
+            args: args.into_iter().map(|a| subst_expr(a, subst)).collect(),
+        },
+        ExprKind::EnumCtor { enum_name, variant, args } => ExprKind::EnumCtor {
+            enum_name,
+            variant,
+            args: args.into_iter().map(|a| subst_expr(a, subst)).collect(),
+        },
+        ExprKind::FnExpr { params, ret_type, body, is_move } => ExprKind::FnExpr {
+            params: params.into_iter().map(|p| Param {
+                name: p.name,
+                ty: subst_type(&p.ty, subst),
+                pos: p.pos,
+            }).collect(),
+            ret_type: ret_type.map(|t| subst_type(&t, subst)),
+            body: body.into_iter().map(|s| subst_stmt(s, subst)).collect(),
+            is_move,
+        },
+        other => other,
+    };
+    Expr { kind, pos: expr.pos }
 }
 
 pub fn type_name(t: &Type) -> String {

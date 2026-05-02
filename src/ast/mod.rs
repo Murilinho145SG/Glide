@@ -175,12 +175,14 @@ pub enum StmtKind {
     },
     Fn {
         name: String,
+        type_params: Vec<String>,
         params: Vec<Param>,
         ret_type: Option<Type>,
         body: Vec<Stmt>,
     },
     Struct {
         name: String,
+        type_params: Vec<String>,
         fields: Vec<Field>,
     },
     Block(Vec<Stmt>),

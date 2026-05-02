@@ -451,6 +451,7 @@ impl Parser {
     fn parse_struct_decl(&mut self) -> Result<StmtKind, ParseError> {
         self.advance(); // 'struct'
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
         self.expect_op(Operator::LBrace)?;
         let mut fields = Vec::new();
         while !self.at_op(Operator::RBrace) && !self.at_eof() {
@@ -466,7 +467,22 @@ impl Parser {
             }
         }
         self.expect_op(Operator::RBrace)?;
-        Ok(StmtKind::Struct { name, fields })
+        Ok(StmtKind::Struct { name, type_params, fields })
+    }
+
+    fn parse_type_params(&mut self) -> Result<Vec<String>, ParseError> {
+        if !self.eat_op(Operator::LessThan) {
+            return Ok(Vec::new());
+        }
+        let mut tps = Vec::new();
+        loop {
+            tps.push(self.expect_ident()?);
+            if !self.eat_op(Operator::Comma) {
+                break;
+            }
+        }
+        self.expect_op(Operator::GreaterThan)?;
+        Ok(tps)
     }
 
     fn parse_if(&mut self) -> Result<StmtKind, ParseError> {
@@ -588,6 +604,7 @@ impl Parser {
     fn parse_fn(&mut self) -> Result<StmtKind, ParseError> {
         self.advance(); // 'fn'
         let name = self.expect_ident()?;
+        let type_params = self.parse_type_params()?;
 
         self.expect_op(Operator::LParen)?;
         let params = self.parse_params()?;
@@ -599,7 +616,7 @@ impl Parser {
         };
 
         let body = self.parse_block()?;
-        Ok(StmtKind::Fn { name, params, ret_type, body })
+        Ok(StmtKind::Fn { name, type_params, params, ret_type, body })
     }
 
     fn parse_params(&mut self) -> Result<Vec<Param>, ParseError> {

@@ -72,7 +72,7 @@ impl Formatter {
 
     fn emit_top_stmt(&mut self, s: &Stmt) {
         match &s.kind {
-            StmtKind::Fn { name, params, ret_type, body } => {
+            StmtKind::Fn { name, params, ret_type, body, .. } => {
                 self.write_indent();
                 if s.is_pub { self.write("pub "); }
                 self.write("fn ");
@@ -98,7 +98,7 @@ impl Formatter {
                 self.write_indent();
                 self.write("}\n");
             }
-            StmtKind::Struct { name, fields } => {
+            StmtKind::Struct { name, fields, .. } => {
                 self.write_indent();
                 if s.is_pub { self.write("pub "); }
                 self.write("struct ");

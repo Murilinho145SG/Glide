@@ -153,7 +153,7 @@ impl Codegen {
         if any_struct { self.push("\n"); }
 
         for stmt in program {
-            if let StmtKind::Struct { name, fields } = &stmt.kind {
+            if let StmtKind::Struct { name, fields, .. } = &stmt.kind {
                 self.emit_struct_def(name, fields)?;
             }
             if let StmtKind::Enum { name, variants } = &stmt.kind {
@@ -385,11 +385,14 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
 
     fn emit_top_level(&mut self, stmt: &Stmt) -> Result<(), CodegenError> {
         match &stmt.kind {
-            StmtKind::Fn { name, params, ret_type, body } => {
+            StmtKind::Fn { name, type_params, params, ret_type, body } => {
+                if !type_params.is_empty() {
+                    return Ok(()); // generic fn template, skip; mono instances are emitted separately
+                }
                 self.emit_fn_def(name, params, ret_type.as_ref(), body)
             }
             StmtKind::Let { .. } | StmtKind::Const { .. } => self.emit_stmt(stmt),
-            StmtKind::Struct { name, fields } => self.emit_struct_def(name, fields),
+            StmtKind::Struct { name, fields, .. } => self.emit_struct_def(name, fields),
             StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } | StmtKind::TypeAlias { .. } | StmtKind::ExternFn { .. } | StmtKind::ExternType { .. } | StmtKind::CInclude(_) | StmtKind::CLink(_) => Ok(()),
             StmtKind::Impl { methods, .. } => {
                 for m in methods {
@@ -1571,13 +1574,17 @@ fn collect_all_fns(program: &Program) -> Vec<FnDecl> {
     let mut out = Vec::new();
     for stmt in program {
         match &stmt.kind {
-            StmtKind::Fn { name, params, ret_type, .. } => {
-                out.push((name.clone(), params.clone(), ret_type.clone()));
+            StmtKind::Fn { name, type_params, params, ret_type, .. } => {
+                if type_params.is_empty() {
+                    out.push((name.clone(), params.clone(), ret_type.clone()));
+                }
             }
             StmtKind::Impl { methods, .. } => {
                 for m in methods {
-                    if let StmtKind::Fn { name, params, ret_type, .. } = &m.kind {
-                        out.push((name.clone(), params.clone(), ret_type.clone()));
+                    if let StmtKind::Fn { name, type_params, params, ret_type, .. } = &m.kind {
+                        if type_params.is_empty() {
+                            out.push((name.clone(), params.clone(), ret_type.clone()));
+                        }
                     }
                 }
             }
