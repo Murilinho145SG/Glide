@@ -90,6 +90,58 @@ fn print_stmt(s: *Stmt, indent: int) {
     println!("<stmt kind ", s.kind, ">");
 }
 
+// Load a file by path (skipping if already loaded) and append its stmts,
+// recursively loading any `import "foo.glide"` it has.
+fn load_into(stmts: *Vector<Stmt>, path: string, loaded: *HashMap<bool>) {
+    if loaded.contains(path) { return; }
+    loaded.insert(path, true);
+    let src: string = read_file(path);
+    if src.eq("") { return; }
+    load_into_str(stmts, src, path, loaded);
+}
+
+// Parse a source string, recurse on imports, append non-import stmts.
+fn load_into_str(stmts: *Vector<Stmt>, src: string, origin: string, loaded: *HashMap<bool>) {
+    let lex: *Lexer = Lexer::new(src);
+    let p: *Parser = Parser::new(lex);
+    let parsed: *Vector<Stmt> = parse_program(p);
+    // Determine the directory of `origin` so relative imports resolve.
+    let dir: string = parent_dir(origin);
+    for let i: int = 0; i < parsed.len(); i++ {
+        let s: Stmt = parsed.get(i);
+        if s.kind == ST_IMPORT {
+            let unq: string = strip_quotes(s.import_path);
+            let resolved: string = resolve_import(dir, unq);
+            load_into(stmts, resolved, loaded);
+        } else {
+            stmts.push(s);
+        }
+    }
+}
+
+fn strip_quotes(s: string) -> string {
+    let n: int = s.len();
+    if n < 2 { return s; }
+    if s.at(0).to_int() != 34 { return s; }
+    return s.substring(1, n - 1);
+}
+
+fn parent_dir(path: string) -> string {
+    let n: int = path.len();
+    let mut last: int = -1;
+    for let i: int = 0; i < n; i++ {
+        let c: int = path.at(i).to_int();
+        if c == 47 || c == 92 { last = i; }
+    }
+    if last < 0 { return ""; }
+    return path.substring(0, last);
+}
+
+fn resolve_import(base: string, ipath: string) -> string {
+    if base.eq("") { return ipath; }
+    return base.concat("/").concat(ipath);
+}
+
 fn main() -> int {
     let argc: int = args_count();
     if argc < 2 {
@@ -109,24 +161,15 @@ fn main() -> int {
         if args_at(i).eq("--emit") { emit_mode = true; }
     }
 
-    // Load embedded stdlib (Vector<T>) and prepend.
-    let std_src: string = read_file("bootstrap/stdlib.glide");
+    // Tracked already-loaded files to avoid import cycles.
+    let loaded: *HashMap<bool> = HashMap::new();
     let stmts: *Vector<Stmt> = Vector::new();
-    if !std_src.eq("") {
-        let stdlex: *Lexer = Lexer::new(std_src);
-        let stdp: *Parser = Parser::new(stdlex);
-        let stdstmts: *Vector<Stmt> = parse_program(stdp);
-        for let i: int = 0; i < stdstmts.len(); i++ {
-            stmts.push(stdstmts.get(i));
-        }
-    }
 
-    let lex: *Lexer = Lexer::new(src);
-    let p: *Parser = Parser::new(lex);
-    let user_stmts: *Vector<Stmt> = parse_program(p);
-    for let i: int = 0; i < user_stmts.len(); i++ {
-        stmts.push(user_stmts.get(i));
-    }
+    // Auto-prepend embedded stdlib (Vector<T> + HashMap<V>).
+    load_into(stmts, "bootstrap/stdlib.glide", loaded);
+
+    // Load the user file (which may import others).
+    load_into_str(stmts, src, path, loaded);
 
     if !emit_mode {
         println!("=== AST (", stmts.len(), " top-level stmts) ===");
@@ -152,7 +195,5 @@ fn main() -> int {
         emit_program(stmts);
     }
 
-    p.free();
-    lex.free();
     return 0;
 }

@@ -1,0 +1,6 @@
+import "sample10_lib.glide";
+
+fn main() -> int {
+    let p: Pair = Pair { a: 7, b: 8 };
+    return doubled(p.a + p.b);
+}
