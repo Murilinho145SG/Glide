@@ -1,0 +1,445 @@
+// Glide-in-Glide type checker. Walks the AST produced by parser.glide
+// and verifies type correctness. First pass: minimal subset.
+
+import "ast.glide";
+
+// ---- type helpers --------------------------------------------------------
+
+pub fn type_eq(a: *Type, b: *Type) -> bool {
+    if a == null { return b == null; }
+    if b == null { return false; }
+    if a.kind != b.kind { return false; }
+    if a.kind == TY_NAMED {
+        return a.name.eq(b.name);
+    }
+    return type_eq(a.inner, b.inner);
+}
+
+pub fn type_to_string(t: *Type) -> string {
+    if t == null { return "<none>"; }
+    if t.kind == TY_NAMED { return t.name; }
+    if t.kind == TY_POINTER { return "*".concat(type_to_string(t.inner)); }
+    if t.kind == TY_BORROW { return "&".concat(type_to_string(t.inner)); }
+    if t.kind == TY_BORROW_MUT { return "&mut ".concat(type_to_string(t.inner)); }
+    if t.kind == TY_SLICE { return "[]".concat(type_to_string(t.inner)); }
+    return "<ty?>";
+}
+
+fn is_int_type(t: *Type) -> bool {
+    if t == null { return false; }
+    if t.kind != TY_NAMED { return false; }
+    let n: string = t.name;
+    if n.eq("int")  { return true; }
+    if n.eq("uint") { return true; }
+    if n.eq("long") { return true; }
+    if n.eq("ulong") { return true; }
+    if n.eq("i8")  { return true; }
+    if n.eq("i16") { return true; }
+    if n.eq("i32") { return true; }
+    if n.eq("i64") { return true; }
+    if n.eq("u8")  { return true; }
+    if n.eq("u16") { return true; }
+    if n.eq("u32") { return true; }
+    if n.eq("u64") { return true; }
+    if n.eq("usize") { return true; }
+    if n.eq("isize") { return true; }
+    if n.eq("char") { return true; }
+    return false;
+}
+
+fn is_float_type(t: *Type) -> bool {
+    if t == null { return false; }
+    if t.kind != TY_NAMED { return false; }
+    return t.name.eq("float") || t.name.eq("f32") || t.name.eq("f64");
+}
+
+fn is_bool_type(t: *Type) -> bool {
+    if t == null { return false; }
+    return t.kind == TY_NAMED && t.name.eq("bool");
+}
+
+fn types_compat(want: *Type, got: *Type) -> bool {
+    if type_eq(want, got) { return true; }
+    if is_int_type(want) && is_int_type(got) { return true; }
+    if is_float_type(want) && is_float_type(got) { return true; }
+    return false;
+}
+
+// ---- function signatures -------------------------------------------------
+
+pub struct FnSig {
+    name: string,
+    params: *Vector<Param>,
+    ret_type: *Type,
+}
+
+// ---- typer state ---------------------------------------------------------
+
+pub struct Typer {
+    fns: *HashMap<FnSig>,
+    structs: *HashMap<bool>,        // just registry of names for now
+    scope: *HashMap<Type>,          // current scope: name -> Type (heap-alloc'd)
+    current_ret: *Type,
+    error_count: int,
+}
+
+impl Typer {
+    pub fn new() -> *Typer {
+        let t: *Typer = malloc(sizeof(Typer)) as *Typer;
+        let fns: *HashMap<FnSig> = HashMap::new();
+        let structs: *HashMap<bool> = HashMap::new();
+        let scope: *HashMap<Type> = HashMap::new();
+        t.fns = fns;
+        t.structs = structs;
+        t.scope = scope;
+        t.current_ret = null;
+        t.error_count = 0;
+        return t;
+    }
+
+    pub fn free(self: *Typer) {
+        self.fns.free();
+        self.structs.free();
+        self.scope.free();
+        free(self as *void);
+    }
+
+    fn err(self: *Typer, line: int, col: int, msg: string) {
+        println!("type error at", line, ":", col, "-", msg);
+        self.error_count = self.error_count + 1;
+    }
+}
+
+// ---- pre-register --------------------------------------------------------
+
+pub fn pre_register(t: *Typer, program: *Vector<Stmt>) {
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN {
+            let sig: FnSig = FnSig {
+                name: s.name,
+                params: s.fn_params,
+                ret_type: s.fn_ret_ty,
+            };
+            t.fns.insert(s.name, sig);
+        }
+        if s.kind == ST_STRUCT {
+            t.structs.insert(s.name, true);
+        }
+    }
+}
+
+// ---- main check ----------------------------------------------------------
+
+pub fn check_program(t: *Typer, program: *Vector<Stmt>) {
+    pre_register(t, program);
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        check_top(t, &s);
+    }
+}
+
+fn check_top(t: *Typer, s: *Stmt) {
+    if s.kind == ST_FN {
+        check_fn(t, s);
+        return;
+    }
+    if s.kind == ST_STRUCT { return; }
+    if s.kind == ST_IMPL { return; }
+    if s.kind == ST_CONST {
+        check_let_or_const(t, s);
+        return;
+    }
+    if s.kind == ST_LET {
+        check_let_or_const(t, s);
+        return;
+    }
+    if s.kind == ST_IMPORT { return; }
+    // unknown — ignore for now
+}
+
+fn check_fn(t: *Typer, s: *Stmt) {
+    let saved_scope: *HashMap<Type> = t.scope;
+    let saved_ret: *Type = t.current_ret;
+    let new_scope: *HashMap<Type> = HashMap::new();
+    t.scope = new_scope;
+    t.current_ret = s.fn_ret_ty;
+
+    if s.fn_params != null {
+        for let i: int = 0; i < s.fn_params.len(); i++ {
+            let p: Param = s.fn_params.get(i);
+            if p.ty != null {
+                t.scope.insert(p.name, *p.ty);
+            }
+        }
+    }
+
+    if s.fn_body != null {
+        for let i: int = 0; i < s.fn_body.len(); i++ {
+            let b: Stmt = s.fn_body.get(i);
+            check_stmt(t, &b);
+        }
+    }
+
+    t.scope.free();
+    t.scope = saved_scope;
+    t.current_ret = saved_ret;
+}
+
+fn check_stmt(t: *Typer, s: *Stmt) {
+    if s.kind == ST_LET || s.kind == ST_CONST {
+        check_let_or_const(t, s);
+        return;
+    }
+    if s.kind == ST_RETURN {
+        check_return(t, s);
+        return;
+    }
+    if s.kind == ST_EXPR {
+        if s.expr_value != null { infer_expr(t, s.expr_value); }
+        return;
+    }
+    if s.kind == ST_IF {
+        if s.cond != null {
+            let ct: *Type = infer_expr(t, s.cond);
+            if !is_bool_type(ct) {
+                t.err(s.line, s.column, "if condition must be bool");
+            }
+        }
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                check_stmt(t, &b);
+            }
+        }
+        if s.else_body != null {
+            for let i: int = 0; i < s.else_body.len(); i++ {
+                let b: Stmt = s.else_body.get(i);
+                check_stmt(t, &b);
+            }
+        }
+        return;
+    }
+    if s.kind == ST_WHILE {
+        if s.cond != null {
+            let ct: *Type = infer_expr(t, s.cond);
+            if !is_bool_type(ct) {
+                t.err(s.line, s.column, "while condition must be bool");
+            }
+        }
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                check_stmt(t, &b);
+            }
+        }
+        return;
+    }
+    if s.kind == ST_FOR {
+        if s.for_init != null { check_stmt(t, s.for_init); }
+        if s.cond != null { let _u0: *Type = infer_expr(t, s.cond); }
+        if s.for_step != null { let _u1: *Type = infer_expr(t, s.for_step); }
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                check_stmt(t, &b);
+            }
+        }
+        return;
+    }
+    if s.kind == ST_BLOCK {
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                check_stmt(t, &b);
+            }
+        }
+        return;
+    }
+    if s.kind == ST_BREAK { return; }
+    if s.kind == ST_CONTINUE { return; }
+}
+
+fn check_let_or_const(t: *Typer, s: *Stmt) {
+    let mut final_ty: *Type = s.let_ty;
+    if s.let_value != null {
+        let val_ty: *Type = infer_expr(t, s.let_value);
+        if final_ty != null {
+            if !types_compat(final_ty, val_ty) {
+                t.err(s.line, s.column,
+                    "let initializer type mismatch: expected ".concat(type_to_string(final_ty))
+                    .concat(", got ").concat(type_to_string(val_ty)));
+            }
+        } else {
+            final_ty = val_ty;
+        }
+    }
+    if final_ty != null {
+        t.scope.insert(s.name, *final_ty);
+    }
+}
+
+fn check_return(t: *Typer, s: *Stmt) {
+    if s.expr_value == null {
+        if t.current_ret != null {
+            t.err(s.line, s.column, "missing return value");
+        }
+        return;
+    }
+    let vt: *Type = infer_expr(t, s.expr_value);
+    if t.current_ret == null {
+        t.err(s.line, s.column, "return with value in fn declared without ret type");
+        return;
+    }
+    if !types_compat(t.current_ret, vt) {
+        t.err(s.line, s.column,
+            "return type mismatch: expected ".concat(type_to_string(t.current_ret))
+            .concat(", got ").concat(type_to_string(vt)));
+    }
+}
+
+// ---- expression inference ------------------------------------------------
+
+pub fn infer_expr(t: *Typer, e: *Expr) -> *Type {
+    if e == null { return null; }
+    if e.kind == EX_INT { return ty_named("int"); }
+    if e.kind == EX_FLOAT { return ty_named("float"); }
+    if e.kind == EX_STRING { return ty_named("string"); }
+    if e.kind == EX_BOOL { return ty_named("bool"); }
+    if e.kind == EX_CHAR { return ty_named("char"); }
+    if e.kind == EX_NULL { return ty_pointer(ty_named("void")); }
+
+    if e.kind == EX_IDENT {
+        if t.scope.contains(e.str_val) {
+            let ty: Type = t.scope.get(e.str_val);
+            let p: *Type = malloc(sizeof(Type)) as *Type;
+            *p = ty;
+            return p;
+        }
+        // Maybe it's a function name
+        if t.fns.contains(e.str_val) {
+            return ty_named("__fn__");  // placeholder; full fn-pointer support later
+        }
+        t.err(e.line, e.column, "unknown name `".concat(e.str_val).concat("`"));
+        return null;
+    }
+
+    if e.kind == EX_BINARY {
+        let lt: *Type = infer_expr(t, e.lhs);
+        let rt: *Type = infer_expr(t, e.rhs);
+        // comparison ops -> bool
+        let op: int = e.op_code;
+        if op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_LE
+            || op == OP_GT || op == OP_GE {
+            return ty_named("bool");
+        }
+        if op == OP_AND || op == OP_OR { return ty_named("bool"); }
+        if !types_compat(lt, rt) {
+            t.err(e.line, e.column,
+                "binary op type mismatch: ".concat(type_to_string(lt))
+                .concat(" vs ").concat(type_to_string(rt)));
+        }
+        return lt;
+    }
+
+    if e.kind == EX_UNARY {
+        let inner: *Type = infer_expr(t, e.operand);
+        if e.op_code == UN_NOT { return ty_named("bool"); }
+        if e.op_code == UN_DEREF {
+            if inner != null && inner.kind == TY_POINTER { return inner.inner; }
+            return inner;
+        }
+        if e.op_code == UN_ADDR { return ty_pointer(inner); }
+        if e.op_code == UN_ADDR_MUT { return ty_pointer(inner); }
+        return inner;
+    }
+
+    if e.kind == EX_ASSIGN {
+        let lt: *Type = infer_expr(t, e.lhs);
+        let rt: *Type = infer_expr(t, e.rhs);
+        if !types_compat(lt, rt) {
+            t.err(e.line, e.column,
+                "assignment type mismatch: ".concat(type_to_string(lt))
+                .concat(" = ").concat(type_to_string(rt)));
+        }
+        return lt;
+    }
+
+    if e.kind == EX_CALL {
+        // Resolve callee. If ident, look up in fn registry.
+        if e.lhs != null && e.lhs.kind == EX_IDENT {
+            let name: string = e.lhs.str_val;
+            if t.fns.contains(name) {
+                let sig: FnSig = t.fns.get(name);
+                // Check arity (if we have args)
+                if sig.params != null && e.args != null {
+                    if sig.params.len() != e.args.len() {
+                        t.err(e.line, e.column,
+                            "wrong arg count for `".concat(name).concat("`"));
+                    } else {
+                        for let i: int = 0; i < sig.params.len(); i++ {
+                            let p: Param = sig.params.get(i);
+                            let a: Expr = e.args.get(i);
+                            let at: *Type = infer_expr(t, &a);
+                            if !types_compat(p.ty, at) {
+                                t.err(a.line, a.column,
+                                    "arg ".concat(p.name).concat(" type mismatch"));
+                            }
+                        }
+                    }
+                }
+                return sig.ret_type;
+            }
+        }
+        // Unknown callee or method/macro: just walk args, return null
+        if e.args != null {
+            for let i: int = 0; i < e.args.len(); i++ {
+                let a: Expr = e.args.get(i);
+                let _u2: *Type = infer_expr(t, &a);
+            }
+        }
+        return null;
+    }
+
+    if e.kind == EX_MEMBER {
+        let _u3: *Type = infer_expr(t, e.lhs);
+        return null; // Need struct info to resolve field type. Defer.
+    }
+
+    if e.kind == EX_INDEX {
+        let _u4: *Type = infer_expr(t, e.lhs);
+        let _u5: *Type = infer_expr(t, e.rhs);
+        return null; // Need element type. Defer.
+    }
+
+    if e.kind == EX_CAST {
+        let _u6: *Type = infer_expr(t, e.lhs);
+        return e.cast_to;
+    }
+
+    if e.kind == EX_PATH {
+        // Type::method — returns null until we have method registry
+        return null;
+    }
+
+    if e.kind == EX_MACRO {
+        // macros generally return string or void; just walk args
+        if e.args != null {
+            for let i: int = 0; i < e.args.len(); i++ {
+                let a: Expr = e.args.get(i);
+                let _u7: *Type = infer_expr(t, &a);
+            }
+        }
+        return null;
+    }
+
+    if e.kind == EX_POSTINC || e.kind == EX_POSTDEC {
+        return infer_expr(t, e.lhs);
+    }
+
+    if e.kind == EX_STRUCT_LIT {
+        return ty_named(e.str_val);
+    }
+
+    return null;
+}

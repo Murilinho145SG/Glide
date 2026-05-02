@@ -4,6 +4,7 @@
 import "lexer.glide";
 import "ast.glide";
 import "parser.glide";
+import "typer.glide";
 
 fn print_indent(n: int) {
     for let i: int = 0; i < n; i++ { print!("  "); }
@@ -110,6 +111,16 @@ fn main() -> int {
         let s: Stmt = stmts.get(i);
         print_stmt(&s, 0);
     }
+
+    println!("=== Type checking ===");
+    let t: *Typer = Typer::new();
+    check_program(t, stmts);
+    if t.error_count == 0 {
+        println!("ok — no type errors");
+    } else {
+        println!(t.error_count, "type error(s)");
+    }
+    t.free();
 
     p.free();
     lex.free();
