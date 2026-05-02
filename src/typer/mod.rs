@@ -529,6 +529,8 @@ impl Typer {
             StmtKind::ExternFn { name, params, ret_type, variadic } => {
                 StmtKind::ExternFn { name, params, ret_type, variadic }
             }
+            StmtKind::CInclude(p) => StmtKind::CInclude(p),
+            StmtKind::CLink(p) => StmtKind::CLink(p),
             other => {
                 self.error("unsupported top-level statement".into());
                 other
@@ -757,6 +759,10 @@ impl Typer {
             }
             StmtKind::ExternFn { .. } => {
                 self.error("`extern fn` only allowed at top level".into());
+                StmtKind::Break
+            }
+            StmtKind::CInclude(_) | StmtKind::CLink(_) => {
+                self.error("`c_include` / `c_link` only allowed at top level".into());
                 StmtKind::Break
             }
             StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
@@ -2720,7 +2726,11 @@ fn is_copy_type(t: &Type) -> bool {
 }
 
 fn is_always_visible(kind: &StmtKind) -> bool {
-    matches!(kind, StmtKind::Impl { .. } | StmtKind::ExternFn { .. })
+    matches!(
+        kind,
+        StmtKind::Impl { .. } | StmtKind::ExternFn { .. }
+            | StmtKind::CInclude(_) | StmtKind::CLink(_)
+    )
 }
 
 fn format_spec_for(ty: &Type, arg: Expr, pos: Pos) -> (&'static str, Expr) {

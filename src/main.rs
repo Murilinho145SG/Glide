@@ -287,6 +287,9 @@ fn invoke_gcc(result: &EmitResult, output: &Path, mode: BuildMode) {
     if result.needs_pthread {
         cmd.arg("-lpthread");
     }
+    for lib in &result.link_libs {
+        cmd.arg(format!("-l{}", lib));
+    }
 
     let status = match cmd.status() {
         Ok(s) => s,

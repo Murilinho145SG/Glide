@@ -10,6 +10,7 @@ pub struct CodegenError {
 pub struct EmitResult {
     pub c_source: String,
     pub needs_pthread: bool,
+    pub link_libs: Vec<String>,
 }
 
 impl std::fmt::Display for CodegenError {
@@ -89,7 +90,25 @@ impl Codegen {
 
         self.uses_concurrency = program_uses_concurrency(program);
 
+        let mut extra_includes: Vec<String> = Vec::new();
+        let mut link_libs: Vec<String> = Vec::new();
+        for stmt in program {
+            match &stmt.kind {
+                StmtKind::CInclude(p) => extra_includes.push(p.clone()),
+                StmtKind::CLink(p) => link_libs.push(p.clone()),
+                _ => {}
+            }
+        }
+
         self.write_prelude();
+        for inc in &extra_includes {
+            if inc.starts_with('<') || inc.starts_with('"') {
+                self.push(&format!("#include {}\n", inc));
+            } else {
+                self.push(&format!("#include \"{}\"\n", inc));
+            }
+        }
+        if !extra_includes.is_empty() { self.push("\n"); }
 
         for stmt in program {
             if let StmtKind::Enum { name, variants } = &stmt.kind {
@@ -170,6 +189,7 @@ impl Codegen {
         Ok(EmitResult {
             c_source: self.out,
             needs_pthread: self.uses_concurrency,
+            link_libs,
         })
     }
 
@@ -337,7 +357,7 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::Let { .. } | StmtKind::Const { .. } => self.emit_stmt(stmt),
             StmtKind::Struct { name, fields } => self.emit_struct_def(name, fields),
-            StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } | StmtKind::TypeAlias { .. } | StmtKind::ExternFn { .. } => Ok(()),
+            StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } | StmtKind::TypeAlias { .. } | StmtKind::ExternFn { .. } | StmtKind::CInclude(_) | StmtKind::CLink(_) => Ok(()),
             StmtKind::Impl { methods, .. } => {
                 for m in methods {
                     self.emit_top_level(m)?;
@@ -681,6 +701,9 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::ExternFn { .. } => {
                 return Err(self.err("`extern fn` only allowed at top level".into()));
+            }
+            StmtKind::CInclude(_) | StmtKind::CLink(_) => {
+                return Err(self.err("`c_include` / `c_link` only allowed at top level".into()));
             }
         }
         Ok(())
@@ -1394,6 +1417,7 @@ fn stmt_uses_concurrency(stmt: &Stmt) -> bool {
             params.iter().any(|p| ty_has_chan(&p.ty))
                 || ret_type.as_ref().map_or(false, ty_has_chan)
         }
+        StmtKind::CInclude(_) | StmtKind::CLink(_) => false,
     }
 }
 

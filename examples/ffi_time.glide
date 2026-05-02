@@ -1,0 +1,24 @@
+// `c_include` brings extra C headers into the generated output.
+// `c_link "name"` passes `-lname` to gcc.
+//
+// Here we use clock() from <time.h> (already in libc, but not in
+// Glide's default prelude). Returns CPU time used in clock ticks.
+
+c_include "<time.h>";
+
+extern fn clock() -> long;
+
+fn main() -> int {
+    let start: long = clock();
+
+    let mut sum: int = 0;
+    for let i: int = 0; i < 10_000_000; i++ {
+        sum = sum + i;
+    }
+
+    let end: long = clock();
+    println!("sum =", sum);
+    println!("clock ticks elapsed =", end - start);
+
+    return 0;
+}

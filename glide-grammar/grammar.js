@@ -33,6 +33,8 @@ module.exports = grammar({
       $.import_stmt,
       $.fn_decl,
       $.extern_fn,
+      $.c_include,
+      $.c_link,
       $.struct_decl,
       $.enum_decl,
       $.interface_decl,
@@ -41,6 +43,9 @@ module.exports = grammar({
       $.const_stmt,
       $.type_alias,
     ),
+
+    c_include: $ => seq('c_include', $.string_literal, ';'),
+    c_link: $ => seq('c_link', $.string_literal, ';'),
 
     type_alias: $ => seq(
       optional('pub'),

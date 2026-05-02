@@ -36,6 +36,8 @@ pub enum Keyword {
     Type,
     Move,
     Extern,
+    CInclude,
+    CLink,
 }
 
 impl Keyword {
@@ -72,6 +74,8 @@ impl Keyword {
             Keyword::Type      => "type",
             Keyword::Move      => "move",
             Keyword::Extern    => "extern",
+            Keyword::CInclude  => "c_include",
+            Keyword::CLink     => "c_link",
         }
     }
 
@@ -108,6 +112,8 @@ impl Keyword {
             "type"      => Some(Keyword::Type),
             "move"      => Some(Keyword::Move),
             "extern"    => Some(Keyword::Extern),
+            "c_include" => Some(Keyword::CInclude),
+            "c_link"    => Some(Keyword::CLink),
             _ => None,
         }
     }

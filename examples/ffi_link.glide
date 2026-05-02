@@ -1,0 +1,13 @@
+// c_link "name" passes `-lname` to gcc. Useful for:
+//   c_link "ws2_32";   // Windows sockets
+//   c_link "ssl";      // libssl
+//   c_link "sqlite3";  // sqlite
+
+c_link "m";  // libm (already linked by default on most systems, harmless)
+
+extern fn pow(x: float, y: float) -> float;
+
+fn main() -> int {
+    println!("2^16 =", pow(2.0, 16.0));
+    return 0;
+}

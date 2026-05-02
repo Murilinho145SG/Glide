@@ -24,6 +24,8 @@
   "sizeof"
   "new"
   "extern"
+  "c_include"
+  "c_link"
 ] @keyword
 
 ; Constants

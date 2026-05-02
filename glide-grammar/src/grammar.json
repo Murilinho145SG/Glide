@@ -27,6 +27,14 @@
         },
         {
           "type": "SYMBOL",
+          "name": "c_include"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "c_link"
+        },
+        {
+          "type": "SYMBOL",
           "name": "struct_decl"
         },
         {
@@ -52,6 +60,40 @@
         {
           "type": "SYMBOL",
           "name": "type_alias"
+        }
+      ]
+    },
+    "c_include": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "c_include"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "string_literal"
+        },
+        {
+          "type": "STRING",
+          "value": ";"
+        }
+      ]
+    },
+    "c_link": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "c_link"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "string_literal"
+        },
+        {
+          "type": "STRING",
+          "value": ";"
         }
       ]
     },

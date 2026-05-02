@@ -868,6 +868,36 @@
     "fields": {}
   },
   {
+    "type": "c_include",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "string_literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "c_link",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "string_literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "call_expr",
     "named": true,
     "fields": {
@@ -3792,6 +3822,14 @@
       "required": false,
       "types": [
         {
+          "type": "c_include",
+          "named": true
+        },
+        {
+          "type": "c_link",
+          "named": true
+        },
+        {
           "type": "const_stmt",
           "named": true
         },
@@ -4629,6 +4667,14 @@
   },
   {
     "type": "break",
+    "named": false
+  },
+  {
+    "type": "c_include",
+    "named": false
+  },
+  {
+    "type": "c_link",
     "named": false
   },
   {

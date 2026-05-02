@@ -186,6 +186,10 @@ impl Parser {
             self.parse_type_alias()
         } else if self.at_keyword(Keyword::Extern) {
             self.parse_extern()
+        } else if self.at_keyword(Keyword::CInclude) {
+            self.parse_c_include()
+        } else if self.at_keyword(Keyword::CLink) {
+            self.parse_c_link()
         } else if self.at_keyword(Keyword::Return) {
             self.parse_return()
         } else if self.at_op(Operator::LBrace) {
@@ -695,6 +699,34 @@ impl Parser {
         };
         self.expect_op(Operator::Semicolon)?;
         Ok(StmtKind::ExternFn { name, params, ret_type, variadic })
+    }
+
+    fn parse_c_include(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'c_include'
+        let path = match &self.current.token {
+            TokenKind::String(s) => s.clone(),
+            _ => return Err(self.err(format!(
+                "expected string literal after `c_include` but found '{}'",
+                self.current.lexeme
+            ))),
+        };
+        self.advance();
+        self.expect_op(Operator::Semicolon)?;
+        Ok(StmtKind::CInclude(path))
+    }
+
+    fn parse_c_link(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'c_link'
+        let lib = match &self.current.token {
+            TokenKind::String(s) => s.clone(),
+            _ => return Err(self.err(format!(
+                "expected string literal after `c_link` but found '{}'",
+                self.current.lexeme
+            ))),
+        };
+        self.advance();
+        self.expect_op(Operator::Semicolon)?;
+        Ok(StmtKind::CLink(lib))
     }
 
     fn parse_extern_params(&mut self) -> Result<(Vec<Param>, bool), ParseError> {

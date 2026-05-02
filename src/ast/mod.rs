@@ -233,6 +233,8 @@ pub enum StmtKind {
         ret_type: Option<Type>,
         variadic: bool,
     },
+    CInclude(String),
+    CLink(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
