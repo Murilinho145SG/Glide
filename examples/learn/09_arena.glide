@@ -3,11 +3,17 @@
 // Arena is great when you allocate many small objects with the same lifetime.
 // Examples: parsing an AST, processing a request, building a frame.
 //
-// You allocate cheaply (just bump a pointer), then free everything at once
-// when you call arena_free(). No per-object cleanup needed.
+// API:
+//   Arena::new(capacity_in_bytes)   create
+//   arena.create(Type)              allocate one Type, return *Type
+//   arena.create(Type, count)       allocate array of count Type, return *Type
+//   arena.alloc(bytes)              raw allocation, returns *void
+//   arena.free()                    release the arena
+//   arena.used()                    bytes currently in use
+//   arena.reset()                   reuse the buffer (without realloc)
 //
-// Arena returns raw `*T` pointers. They are NOT auto-dropped, because
-// the arena itself owns the memory. The arena drops them all together.
+// Pointers from the arena are NOT auto-dropped; the arena owns them.
+// Everything goes away when arena.free() is called.
 
 struct Node {
     value: int,
@@ -15,31 +21,28 @@ struct Node {
 }
 
 fn main() -> int {
-    // Allocate a 4 KiB arena upfront.
-    let arena: *void = arena_new(4096);
-    defer arena_free(arena);
+    let arena: *Arena = Arena::new(4096);
+    defer arena.free();
 
-    // Build a chain of 10 nodes, each one sub-allocated from the arena.
-    // Each `arena_alloc` is just a pointer bump, near-zero overhead.
-    let head: *Node = arena_alloc(arena, sizeof(Node)) as *Node;
+    // Build a chain of 10 nodes. Each arena.create(Node) is a pointer bump.
+    let head: *Node = arena.create(Node);
     *head = Node { value: 0, next: null };
     let cur: *Node = head;
 
     for let i: int = 1; i < 10; i++ {
-        let next: *Node = arena_alloc(arena, sizeof(Node)) as *Node;
+        let next: *Node = arena.create(Node);
         *next = Node { value: i, next: null };
         cur.next = next;
         cur = next;
     }
 
-    // Walk the chain and print.
+    // Walk and print.
     let walk: *Node = head;
     while walk != null {
         println!("node:", walk.value);
         walk = walk.next;
     }
 
-    println!("arena used:", arena_used(arena), "bytes");
+    println!("arena used:", arena.used(), "bytes");
     return 0;
-    // arena_free(arena) fires here via defer; all 10 nodes go away at once.
 }

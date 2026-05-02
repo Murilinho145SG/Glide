@@ -89,6 +89,28 @@ impl Parser {
         Ok((name, pos))
     }
 
+    /// Accepts an identifier or a keyword in member position (after `::` or `.`).
+    /// Lets methods like `Arena::new`, `Foo::match` etc. work even when the
+    /// member name collides with a Glide keyword.
+    fn expect_ident_or_keyword(&mut self) -> Result<String, ParseError> {
+        match &self.current.token {
+            TokenKind::Identifier(name) => {
+                let name = name.clone();
+                self.advance();
+                Ok(name)
+            }
+            TokenKind::Keyword(kw) => {
+                let lex = kw.to_lexeme().to_string();
+                self.advance();
+                Ok(lex)
+            }
+            _ => Err(self.err(format!(
+                "expected identifier but found '{}'",
+                self.current.lexeme
+            ))),
+        }
+    }
+
     fn err(&self, msg: impl Into<String>) -> ParseError {
         ParseError {
             message: msg.into(),
@@ -871,7 +893,7 @@ impl Parser {
                 self.advance();
                 if self.at_op(Operator::DoubleColon) {
                     self.advance();
-                    let method = self.expect_ident()?;
+                    let method = self.expect_ident_or_keyword()?;
                     ExprKind::Path { ty: name, member: method }
                 } else if matches!(self.current.token, TokenKind::Operator(Operator::Bang))
                     && matches!(self.peek.token, TokenKind::Operator(Operator::LParen))

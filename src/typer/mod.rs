@@ -179,11 +179,11 @@ impl Typer {
             ("read_file",   vec![synth_param("path", string_ty())],           Some(string_ty()),   "fn read_file(path: string) -> string"),
             ("write_file",  vec![synth_param("path", string_ty()), synth_param("content", string_ty())], Some(bool_ty()), "fn write_file(path: string, content: string) -> bool"),
             ("file_exists", vec![synth_param("path", string_ty())],           Some(bool_ty()),     "fn file_exists(path: string) -> bool"),
-            ("arena_new",   vec![synth_param("cap", int_ty())],                                          Some(Type::Pointer(Box::new(void_ty()))), "fn arena_new(cap: int) -> *void"),
-            ("arena_alloc", vec![synth_param("a", Type::Pointer(Box::new(void_ty()))), synth_param("size", int_ty())], Some(Type::Pointer(Box::new(void_ty()))), "fn arena_alloc(a: *void, size: int) -> *void"),
-            ("arena_free",  vec![synth_param("a", Type::Pointer(Box::new(void_ty())))],                  None,                                    "fn arena_free(a: *void)"),
-            ("arena_used",  vec![synth_param("a", Type::Pointer(Box::new(void_ty())))],                  Some(int_ty()),                          "fn arena_used(a: *void) -> int"),
-            ("arena_reset", vec![synth_param("a", Type::Pointer(Box::new(void_ty())))],                  None,                                    "fn arena_reset(a: *void)"),
+            ("Arena_new",   vec![synth_param("cap", int_ty())],                                                Some(arena_ptr()), "fn Arena::new(cap: int) -> *Arena"),
+            ("Arena_alloc", vec![synth_param("self", arena_ptr()), synth_param("size", int_ty())],             Some(Type::Pointer(Box::new(void_ty()))), "fn Arena.alloc(size: int) -> *void"),
+            ("Arena_free",  vec![synth_param("self", arena_ptr())],                                            None,              "fn Arena.free()"),
+            ("Arena_used",  vec![synth_param("self", arena_ptr())],                                            Some(int_ty()),    "fn Arena.used() -> int"),
+            ("Arena_reset", vec![synth_param("self", arena_ptr())],                                            None,              "fn Arena.reset()"),
         ];
         for (name, params, ret, detail) in entries {
             self.fns.insert(name.into(), FnSig {
@@ -1600,6 +1600,59 @@ impl Typer {
 
         let (obj_new, obj_ty) = self.check_expr(obj);
 
+        // Special form: arena.create(Type) -> Arena_alloc(arena, sizeof(Type)) as *Type
+        //               arena.create(Type, n) -> Arena_alloc(arena, sizeof(Type) * n) as *Type
+        // Lets users skip the sizeof + cast boilerplate.
+        if method == "create" && (args.len() == 1 || args.len() == 2) {
+            let resolved = self.resolve_alias(&obj_ty);
+            let is_arena_ptr = matches!(
+                &resolved,
+                Type::Pointer(inner) if matches!(inner.as_ref(), Type::Named(n) if n == "Arena")
+            );
+            if is_arena_ptr {
+                if let ExprKind::Ident(type_name) = &args[0].kind {
+                    if self.structs.contains_key(type_name) || is_known_primitive(type_name) {
+                        let target_ty = Type::Named(type_name.clone());
+                        let sizeof_expr = Expr::new(ExprKind::Sizeof(target_ty.clone()), pos);
+
+                        let size_arg = if args.len() == 2 {
+                            // sizeof(T) * count
+                            let count_expr = args.into_iter().nth(1).unwrap();
+                            let (count_new, _) = self.check_expr(count_expr);
+                            Expr::new(
+                                ExprKind::Binary(
+                                    BinaryOp::Mul,
+                                    Box::new(sizeof_expr),
+                                    Box::new(count_new),
+                                ),
+                                pos,
+                            )
+                        } else {
+                            sizeof_expr
+                        };
+
+                        let alloc_callee = Expr::new(
+                            ExprKind::Ident("Arena_alloc".into()),
+                            pos,
+                        );
+                        let alloc_call = Expr::new(
+                            ExprKind::Call(
+                                Box::new(alloc_callee),
+                                vec![obj_new, size_arg],
+                            ),
+                            pos,
+                        );
+                        let result_ty = Type::Pointer(Box::new(target_ty));
+                        let cast = Expr::new(
+                            ExprKind::Cast(Box::new(alloc_call), result_ty.clone()),
+                            pos,
+                        );
+                        return (cast, result_ty);
+                    }
+                }
+            }
+        }
+
         let mut new_args = Vec::with_capacity(args.len() + 1);
         let mut arg_tys = Vec::with_capacity(args.len() + 1);
         new_args.push(obj_new);
@@ -2142,6 +2195,14 @@ fn binop_str(op: &BinaryOp) -> &'static str {
 
 fn synth_param(name: &str, ty: Type) -> Param {
     Param { name: name.into(), ty, pos: Pos::default() }
+}
+
+fn arena_ptr() -> Type {
+    Type::Pointer(Box::new(Type::Named("Arena".into())))
+}
+
+fn is_known_primitive(name: &str) -> bool {
+    matches!(name, "int" | "float" | "bool" | "char" | "string")
 }
 
 fn is_copy_type(t: &Type) -> bool {

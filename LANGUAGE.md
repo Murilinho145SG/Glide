@@ -27,7 +27,7 @@ Snapshot of what the language supports today.
 | --- | --- | --- | --- |
 | `T` (value) | stack | scope-local | yes (copy or move) |
 | `*T` from `T { ... }` | heap (auto) | yes (auto-drop) | **no** in v1 |
-| `*T` from `arena_alloc()` etc | allocator-managed | no | yes (raw) |
+| `*T` from `arena.alloc()` etc | allocator-managed | no | yes (raw) |
 | `&T` / `&mut T` | no | no (view) | only pass-through of param |
 
 The pattern `let p: *T = T { ... };` triggers heap allocation and auto-drop at scope end. Other `*T` (from arena, function returns, casts) are raw pointers without auto-drop.
