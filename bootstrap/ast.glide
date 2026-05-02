@@ -10,11 +10,22 @@ pub const TY_POINTER: int = 1;     // payload: inner (*Type)
 pub const TY_BORROW: int = 2;      // payload: inner (*Type)
 pub const TY_BORROW_MUT: int = 3;  // payload: inner (*Type)
 pub const TY_SLICE: int = 4;       // payload: inner (*Type)
+pub const TY_GENERIC: int = 5;     // payload: name + type args
 
 pub struct Type {
     kind: int,
-    name: string,    // valid when kind == TY_NAMED
+    name: string,    // valid when kind == TY_NAMED or TY_GENERIC
     inner: *Type,    // valid for pointer/borrow/slice
+    args: *Vector<Type>,  // valid for TY_GENERIC
+}
+
+pub fn ty_generic(name: string, args: *Vector<Type>) -> *Type {
+    let t: *Type = calloc(1, sizeof(Type)) as *Type;
+    t.kind = TY_GENERIC;
+    t.name = name;
+    t.inner = null;
+    t.args = args;
+    return t;
 }
 
 // ---- Expr kinds ----------------------------------------------------------
@@ -158,6 +169,9 @@ pub struct Stmt {
     impl_target: *Type,
     impl_methods: *Vector<Stmt>,
 
+    // Generics: type params for fn/struct/impl
+    type_params: *Vector<string>,
+
     // Import
     import_path: string,
 }
@@ -165,7 +179,7 @@ pub struct Stmt {
 // ---- Constructors --------------------------------------------------------
 
 pub fn ty_named(name: string) -> *Type {
-    let t: *Type = malloc(sizeof(Type)) as *Type;
+    let t: *Type = calloc(1, sizeof(Type)) as *Type;
     t.kind = TY_NAMED;
     t.name = name;
     t.inner = null;
@@ -173,7 +187,7 @@ pub fn ty_named(name: string) -> *Type {
 }
 
 pub fn ty_pointer(inner: *Type) -> *Type {
-    let t: *Type = malloc(sizeof(Type)) as *Type;
+    let t: *Type = calloc(1, sizeof(Type)) as *Type;
     t.kind = TY_POINTER;
     t.name = "";
     t.inner = inner;
@@ -181,7 +195,7 @@ pub fn ty_pointer(inner: *Type) -> *Type {
 }
 
 pub fn expr_int(n: int, line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_INT;
     e.line = line;
     e.column = col;
@@ -190,7 +204,7 @@ pub fn expr_int(n: int, line: int, col: int) -> *Expr {
 }
 
 pub fn expr_string(s: string, line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_STRING;
     e.line = line;
     e.column = col;
@@ -199,7 +213,7 @@ pub fn expr_string(s: string, line: int, col: int) -> *Expr {
 }
 
 pub fn expr_ident(name: string, line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_IDENT;
     e.line = line;
     e.column = col;
@@ -208,7 +222,7 @@ pub fn expr_ident(name: string, line: int, col: int) -> *Expr {
 }
 
 pub fn expr_bool(b: bool, line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_BOOL;
     e.line = line;
     e.column = col;
@@ -217,7 +231,7 @@ pub fn expr_bool(b: bool, line: int, col: int) -> *Expr {
 }
 
 pub fn expr_binary(op: int, lhs: *Expr, rhs: *Expr) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_BINARY;
     e.line = lhs.line;
     e.column = lhs.column;
@@ -228,7 +242,7 @@ pub fn expr_binary(op: int, lhs: *Expr, rhs: *Expr) -> *Expr {
 }
 
 pub fn expr_call(callee: *Expr, args: *Vector<Expr>) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_CALL;
     e.line = callee.line;
     e.column = callee.column;
@@ -238,7 +252,7 @@ pub fn expr_call(callee: *Expr, args: *Vector<Expr>) -> *Expr {
 }
 
 pub fn stmt_let(name: string, ty: *Type, value: *Expr, is_mut: bool, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_LET;
     s.line = line;
     s.column = col;
@@ -250,7 +264,7 @@ pub fn stmt_let(name: string, ty: *Type, value: *Expr, is_mut: bool, line: int, 
 }
 
 pub fn stmt_return(v: *Expr, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_RETURN;
     s.line = line;
     s.column = col;
@@ -259,7 +273,7 @@ pub fn stmt_return(v: *Expr, line: int, col: int) -> *Stmt {
 }
 
 pub fn stmt_expr(e: *Expr) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_EXPR;
     s.line = e.line;
     s.column = e.column;
@@ -268,7 +282,7 @@ pub fn stmt_expr(e: *Expr) -> *Stmt {
 }
 
 pub fn stmt_fn(name: string, params: *Vector<Param>, ret_ty: *Type, body: *Vector<Stmt>, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_FN;
     s.line = line;
     s.column = col;
@@ -280,7 +294,7 @@ pub fn stmt_fn(name: string, params: *Vector<Param>, ret_ty: *Type, body: *Vecto
 }
 
 pub fn stmt_struct(name: string, fields: *Vector<Field>, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_STRUCT;
     s.line = line;
     s.column = col;
@@ -290,7 +304,7 @@ pub fn stmt_struct(name: string, fields: *Vector<Field>, line: int, col: int) ->
 }
 
 pub fn stmt_impl(target: *Type, methods: *Vector<Stmt>, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_IMPL;
     s.line = line;
     s.column = col;
@@ -300,7 +314,7 @@ pub fn stmt_impl(target: *Type, methods: *Vector<Stmt>, line: int, col: int) -> 
 }
 
 pub fn stmt_if(cond: *Expr, then_body: *Vector<Stmt>, else_body: *Vector<Stmt>, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_IF;
     s.line = line;
     s.column = col;
@@ -311,7 +325,7 @@ pub fn stmt_if(cond: *Expr, then_body: *Vector<Stmt>, else_body: *Vector<Stmt>, 
 }
 
 pub fn stmt_while(cond: *Expr, body: *Vector<Stmt>, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_WHILE;
     s.line = line;
     s.column = col;
@@ -321,7 +335,7 @@ pub fn stmt_while(cond: *Expr, body: *Vector<Stmt>, line: int, col: int) -> *Stm
 }
 
 pub fn stmt_for(init: *Stmt, cond: *Expr, step: *Expr, body: *Vector<Stmt>, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_FOR;
     s.line = line;
     s.column = col;
@@ -333,7 +347,7 @@ pub fn stmt_for(init: *Stmt, cond: *Expr, step: *Expr, body: *Vector<Stmt>, line
 }
 
 pub fn stmt_break(line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_BREAK;
     s.line = line;
     s.column = col;
@@ -341,7 +355,7 @@ pub fn stmt_break(line: int, col: int) -> *Stmt {
 }
 
 pub fn stmt_continue(line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_CONTINUE;
     s.line = line;
     s.column = col;
@@ -349,7 +363,7 @@ pub fn stmt_continue(line: int, col: int) -> *Stmt {
 }
 
 pub fn stmt_const(name: string, ty: *Type, value: *Expr, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_CONST;
     s.line = line;
     s.column = col;
@@ -360,7 +374,7 @@ pub fn stmt_const(name: string, ty: *Type, value: *Expr, line: int, col: int) ->
 }
 
 pub fn stmt_import(path: string, line: int, col: int) -> *Stmt {
-    let s: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_IMPORT;
     s.line = line;
     s.column = col;
@@ -369,7 +383,7 @@ pub fn stmt_import(path: string, line: int, col: int) -> *Stmt {
 }
 
 pub fn expr_unary(op: int, operand: *Expr, line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_UNARY;
     e.line = line;
     e.column = col;
@@ -379,7 +393,7 @@ pub fn expr_unary(op: int, operand: *Expr, line: int, col: int) -> *Expr {
 }
 
 pub fn expr_assign(op: int, lhs: *Expr, rhs: *Expr) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_ASSIGN;
     e.line = lhs.line;
     e.column = lhs.column;
@@ -390,7 +404,7 @@ pub fn expr_assign(op: int, lhs: *Expr, rhs: *Expr) -> *Expr {
 }
 
 pub fn expr_member(obj: *Expr, field: string) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_MEMBER;
     e.line = obj.line;
     e.column = obj.column;
@@ -400,7 +414,7 @@ pub fn expr_member(obj: *Expr, field: string) -> *Expr {
 }
 
 pub fn expr_index(obj: *Expr, idx: *Expr) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_INDEX;
     e.line = obj.line;
     e.column = obj.column;
@@ -410,7 +424,7 @@ pub fn expr_index(obj: *Expr, idx: *Expr) -> *Expr {
 }
 
 pub fn expr_cast(inner: *Expr, target: *Type) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_CAST;
     e.line = inner.line;
     e.column = inner.column;
@@ -420,7 +434,7 @@ pub fn expr_cast(inner: *Expr, target: *Type) -> *Expr {
 }
 
 pub fn expr_path(ty: string, member: string, line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_PATH;
     e.line = line;
     e.column = col;
@@ -430,7 +444,7 @@ pub fn expr_path(ty: string, member: string, line: int, col: int) -> *Expr {
 }
 
 pub fn expr_macro(name: string, args: *Vector<Expr>, line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_MACRO;
     e.line = line;
     e.column = col;
@@ -440,7 +454,7 @@ pub fn expr_macro(name: string, args: *Vector<Expr>, line: int, col: int) -> *Ex
 }
 
 pub fn expr_char(c: char, line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_CHAR;
     e.line = line;
     e.column = col;
@@ -449,7 +463,7 @@ pub fn expr_char(c: char, line: int, col: int) -> *Expr {
 }
 
 pub fn expr_null(line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_NULL;
     e.line = line;
     e.column = col;
@@ -457,7 +471,7 @@ pub fn expr_null(line: int, col: int) -> *Expr {
 }
 
 pub fn expr_postinc(inner: *Expr) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_POSTINC;
     e.line = inner.line;
     e.column = inner.column;
@@ -466,7 +480,7 @@ pub fn expr_postinc(inner: *Expr) -> *Expr {
 }
 
 pub fn expr_postdec(inner: *Expr) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_POSTDEC;
     e.line = inner.line;
     e.column = inner.column;
@@ -480,7 +494,7 @@ pub struct StructLitField {
 }
 
 pub fn expr_struct_lit(type_name: string, names: *Vector<string>, values: *Vector<Expr>, line: int, col: int) -> *Expr {
-    let e: *Expr = malloc(sizeof(Expr)) as *Expr;
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
     e.kind = EX_STRUCT_LIT;
     e.line = line;
     e.column = col;

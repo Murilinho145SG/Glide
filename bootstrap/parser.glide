@@ -114,7 +114,7 @@ fn parse_fn(p: *Parser) -> *Stmt {
     let name: string = p.expect_ident();
 
     // Optional generic params <T, U>
-    if p.at_op("<") { skip_type_params(p); }
+    let tps: *Vector<string> = parse_type_params(p);
 
     p.expect_op("(");
     let params: *Vector<Param> = Vector::new();
@@ -132,7 +132,21 @@ fn parse_fn(p: *Parser) -> *Stmt {
     if p.eat_op("->") { ret_ty = parse_type(p); }
 
     let body: *Vector<Stmt> = parse_block(p);
-    return stmt_fn(name, params, ret_ty, body, line, col);
+    let s: *Stmt = stmt_fn(name, params, ret_ty, body, line, col);
+    if s != null { s.type_params = tps; }
+    return s;
+}
+
+fn parse_type_params(p: *Parser) -> *Vector<string> {
+    let tps: *Vector<string> = Vector::new();
+    if !p.eat_op("<") { return tps; }
+    while !p.at_op(">") && !p.at_eof() {
+        let name: string = p.expect_ident();
+        tps.push(name);
+        if !p.eat_op(",") { break; }
+    }
+    p.expect_op(">");
+    return tps;
 }
 
 fn skip_type_params(p: *Parser) {
@@ -148,7 +162,7 @@ fn parse_struct(p: *Parser) -> *Stmt {
     let col: int = p.current.column;
     p.advance(); // 'struct'
     let name: string = p.expect_ident();
-    if p.at_op("<") { skip_type_params(p); }
+    let tps: *Vector<string> = parse_type_params(p);
     p.expect_op("{");
     let fields: *Vector<Field> = Vector::new();
     while !p.at_op("}") && !p.at_eof() {
@@ -160,14 +174,16 @@ fn parse_struct(p: *Parser) -> *Stmt {
         if !p.eat_op(",") { break; }
     }
     p.expect_op("}");
-    return stmt_struct(name, fields, line, col);
+    let s: *Stmt = stmt_struct(name, fields, line, col);
+    if s != null { s.type_params = tps; }
+    return s;
 }
 
 fn parse_impl(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
     p.advance(); // 'impl'
-    if p.at_op("<") { skip_type_params(p); }
+    let tps: *Vector<string> = parse_type_params(p);
     let target: *Type = parse_type(p);
     p.expect_op("{");
     let methods: *Vector<Stmt> = Vector::new();
@@ -182,7 +198,9 @@ fn parse_impl(p: *Parser) -> *Stmt {
         }
     }
     p.expect_op("}");
-    return stmt_impl(target, methods, line, col);
+    let s: *Stmt = stmt_impl(target, methods, line, col);
+    if s != null { s.type_params = tps; }
+    return s;
 }
 
 fn parse_import(p: *Parser) -> *Stmt {
@@ -417,8 +435,18 @@ fn parse_type(p: *Parser) -> *Type {
     if p.current.kind == TOK_IDENT || p.current.kind == TOK_KEYWORD {
         let name: string = p.current.lexeme;
         p.advance();
-        // Skip generic args <...> if present (not represented in this AST yet)
-        if p.at_op("<") { skip_type_params(p); }
+        // Generic instantiation: Foo<T1, T2>
+        if p.at_op("<") {
+            p.advance();
+            let args: *Vector<Type> = Vector::new();
+            while !p.at_op(">") && !p.at_eof() {
+                let inner: *Type = parse_type(p);
+                if inner != null { args.push(*inner); }
+                if !p.eat_op(",") { break; }
+            }
+            p.expect_op(">");
+            return ty_generic(name, args);
+        }
         return ty_named(name);
     }
     p.err("expected type");
