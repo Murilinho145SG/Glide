@@ -1414,6 +1414,12 @@ impl Typer {
                 );
             }
         };
+        if !info.is_pub
+            && info.home_file.is_some()
+            && info.home_file != self.current_file
+        {
+            self.error(format!("struct `{}` is private to its module", struct_name));
+        }
 
         let field_ty = match info.fields.iter().find(|f| f.name == field) {
             Some(f) => f.ty.clone(),
@@ -1438,8 +1444,8 @@ impl Typer {
         fields: Vec<(String, Expr)>,
         pos: Pos,
     ) -> (Expr, Type) {
-        let struct_fields = match self.structs.get(&type_name).cloned() {
-            Some(info) => info.fields,
+        let struct_info = match self.structs.get(&type_name).cloned() {
+            Some(info) => info,
             None => {
                 self.error(format!("unknown struct `{}`", type_name));
                 return (
@@ -1448,6 +1454,13 @@ impl Typer {
                 );
             }
         };
+        if !struct_info.is_pub
+            && struct_info.home_file.is_some()
+            && struct_info.home_file != self.current_file
+        {
+            self.error(format!("struct `{}` is private to its module", type_name));
+        }
+        let struct_fields = struct_info.fields;
 
         let mut new_fields = Vec::with_capacity(fields.len());
         for (fname, fexpr) in fields {
@@ -1642,7 +1655,7 @@ fn synth_param(name: &str, ty: Type) -> Param {
 }
 
 fn is_always_visible(kind: &StmtKind) -> bool {
-    matches!(kind, StmtKind::Interface { .. } | StmtKind::Impl { .. })
+    matches!(kind, StmtKind::Impl { .. })
 }
 
 fn format_spec_for(ty: &Type, arg: Expr, pos: Pos) -> (&'static str, Expr) {
