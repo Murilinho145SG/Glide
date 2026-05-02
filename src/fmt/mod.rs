@@ -601,6 +601,27 @@ impl Formatter {
                     self.write(")");
                 }
             }
+            ExprKind::FnExpr { params, ret_type, body, is_move } => {
+                if *is_move { self.write("move "); }
+                self.write("fn(");
+                for (i, p) in params.iter().enumerate() {
+                    if i > 0 { self.write(", "); }
+                    self.write(&p.name);
+                    self.write(": ");
+                    self.write(&format_type(&p.ty));
+                }
+                self.write(")");
+                if let Some(t) = ret_type {
+                    self.write(" -> ");
+                    self.write(&format_type(t));
+                }
+                self.write(" {\n");
+                self.indent += 1;
+                self.emit_block(body);
+                self.indent -= 1;
+                self.write_indent();
+                self.write("}");
+            }
         }
     }
 

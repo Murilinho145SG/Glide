@@ -124,6 +124,9 @@ pub struct Typer {
     index: SymbolIndex,
     current_module: Option<String>,
     current_file: Option<std::path::PathBuf>,
+    synth_stmts: Vec<Stmt>,
+    anon_counter: usize,
+    closure_struct_names: std::collections::HashSet<String>,
 }
 
 impl Default for Typer {
@@ -146,6 +149,9 @@ impl Typer {
             index: SymbolIndex::default(),
             current_module: None,
             current_file: None,
+            synth_stmts: Vec::new(),
+            anon_counter: 0,
+            closure_struct_names: std::collections::HashSet::new(),
         };
         t.register_builtins();
         t.register_stdlib();
@@ -442,6 +448,21 @@ impl Typer {
         let mut new_program = Vec::with_capacity(program.len());
         for stmt in program {
             new_program.push(self.check_top(stmt));
+        }
+
+        // Re-check any closures lifted to top-level during the main pass.
+        let mut synth = std::mem::take(&mut self.synth_stmts);
+        while !synth.is_empty() {
+            let mut next_round = Vec::new();
+            for stmt in synth {
+                let checked = self.check_top(stmt);
+                next_round.push(checked);
+            }
+            // Place synth stmts BEFORE the user code, so they're declared in C.
+            for s in next_round {
+                new_program.insert(0, s);
+            }
+            synth = std::mem::take(&mut self.synth_stmts);
         }
 
         let result = if self.errors.is_empty() {
@@ -1304,7 +1325,184 @@ impl Typer {
                     result_ty,
                 )
             }
+
+            ExprKind::FnExpr { params, ret_type, body, is_move } => {
+                self.lower_fn_expr(params, ret_type, body, is_move, pos)
+            }
         }
+    }
+
+    fn lower_fn_expr(
+        &mut self,
+        params: Vec<Param>,
+        ret_type: Option<Type>,
+        body: Vec<Stmt>,
+        is_move: bool,
+        pos: Pos,
+    ) -> (ExprKind, Type) {
+        let id = self.anon_counter;
+        self.anon_counter += 1;
+
+        // Detect free variables in the body (captured from enclosing scope).
+        let mut bound: std::collections::HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
+        let mut captures: Vec<String> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for s in &body {
+            collect_free_idents(s, &mut bound, &mut captures, &mut seen);
+        }
+
+        // Resolve each capture's type from the enclosing scope.
+        let mut capture_fields: Vec<(String, Type)> = Vec::new();
+        for name in &captures {
+            if let Some(slot) = self.lookup(name) {
+                if slot.is_owned {
+                    self.error(format!(
+                        "cannot capture owned value `{}` (auto-drop conflict)",
+                        name
+                    ));
+                }
+                capture_fields.push((name.clone(), slot.ty.clone()));
+            }
+        }
+
+        if !capture_fields.is_empty() && !is_move {
+            self.error(
+                "closures that capture variables must be declared with `move` (e.g. `move fn() { ... }`)".into(),
+            );
+        }
+
+        let synth_fn_name = format!("__glide_anon_fn_{}", id);
+
+        if capture_fields.is_empty() {
+            // No captures: lift body to a top-level fn, the expression
+            // becomes an Ident referring to the lifted fn (decays to fn pointer).
+            let lifted_fn = Stmt {
+                kind: StmtKind::Fn {
+                    name: synth_fn_name.clone(),
+                    params: params.clone(),
+                    ret_type: ret_type.clone(),
+                    body,
+                },
+                pos,
+                is_pub: false,
+                source_file: None,
+            };
+            self.fns.insert(synth_fn_name.clone(), FnSig {
+                params: params.clone(),
+                ret_type: ret_type.clone(),
+                variadic: false,
+                decl_pos: Some(pos),
+                home_file: None,
+                is_pub: true,
+            });
+            self.synth_stmts.push(lifted_fn);
+
+            let fn_ptr_ty = Type::FnPtr {
+                params: params.iter().map(|p| p.ty.clone()).collect(),
+                ret: ret_type.map(Box::new),
+            };
+            return (ExprKind::Ident(synth_fn_name), fn_ptr_ty);
+        }
+
+        // Captures present: build a closure struct + a method-like fn that takes
+        // the closure struct as `self`.
+        let closure_struct_name = format!("__glide_closure_{}", id);
+
+        let struct_fields: Vec<Field> = capture_fields.iter().map(|(n, t)| Field {
+            name: n.clone(),
+            ty: t.clone(),
+            pos,
+        }).collect();
+
+        let struct_decl = Stmt {
+            kind: StmtKind::Struct {
+                name: closure_struct_name.clone(),
+                fields: struct_fields.clone(),
+            },
+            pos,
+            is_pub: false,
+            source_file: None,
+        };
+
+        // Register the struct in the typer.
+        self.structs.insert(closure_struct_name.clone(), StructInfo {
+            fields: struct_fields.clone(),
+            decl_pos: pos,
+            home_file: None,
+            is_pub: true,
+        });
+        self.index.structs.insert(closure_struct_name.clone(), struct_fields.clone());
+        self.closure_struct_names.insert(closure_struct_name.clone());
+
+        // Rewrite the body so references to captured names become `self.name`.
+        let captured_set: std::collections::HashSet<String> =
+            capture_fields.iter().map(|(n, _)| n.clone()).collect();
+        let new_body: Vec<Stmt> = body
+            .into_iter()
+            .map(|s| rewrite_captures_stmt(s, &captured_set))
+            .collect();
+
+        // Build the fn that takes self + params.
+        let mut fn_params = Vec::with_capacity(params.len() + 1);
+        fn_params.push(Param {
+            name: "self".to_string(),
+            ty: Type::Pointer(Box::new(Type::Named(closure_struct_name.clone()))),
+            pos,
+        });
+        for p in &params {
+            fn_params.push(p.clone());
+        }
+
+        let lifted_fn_name = format!("{}_call", closure_struct_name);
+        let lifted_fn = Stmt {
+            kind: StmtKind::Fn {
+                name: lifted_fn_name.clone(),
+                params: fn_params.clone(),
+                ret_type: ret_type.clone(),
+                body: new_body,
+            },
+            pos,
+            is_pub: false,
+            source_file: None,
+        };
+
+        self.fns.insert(lifted_fn_name.clone(), FnSig {
+            params: fn_params,
+            ret_type: ret_type.clone(),
+            variadic: false,
+            decl_pos: Some(pos),
+            home_file: None,
+            is_pub: true,
+        });
+
+        self.synth_stmts.push(struct_decl);
+        self.synth_stmts.push(lifted_fn);
+
+        // The expression becomes a struct lit with the captured values.
+        // For move semantics, mark sources as moved.
+        let init_fields: Vec<(String, Expr)> = capture_fields
+            .iter()
+            .map(|(n, _)| (n.clone(), Expr::new(ExprKind::Ident(n.clone()), pos)))
+            .collect();
+
+        if is_move {
+            for (n, _) in &capture_fields {
+                if let Some(slot) = self.lookup(n) {
+                    if !is_copy_type(&self.resolve_alias(&slot.ty)) {
+                        self.mark_moved(n, pos);
+                    }
+                }
+            }
+        }
+
+        let result_ty = Type::Named(closure_struct_name.clone());
+        (
+            ExprKind::StructLit {
+                type_name: closure_struct_name,
+                fields: init_fields,
+            },
+            result_ty,
+        )
     }
 
     fn check_call(&mut self, callee: Expr, args: Vec<Expr>, pos: Pos) -> (Expr, Type) {
@@ -1359,6 +1557,30 @@ impl Typer {
                     pos,
                 );
                 return (Expr::new(kind, pos), ret_ty);
+            }
+        }
+
+        // Closure call: variable holding a closure struct → call its lifted method
+        if let ExprKind::Ident(n) = &callee.kind {
+            if let Some(slot) = self.lookup(n) {
+                let resolved = self.resolve_alias(&slot.ty);
+                if let Type::Named(struct_name) = &resolved {
+                    if self.closure_struct_names.contains(struct_name) {
+                        let lifted_name = format!("{}_call", struct_name);
+                        let closure_ref = Expr::new(
+                            ExprKind::Unary(
+                                UnaryOp::AddrOf,
+                                Box::new(callee.clone()),
+                            ),
+                            pos,
+                        );
+                        let mut full_args = Vec::with_capacity(args.len() + 1);
+                        full_args.push(closure_ref);
+                        full_args.extend(args.into_iter());
+                        let new_callee = Expr::new(ExprKind::Ident(lifted_name), pos);
+                        return self.check_call(new_callee, full_args, pos);
+                    }
+                }
             }
         }
 
@@ -2203,6 +2425,230 @@ fn arena_ptr() -> Type {
 
 fn is_known_primitive(name: &str) -> bool {
     matches!(name, "int" | "float" | "bool" | "char" | "string")
+}
+
+fn collect_free_idents(
+    stmt: &Stmt,
+    bound: &mut std::collections::HashSet<String>,
+    captures: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    match &stmt.kind {
+        StmtKind::Let { name, value, .. } => {
+            if let Some(v) = value {
+                collect_free_in_expr(v, bound, captures, seen);
+            }
+            bound.insert(name.clone());
+        }
+        StmtKind::Const { name, value, .. } => {
+            collect_free_in_expr(value, bound, captures, seen);
+            bound.insert(name.clone());
+        }
+        StmtKind::Expr(e) => collect_free_in_expr(e, bound, captures, seen),
+        StmtKind::Return(v) => {
+            if let Some(e) = v { collect_free_in_expr(e, bound, captures, seen); }
+        }
+        StmtKind::If { cond, then_block, else_block } => {
+            collect_free_in_expr(cond, bound, captures, seen);
+            for s in then_block { collect_free_idents(s, bound, captures, seen); }
+            if let Some(b) = else_block {
+                for s in b { collect_free_idents(s, bound, captures, seen); }
+            }
+        }
+        StmtKind::While { cond, body } => {
+            collect_free_in_expr(cond, bound, captures, seen);
+            for s in body { collect_free_idents(s, bound, captures, seen); }
+        }
+        StmtKind::For { init, cond, step, body } => {
+            if let Some(s) = init { collect_free_idents(s, bound, captures, seen); }
+            if let Some(c) = cond { collect_free_in_expr(c, bound, captures, seen); }
+            if let Some(s) = step { collect_free_in_expr(s, bound, captures, seen); }
+            for s in body { collect_free_idents(s, bound, captures, seen); }
+        }
+        StmtKind::Block(stmts) => {
+            let saved = bound.clone();
+            for s in stmts { collect_free_idents(s, bound, captures, seen); }
+            *bound = saved;
+        }
+        StmtKind::Defer(e) => collect_free_in_expr(e, bound, captures, seen),
+        StmtKind::Spawn(e) => collect_free_in_expr(e, bound, captures, seen),
+        StmtKind::Match { scrutinee, arms } => {
+            collect_free_in_expr(scrutinee, bound, captures, seen);
+            for a in arms {
+                for s in &a.body { collect_free_idents(s, bound, captures, seen); }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_free_in_expr(
+    expr: &Expr,
+    bound: &std::collections::HashSet<String>,
+    captures: &mut Vec<String>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    match &expr.kind {
+        ExprKind::Ident(name) => {
+            if !bound.contains(name) && !seen.contains(name) {
+                // Skip names that look like fn names or types — we'll let the typer
+                // resolve them later. Heuristic: lowercase first char + not a known
+                // primitive means it's a candidate capture.
+                if !is_known_primitive(name) {
+                    captures.push(name.clone());
+                    seen.insert(name.clone());
+                }
+            }
+        }
+        ExprKind::Unary(_, e) => collect_free_in_expr(e, bound, captures, seen),
+        ExprKind::Binary(_, l, r) => {
+            collect_free_in_expr(l, bound, captures, seen);
+            collect_free_in_expr(r, bound, captures, seen);
+        }
+        ExprKind::Assign(l, _, r) => {
+            collect_free_in_expr(l, bound, captures, seen);
+            collect_free_in_expr(r, bound, captures, seen);
+        }
+        ExprKind::Call(c, args) => {
+            collect_free_in_expr(c, bound, captures, seen);
+            for a in args { collect_free_in_expr(a, bound, captures, seen); }
+        }
+        ExprKind::Index(o, i) => {
+            collect_free_in_expr(o, bound, captures, seen);
+            collect_free_in_expr(i, bound, captures, seen);
+        }
+        ExprKind::Member(o, _) => collect_free_in_expr(o, bound, captures, seen),
+        ExprKind::Cast(e, _) => collect_free_in_expr(e, bound, captures, seen),
+        ExprKind::StructLit { fields, .. } | ExprKind::New { fields, .. } => {
+            for (_, v) in fields { collect_free_in_expr(v, bound, captures, seen); }
+        }
+        ExprKind::ArrayLit { elements, .. } => {
+            for e in elements { collect_free_in_expr(e, bound, captures, seen); }
+        }
+        ExprKind::AddrOfTemp { value, .. } => collect_free_in_expr(value, bound, captures, seen),
+        ExprKind::MacroCall { args, .. } => {
+            for a in args { collect_free_in_expr(a, bound, captures, seen); }
+        }
+        ExprKind::EnumCtor { args, .. } => {
+            for a in args { collect_free_in_expr(a, bound, captures, seen); }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_captures_stmt(stmt: Stmt, captured: &std::collections::HashSet<String>) -> Stmt {
+    let pos = stmt.pos;
+    let is_pub = stmt.is_pub;
+    let source_file = stmt.source_file.clone();
+    let kind = match stmt.kind {
+        StmtKind::Let { name, ty, value, is_mut, is_owned } => StmtKind::Let {
+            name,
+            ty,
+            value: value.map(|v| rewrite_captures_expr(v, captured)),
+            is_mut,
+            is_owned,
+        },
+        StmtKind::Const { name, ty, value } => StmtKind::Const {
+            name,
+            ty,
+            value: rewrite_captures_expr(value, captured),
+        },
+        StmtKind::Expr(e) => StmtKind::Expr(rewrite_captures_expr(e, captured)),
+        StmtKind::Return(v) => StmtKind::Return(v.map(|e| rewrite_captures_expr(e, captured))),
+        StmtKind::If { cond, then_block, else_block } => StmtKind::If {
+            cond: rewrite_captures_expr(cond, captured),
+            then_block: then_block.into_iter().map(|s| rewrite_captures_stmt(s, captured)).collect(),
+            else_block: else_block.map(|b| b.into_iter().map(|s| rewrite_captures_stmt(s, captured)).collect()),
+        },
+        StmtKind::While { cond, body } => StmtKind::While {
+            cond: rewrite_captures_expr(cond, captured),
+            body: body.into_iter().map(|s| rewrite_captures_stmt(s, captured)).collect(),
+        },
+        StmtKind::For { init, cond, step, body } => StmtKind::For {
+            init: init.map(|b| Box::new(rewrite_captures_stmt(*b, captured))),
+            cond: cond.map(|c| rewrite_captures_expr(c, captured)),
+            step: step.map(|s| rewrite_captures_expr(s, captured)),
+            body: body.into_iter().map(|s| rewrite_captures_stmt(s, captured)).collect(),
+        },
+        StmtKind::Block(stmts) => StmtKind::Block(
+            stmts.into_iter().map(|s| rewrite_captures_stmt(s, captured)).collect(),
+        ),
+        StmtKind::Defer(e) => StmtKind::Defer(rewrite_captures_expr(e, captured)),
+        StmtKind::Spawn(e) => StmtKind::Spawn(rewrite_captures_expr(e, captured)),
+        StmtKind::Match { scrutinee, arms } => StmtKind::Match {
+            scrutinee: rewrite_captures_expr(scrutinee, captured),
+            arms: arms.into_iter().map(|a| MatchArm {
+                pattern: a.pattern,
+                body: a.body.into_iter().map(|s| rewrite_captures_stmt(s, captured)).collect(),
+            }).collect(),
+        },
+        other => other,
+    };
+    Stmt { kind, pos, is_pub, source_file }
+}
+
+fn rewrite_captures_expr(expr: Expr, captured: &std::collections::HashSet<String>) -> Expr {
+    let pos = expr.pos;
+    let kind = match expr.kind {
+        ExprKind::Ident(name) if captured.contains(&name) => {
+            // Replace `name` with `self.name`
+            ExprKind::Member(
+                Box::new(Expr::new(ExprKind::Ident("self".into()), pos)),
+                name,
+            )
+        }
+        ExprKind::Unary(op, inner) => ExprKind::Unary(op, Box::new(rewrite_captures_expr(*inner, captured))),
+        ExprKind::Binary(op, l, r) => ExprKind::Binary(
+            op,
+            Box::new(rewrite_captures_expr(*l, captured)),
+            Box::new(rewrite_captures_expr(*r, captured)),
+        ),
+        ExprKind::Assign(l, op, r) => ExprKind::Assign(
+            Box::new(rewrite_captures_expr(*l, captured)),
+            op,
+            Box::new(rewrite_captures_expr(*r, captured)),
+        ),
+        ExprKind::Call(c, args) => ExprKind::Call(
+            Box::new(rewrite_captures_expr(*c, captured)),
+            args.into_iter().map(|a| rewrite_captures_expr(a, captured)).collect(),
+        ),
+        ExprKind::Index(o, i) => ExprKind::Index(
+            Box::new(rewrite_captures_expr(*o, captured)),
+            Box::new(rewrite_captures_expr(*i, captured)),
+        ),
+        ExprKind::Member(o, f) => ExprKind::Member(
+            Box::new(rewrite_captures_expr(*o, captured)),
+            f,
+        ),
+        ExprKind::Cast(e, t) => ExprKind::Cast(Box::new(rewrite_captures_expr(*e, captured)), t),
+        ExprKind::StructLit { type_name, fields } => ExprKind::StructLit {
+            type_name,
+            fields: fields.into_iter().map(|(n, v)| (n, rewrite_captures_expr(v, captured))).collect(),
+        },
+        ExprKind::New { type_name, fields } => ExprKind::New {
+            type_name,
+            fields: fields.into_iter().map(|(n, v)| (n, rewrite_captures_expr(v, captured))).collect(),
+        },
+        ExprKind::ArrayLit { elements, elem_type } => ExprKind::ArrayLit {
+            elements: elements.into_iter().map(|e| rewrite_captures_expr(e, captured)).collect(),
+            elem_type,
+        },
+        ExprKind::AddrOfTemp { value, ty } => ExprKind::AddrOfTemp {
+            value: Box::new(rewrite_captures_expr(*value, captured)),
+            ty,
+        },
+        ExprKind::MacroCall { name, args } => ExprKind::MacroCall {
+            name,
+            args: args.into_iter().map(|a| rewrite_captures_expr(a, captured)).collect(),
+        },
+        ExprKind::EnumCtor { enum_name, variant, args } => ExprKind::EnumCtor {
+            enum_name,
+            variant,
+            args: args.into_iter().map(|a| rewrite_captures_expr(a, captured)).collect(),
+        },
+        other => other,
+    };
+    Expr::new(kind, pos)
 }
 
 fn is_copy_type(t: &Type) -> bool {

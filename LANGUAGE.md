@@ -48,6 +48,23 @@ type Handler fn(*Request) -> *Response;
 pub type ServerHandler fn(*Request) -> *Response;
 ```
 
+### Closures and anonymous functions
+
+```glide
+// Anonymous fn (no capture) decays to a fn pointer.
+let add = fn(x: int, y: int) -> int { return x + y; };
+let r: int = add(3, 4);
+
+// Capture variables explicitly with `move`. The captured values are moved
+// into the closure (sources can no longer be used unless they were Copy).
+let bias: int = 10;
+let add_bias = move fn(x: int) -> int { return x + bias; };
+let r2: int = add_bias(5);
+
+// Closures with capture are local values. They cannot be passed as
+// `fn(...) -> ...` parameters in v1; they're called locally only.
+```
+
 ## Literals
 
 ```glide

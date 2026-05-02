@@ -646,6 +646,22 @@ impl Parser {
         Ok(StmtKind::Let { name, ty, value, is_mut, is_owned: false })
     }
 
+    fn parse_fn_expr(&mut self, is_move: bool, pos: Pos) -> Result<Expr, ParseError> {
+        self.advance(); // 'fn'
+        self.expect_op(Operator::LParen)?;
+        let params = self.parse_params()?;
+        let ret_type = if self.eat_op(Operator::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        let body = self.parse_block()?;
+        Ok(Expr::new(
+            ExprKind::FnExpr { params, ret_type, body, is_move },
+            pos,
+        ))
+    }
+
     fn parse_type_alias(&mut self) -> Result<StmtKind, ParseError> {
         self.advance(); // 'type'
         let name = self.expect_ident()?;
@@ -888,6 +904,19 @@ impl Parser {
                 self.expect_op(Operator::LBrace)?;
                 let fields = self.parse_struct_lit_fields()?;
                 ExprKind::New { type_name, fields }
+            }
+            TokenKind::Keyword(Keyword::Fn) => {
+                return self.parse_fn_expr(false, pos);
+            }
+            TokenKind::Keyword(Keyword::Move) => {
+                self.advance();
+                if !self.at_keyword(Keyword::Fn) {
+                    return Err(self.err(format!(
+                        "expected `fn` after `move` but found '{}'",
+                        self.current.lexeme
+                    )));
+                }
+                return self.parse_fn_expr(true, pos);
             }
             TokenKind::Identifier(name) => {
                 self.advance();

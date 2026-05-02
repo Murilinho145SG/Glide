@@ -1093,6 +1093,11 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 }
                 self.push("})");
             }
+            ExprKind::FnExpr { .. } => {
+                return Err(self.err(
+                    "internal: FnExpr should have been lowered by typer".into(),
+                ));
+            }
         }
         Ok(())
     }

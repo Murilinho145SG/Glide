@@ -115,6 +115,13 @@ pub enum ExprKind {
         variant: String,
         args: Vec<Expr>,
     },
+
+    FnExpr {
+        params: Vec<Param>,
+        ret_type: Option<Type>,
+        body: Vec<Stmt>,
+        is_move: bool,
+    },
 }
 
 impl Expr {

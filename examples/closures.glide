@@ -1,0 +1,27 @@
+// Anonymous fn without capture (decays to fn pointer).
+fn apply(f: fn(int, int) -> int, x: int, y: int) -> int {
+    return f(x, y);
+}
+
+fn main() -> int {
+    // 1) Simple anonymous fn, no capture.
+    let add = fn(x: int, y: int) -> int { return x + y; };
+    println!("add(3, 4) =", add(3, 4));
+
+    // 2) Pass anonymous fn as argument.
+    let r: int = apply(fn(a: int, b: int) -> int { return a * b; }, 5, 6);
+    println!("apply(*, 5, 6) =", r);
+
+    // 3) Closure with captured int (move).
+    let bias: int = 10;
+    let add_bias = move fn(x: int) -> int { return x + bias; };
+    println!("add_bias(5) =", add_bias(5));
+
+    // 4) Multiple captured values.
+    let a: int = 7;
+    let b: int = 3;
+    let combine = move fn(x: int) -> int { return x * a + b; };
+    println!("combine(2) =", combine(2));
+
+    return 0;
+}
