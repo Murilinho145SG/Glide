@@ -5,6 +5,7 @@ import "lexer.glide";
 import "ast.glide";
 import "parser.glide";
 import "typer.glide";
+import "codegen.glide";
 
 fn print_indent(n: int) {
     for let i: int = 0; i < n; i++ { print!("  "); }
@@ -92,7 +93,7 @@ fn print_stmt(s: *Stmt, indent: int) {
 fn main() -> int {
     let argc: int = args_count();
     if argc < 2 {
-        println!("usage: glide_boot <file>");
+        println!("usage: glide_boot <file> [--emit]");
         return 1;
     }
     let path: string = args_at(argc - 1);
@@ -102,26 +103,41 @@ fn main() -> int {
         return 1;
     }
 
+    // --emit flag: skip AST dump, go straight to C codegen.
+    let mut emit_mode: bool = false;
+    for let i: int = 0; i < argc; i++ {
+        if args_at(i).eq("--emit") { emit_mode = true; }
+    }
+
     let lex: *Lexer = Lexer::new(src);
     let p: *Parser = Parser::new(lex);
-
     let stmts: *Vector<Stmt> = parse_program(p);
-    println!("=== AST (", stmts.len(), " top-level stmts) ===");
-    for let i: int = 0; i < stmts.len(); i++ {
-        let s: Stmt = stmts.get(i);
-        print_stmt(&s, 0);
-    }
 
-    println!("=== Type checking ===");
+    if !emit_mode {
+        println!("=== AST (", stmts.len(), " top-level stmts) ===");
+        for let i: int = 0; i < stmts.len(); i++ {
+            let s: Stmt = stmts.get(i);
+            print_stmt(&s, 0);
+        }
+
+        println!("=== Type checking ===");
+    }
     let t: *Typer = Typer::new();
     check_program(t, stmts);
-    if t.error_count == 0 {
-        println!("ok — no type errors");
-    } else {
+    if t.error_count > 0 {
         println!(t.error_count, "type error(s)");
+        t.free();
+        p.free();
+        lex.free();
+        return 1;
     }
-    t.free();
+    if !emit_mode { println!("ok — no type errors"); }
 
+    if emit_mode {
+        emit_program(stmts);
+    }
+
+    t.free();
     p.free();
     lex.free();
     return 0;

@@ -1,0 +1,370 @@
+// Glide-in-Glide codegen. Walks AST and emits C99 source to stdout.
+
+import "ast.glide";
+
+// ---- type to C name ------------------------------------------------------
+
+pub fn type_to_c(t: *Type) -> string {
+    if t == null { return "void"; }
+    if t.kind == TY_NAMED {
+        let n: string = t.name;
+        if n.eq("int")    { return "int"; }
+        if n.eq("uint")   { return "unsigned int"; }
+        if n.eq("long")   { return "long"; }
+        if n.eq("ulong")  { return "unsigned long"; }
+        if n.eq("i8")     { return "int8_t"; }
+        if n.eq("i16")    { return "int16_t"; }
+        if n.eq("i32")    { return "int32_t"; }
+        if n.eq("i64")    { return "int64_t"; }
+        if n.eq("u8")     { return "uint8_t"; }
+        if n.eq("u16")    { return "uint16_t"; }
+        if n.eq("u32")    { return "uint32_t"; }
+        if n.eq("u64")    { return "uint64_t"; }
+        if n.eq("usize")  { return "size_t"; }
+        if n.eq("isize")  { return "ptrdiff_t"; }
+        if n.eq("float")  { return "double"; }
+        if n.eq("f32")    { return "float"; }
+        if n.eq("f64")    { return "double"; }
+        if n.eq("bool")   { return "bool"; }
+        if n.eq("char")   { return "char"; }
+        if n.eq("string") { return "const char*"; }
+        if n.eq("void")   { return "void"; }
+        return n;
+    }
+    if t.kind == TY_POINTER     { return type_to_c(t.inner).concat("*"); }
+    if t.kind == TY_BORROW      { return type_to_c(t.inner).concat(" const*"); }
+    if t.kind == TY_BORROW_MUT  { return type_to_c(t.inner).concat("*"); }
+    if t.kind == TY_SLICE       { return "/* []".concat(type_to_c(t.inner)).concat(" */ void*"); }
+    return "void";
+}
+
+fn op_to_c(op: int) -> string {
+    if op == OP_ADD { return "+"; }
+    if op == OP_SUB { return "-"; }
+    if op == OP_MUL { return "*"; }
+    if op == OP_DIV { return "/"; }
+    if op == OP_MOD { return "%"; }
+    if op == OP_EQ  { return "=="; }
+    if op == OP_NE  { return "!="; }
+    if op == OP_LT  { return "<"; }
+    if op == OP_LE  { return "<="; }
+    if op == OP_GT  { return ">"; }
+    if op == OP_GE  { return ">="; }
+    if op == OP_AND { return "&&"; }
+    if op == OP_OR  { return "||"; }
+    if op == OP_BIT_AND { return "&"; }
+    if op == OP_BIT_OR  { return "|"; }
+    if op == OP_BIT_XOR { return "^"; }
+    if op == OP_SHL { return "<<"; }
+    if op == OP_SHR { return ">>"; }
+    if op == OP_ASSIGN       { return "="; }
+    if op == OP_PLUS_ASSIGN  { return "+="; }
+    if op == OP_MINUS_ASSIGN { return "-="; }
+    if op == OP_STAR_ASSIGN  { return "*="; }
+    if op == OP_SLASH_ASSIGN { return "/="; }
+    return "?";
+}
+
+fn unop_to_c(op: int) -> string {
+    if op == UN_NEG { return "-"; }
+    if op == UN_NOT { return "!"; }
+    if op == UN_BIT_NOT { return "~"; }
+    if op == UN_DEREF { return "*"; }
+    if op == UN_ADDR { return "&"; }
+    if op == UN_ADDR_MUT { return "&"; }
+    return "?";
+}
+
+// ---- printing helpers (just print! to stdout) ----------------------------
+
+fn ind(n: int) {
+    for let i: int = 0; i < n; i++ { print!("    "); }
+}
+
+// ---- expressions ---------------------------------------------------------
+
+pub fn emit_expr(e: *Expr) {
+    if e == null { print!("/* null */"); return; }
+    if e.kind == EX_INT { print!(e.int_val); return; }
+    if e.kind == EX_FLOAT { print!(e.int_val); return; }   // float not modelled in payload yet
+    if e.kind == EX_STRING { print!("\""); print!(e.str_val); print!("\""); return; }
+    if e.kind == EX_CHAR { print!("'\\x"); print!(e.int_val); print!("'"); return; }
+    if e.kind == EX_BOOL { if e.bool_val { print!("true"); } else { print!("false"); } return; }
+    if e.kind == EX_NULL { print!("NULL"); return; }
+    if e.kind == EX_IDENT { print!(e.str_val); return; }
+    if e.kind == EX_BINARY {
+        print!("(");
+        emit_expr(e.lhs);
+        print!(" ", op_to_c(e.op_code), " ");
+        emit_expr(e.rhs);
+        print!(")");
+        return;
+    }
+    if e.kind == EX_UNARY {
+        print!("(", unop_to_c(e.op_code));
+        emit_expr(e.operand);
+        print!(")");
+        return;
+    }
+    if e.kind == EX_ASSIGN {
+        print!("(");
+        emit_expr(e.lhs);
+        print!(" ", op_to_c(e.op_code), " ");
+        emit_expr(e.rhs);
+        print!(")");
+        return;
+    }
+    if e.kind == EX_CALL {
+        emit_expr(e.lhs);
+        print!("(");
+        if e.args != null {
+            for let i: int = 0; i < e.args.len(); i++ {
+                if i > 0 { print!(", "); }
+                let a: Expr = e.args.get(i);
+                emit_expr(&a);
+            }
+        }
+        print!(")");
+        return;
+    }
+    if e.kind == EX_MEMBER {
+        print!("(");
+        emit_expr(e.lhs);
+        print!(".", e.field);
+        print!(")");
+        return;
+    }
+    if e.kind == EX_INDEX {
+        emit_expr(e.lhs);
+        print!("[");
+        emit_expr(e.rhs);
+        print!("]");
+        return;
+    }
+    if e.kind == EX_CAST {
+        print!("((", type_to_c(e.cast_to), ")");
+        emit_expr(e.lhs);
+        print!(")");
+        return;
+    }
+    if e.kind == EX_PATH {
+        print!(e.str_val, "_", e.field);
+        return;
+    }
+    if e.kind == EX_POSTINC { emit_expr(e.lhs); print!("++"); return; }
+    if e.kind == EX_POSTDEC { emit_expr(e.lhs); print!("--"); return; }
+    if e.kind == EX_MACRO {
+        // Simple println!/print! handling.
+        if e.str_val.eq("println") || e.str_val.eq("print") {
+            print!("printf(");
+            if e.args != null && e.args.len() > 0 {
+                let first: Expr = e.args.get(0);
+                if first.kind == EX_STRING {
+                    print!("\"%s");
+                    if e.str_val.eq("println") { print!("\\n"); }
+                    print!("\", ");
+                    emit_expr(&first);
+                } else {
+                    print!("\"%d");
+                    if e.str_val.eq("println") { print!("\\n"); }
+                    print!("\", ");
+                    emit_expr(&first);
+                }
+            } else {
+                print!("\"\\n\"");
+            }
+            print!(")");
+            return;
+        }
+        print!("/* macro ", e.str_val, " */ 0");
+        return;
+    }
+    if e.kind == EX_STRUCT_LIT {
+        print!("(", e.str_val, "){0}");  // placeholder
+        return;
+    }
+    print!("/* unknown expr ", e.kind, " */ 0");
+}
+
+// ---- statements ----------------------------------------------------------
+
+pub fn emit_stmt(s: *Stmt, depth: int) {
+    if s == null { return; }
+    if s.kind == ST_LET || s.kind == ST_CONST {
+        ind(depth);
+        if s.let_ty != null {
+            print!(type_to_c(s.let_ty), " ", s.name);
+        } else {
+            print!("/* infer */ int ", s.name);
+        }
+        if s.let_value != null {
+            print!(" = ");
+            emit_expr(s.let_value);
+        }
+        println!(";");
+        return;
+    }
+    if s.kind == ST_RETURN {
+        ind(depth);
+        print!("return");
+        if s.expr_value != null { print!(" "); emit_expr(s.expr_value); }
+        println!(";");
+        return;
+    }
+    if s.kind == ST_EXPR {
+        ind(depth);
+        emit_expr(s.expr_value);
+        println!(";");
+        return;
+    }
+    if s.kind == ST_BREAK { ind(depth); println!("break;"); return; }
+    if s.kind == ST_CONTINUE { ind(depth); println!("continue;"); return; }
+    if s.kind == ST_IF {
+        ind(depth); print!("if (");
+        emit_expr(s.cond);
+        println!(") {");
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                emit_stmt(&b, depth + 1);
+            }
+        }
+        ind(depth);
+        if s.else_body != null {
+            println!("} else {");
+            for let i: int = 0; i < s.else_body.len(); i++ {
+                let b: Stmt = s.else_body.get(i);
+                emit_stmt(&b, depth + 1);
+            }
+            ind(depth); println!("}");
+        } else {
+            println!("}");
+        }
+        return;
+    }
+    if s.kind == ST_WHILE {
+        ind(depth); print!("while (");
+        emit_expr(s.cond);
+        println!(") {");
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                emit_stmt(&b, depth + 1);
+            }
+        }
+        ind(depth); println!("}");
+        return;
+    }
+    if s.kind == ST_FOR {
+        ind(depth); print!("for (");
+        if s.for_init != null {
+            // Inline emit without trailing ; since C requires single ; here
+            if s.for_init.kind == ST_LET {
+                if s.for_init.let_ty != null {
+                    print!(type_to_c(s.for_init.let_ty), " ", s.for_init.name);
+                } else {
+                    print!("int ", s.for_init.name);
+                }
+                if s.for_init.let_value != null {
+                    print!(" = "); emit_expr(s.for_init.let_value);
+                }
+            } else {
+                if s.for_init.expr_value != null { emit_expr(s.for_init.expr_value); }
+            }
+        }
+        print!("; ");
+        if s.cond != null { emit_expr(s.cond); }
+        print!("; ");
+        if s.for_step != null { emit_expr(s.for_step); }
+        println!(") {");
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                emit_stmt(&b, depth + 1);
+            }
+        }
+        ind(depth); println!("}");
+        return;
+    }
+    if s.kind == ST_BLOCK {
+        ind(depth); println!("{");
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                emit_stmt(&b, depth + 1);
+            }
+        }
+        ind(depth); println!("}");
+        return;
+    }
+    ind(depth); println!("/* unknown stmt ", s.kind, " */");
+}
+
+// ---- top-level -----------------------------------------------------------
+
+fn emit_fn_signature(s: *Stmt) {
+    print!(type_to_c(s.fn_ret_ty), " ", s.name, "(");
+    if s.fn_params == null || s.fn_params.len() == 0 {
+        print!("void");
+    } else {
+        for let i: int = 0; i < s.fn_params.len(); i++ {
+            if i > 0 { print!(", "); }
+            let p: Param = s.fn_params.get(i);
+            print!(type_to_c(p.ty), " ", p.name);
+        }
+    }
+    print!(")");
+}
+
+fn emit_fn(s: *Stmt) {
+    emit_fn_signature(s);
+    println!(" {");
+    if s.fn_body != null {
+        for let i: int = 0; i < s.fn_body.len(); i++ {
+            let b: Stmt = s.fn_body.get(i);
+            emit_stmt(&b, 1);
+        }
+    }
+    println!("}");
+}
+
+fn emit_struct(s: *Stmt) {
+    println!("typedef struct ", s.name, " {");
+    if s.struct_fields != null {
+        for let i: int = 0; i < s.struct_fields.len(); i++ {
+            let f: Field = s.struct_fields.get(i);
+            print!("    ", type_to_c(f.ty), " ", f.name); println!(";");
+        }
+    }
+    println!("} ", s.name, ";");
+    println!("");
+}
+
+pub fn emit_program(program: *Vector<Stmt>) {
+    println!("#include <stdio.h>");
+    println!("#include <stdlib.h>");
+    println!("#include <stdbool.h>");
+    println!("#include <stdint.h>");
+    println!("#include <stddef.h>");
+    println!("#include <string.h>");
+    println!("");
+
+    // Struct definitions first.
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_STRUCT { emit_struct(&s); }
+    }
+
+    // Forward declarations.
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN { emit_fn_signature(&s); println!(";"); }
+    }
+    println!("");
+
+    // Function definitions.
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN { emit_fn(&s); println!(""); }
+    }
+}
