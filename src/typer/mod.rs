@@ -2337,6 +2337,14 @@ fn types_compat(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
         return true;
     }
+    if let (Type::Named(e), Type::Named(a)) = (expected, actual) {
+        if is_integer_primitive(e) && is_integer_primitive(a) {
+            return true;
+        }
+        if is_float_primitive(e) && is_float_primitive(a) {
+            return true;
+        }
+    }
     if is_null_ptr(actual) && matches!(expected, Type::Pointer(_) | Type::Borrow(_) | Type::BorrowMut(_)) {
         return true;
     }
@@ -2451,7 +2459,29 @@ fn arena_ptr() -> Type {
 }
 
 fn is_known_primitive(name: &str) -> bool {
-    matches!(name, "int" | "float" | "bool" | "char" | "string")
+    matches!(
+        name,
+        "int" | "float" | "bool" | "char" | "string"
+            | "uint" | "long" | "ulong"
+            | "i8" | "i16" | "i32" | "i64"
+            | "u8" | "u16" | "u32" | "u64"
+            | "usize" | "isize"
+            | "f32" | "f64"
+    )
+}
+
+fn is_integer_primitive(name: &str) -> bool {
+    matches!(
+        name,
+        "int" | "uint" | "long" | "ulong"
+            | "i8" | "i16" | "i32" | "i64"
+            | "u8" | "u16" | "u32" | "u64"
+            | "usize" | "isize" | "char"
+    )
+}
+
+fn is_float_primitive(name: &str) -> bool {
+    matches!(name, "float" | "f32" | "f64")
 }
 
 fn collect_free_idents(
@@ -2680,7 +2710,7 @@ fn rewrite_captures_expr(expr: Expr, captured: &std::collections::HashSet<String
 
 fn is_copy_type(t: &Type) -> bool {
     match t {
-        Type::Named(n) => matches!(n.as_str(), "int" | "float" | "bool" | "char" | "string"),
+        Type::Named(n) => is_known_primitive(n),
         Type::Borrow(_) => true,
         Type::FnPtr { .. } => true,
         Type::Pointer(_) => false,
@@ -2696,8 +2726,11 @@ fn is_always_visible(kind: &StmtKind) -> bool {
 fn format_spec_for(ty: &Type, arg: Expr, pos: Pos) -> (&'static str, Expr) {
     match ty {
         Type::Named(n) => match n.as_str() {
-            "int"    => ("%d", arg),
-            "float"  => ("%g", arg),
+            "int" | "i8" | "i16" | "i32"  => ("%d", arg),
+            "i64" | "isize" | "long"      => ("%lld", arg),
+            "uint" | "u8" | "u16" | "u32" => ("%u", arg),
+            "u64" | "usize" | "ulong"     => ("%llu", arg),
+            "float" | "f32" | "f64"       => ("%g", arg),
             "char"   => ("%c", arg),
             "string" => ("%s", arg),
             "bool"   => {

@@ -229,6 +229,7 @@ impl Codegen {
         self.push("#include <stdlib.h>\n");
         self.push("#include <stdbool.h>\n");
         self.push("#include <stddef.h>\n");
+        self.push("#include <stdint.h>\n");
         self.push("#include <string.h>\n");
         self.push("#include <stdarg.h>\n");
         self.push("#include <ctype.h>\n");
@@ -1155,6 +1156,21 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 }
                 match name.as_str() {
                     "int"    => "int".into(),
+                    "uint"   => "unsigned int".into(),
+                    "long"   => "long".into(),
+                    "ulong"  => "unsigned long".into(),
+                    "i8"     => "int8_t".into(),
+                    "i16"    => "int16_t".into(),
+                    "i32"    => "int32_t".into(),
+                    "i64"    => "int64_t".into(),
+                    "u8"     => "uint8_t".into(),
+                    "u16"    => "uint16_t".into(),
+                    "u32"    => "uint32_t".into(),
+                    "u64"    => "uint64_t".into(),
+                    "usize"  => "size_t".into(),
+                    "isize"  => "ptrdiff_t".into(),
+                    "f32"    => "float".into(),
+                    "f64"    => "double".into(),
                     "float"  => "double".into(),
                     "bool"   => "bool".into(),
                     "char"   => "char".into(),
