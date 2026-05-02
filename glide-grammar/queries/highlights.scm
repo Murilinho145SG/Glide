@@ -2,6 +2,7 @@
 [
   "fn"
   "let"
+  "mut"
   "const"
   "struct"
   "interface"
@@ -23,10 +24,16 @@
   "as"
   "sizeof"
   "new"
+  "move"
+  "type"
   "extern"
   "c_include"
   "c_link"
 ] @keyword
+
+; Built-in / known primitive types
+((identifier) @type.builtin
+ (#match? @type.builtin "^(int|uint|long|ulong|i8|i16|i32|i64|u8|u16|u32|u64|usize|isize|f32|f64|float|bool|char|string|void)$"))
 
 ; Constants
 (bool_literal) @boolean

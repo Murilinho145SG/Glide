@@ -26,6 +26,9 @@ module.exports = grammar({
     $.block_comment,
   ],
 
+  conflicts: $ => [
+  ],
+
   rules: {
     source_file: $ => repeat($._top_item),
 

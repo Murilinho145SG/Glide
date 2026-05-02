@@ -555,6 +555,36 @@ impl Typer {
                     is_method: false,
                 });
             }
+            StmtKind::Const { name, ty, .. } => {
+                if let Some(t) = ty {
+                    self.declare(name.clone(), t.clone(), stmt.pos);
+                    self.index.decls.push(DeclInfo {
+                        pos: stmt.pos,
+                        name: name.clone(),
+                        kind: DeclKind::Const,
+                        ty: Some(t.clone()),
+                        detail: format!("const {}: {}", name, type_name(t)),
+                        module: module.clone(),
+                        file: file.clone(),
+                        is_method: false,
+                    });
+                }
+            }
+            StmtKind::Let { name, ty, .. } => {
+                if let Some(t) = ty {
+                    self.declare(name.clone(), t.clone(), stmt.pos);
+                    self.index.decls.push(DeclInfo {
+                        pos: stmt.pos,
+                        name: name.clone(),
+                        kind: DeclKind::Let,
+                        ty: Some(t.clone()),
+                        detail: format!("let {}: {}", name, type_name(t)),
+                        module: module.clone(),
+                        file: file.clone(),
+                        is_method: false,
+                    });
+                }
+            }
             _ => {}
         }
     }
