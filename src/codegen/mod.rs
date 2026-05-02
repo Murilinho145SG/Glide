@@ -71,6 +71,7 @@ impl Codegen {
             Type::Borrow(inner) => Type::Borrow(Box::new(self.resolve_alias(inner))),
             Type::BorrowMut(inner) => Type::BorrowMut(Box::new(self.resolve_alias(inner))),
             Type::Chan(inner) => Type::Chan(Box::new(self.resolve_alias(inner))),
+            Type::Slice(inner) => Type::Slice(Box::new(self.resolve_alias(inner))),
             Type::FnPtr { params, ret } => Type::FnPtr {
                 params: params.iter().map(|p| self.resolve_alias(p)).collect(),
                 ret: ret.as_ref().map(|r| Box::new(self.resolve_alias(r))),
@@ -165,6 +166,11 @@ impl Codegen {
             if !chan_types.is_empty() {
                 self.emit_chan_runtime(&chan_types);
             }
+        }
+
+        let slice_types = collect_slice_inner_types(program);
+        if !slice_types.is_empty() {
+            self.emit_slice_runtime(&slice_types);
         }
 
         let mut any_extern = false;
@@ -273,6 +279,19 @@ impl Codegen {
         }
         self.push("\n");
         self.push(STDLIB_C);
+        self.push("\n");
+    }
+
+    fn emit_slice_runtime(&mut self, slice_inner_types: &[Type]) {
+        for inner in slice_inner_types {
+            let mangled = inner.mangle();
+            let elem_c = self.type_to_c(inner);
+            self.push(&format!(
+                "typedef struct {{ {t}* data; size_t len; }} __glide_slice_{m}_t;\n",
+                m = mangled,
+                t = elem_c,
+            ));
+        }
         self.push("\n");
     }
 
@@ -1163,21 +1182,35 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 self.push(" })");
             }
 
-            ExprKind::ArrayLit { elements, elem_type } => {
-                let elem_c = match elem_type {
-                    Some(t) => self.type_to_c(t),
+            ExprKind::ArrayLit { elements, elem_type, as_slice } => {
+                let elem_t = match elem_type {
+                    Some(t) => t.clone(),
                     None => return Err(self.err(
                         "array literal type was not resolved by the typer".into(),
                     )),
                 };
-                self.push("((");
-                self.push(&elem_c);
-                self.push("[]){");
-                for (i, e) in elements.iter().enumerate() {
-                    if i > 0 { self.push(", "); }
-                    self.emit_expr(e)?;
+                let elem_c = self.type_to_c(&elem_t);
+                if *as_slice {
+                    let mangled = elem_t.mangle();
+                    self.push(&format!(
+                        "((__glide_slice_{m}_t){{ .data = ({t}[]){{",
+                        m = mangled, t = elem_c
+                    ));
+                    for (i, e) in elements.iter().enumerate() {
+                        if i > 0 { self.push(", "); }
+                        self.emit_expr(e)?;
+                    }
+                    self.push(&format!("}}, .len = {} }})", elements.len()));
+                } else {
+                    self.push("((");
+                    self.push(&elem_c);
+                    self.push("[]){");
+                    for (i, e) in elements.iter().enumerate() {
+                        if i > 0 { self.push(", "); }
+                        self.emit_expr(e)?;
+                    }
+                    self.push("})");
                 }
-                self.push("})");
             }
             ExprKind::FnExpr { .. } => {
                 return Err(self.err(
@@ -1223,6 +1256,7 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             Type::Borrow(inner) => format!("{} const*", self.type_to_c(inner)),
             Type::BorrowMut(inner) => format!("{}*", self.type_to_c(inner)),
             Type::Chan(inner) => format!("__glide_chan_{}_t*", inner.mangle()),
+            Type::Slice(inner) => format!("__glide_slice_{}_t", inner.mangle()),
             Type::FnPtr { params, ret } => {
                 let ret_c = match ret {
                     Some(r) => self.type_to_c(r),
@@ -1335,53 +1369,73 @@ fn program_uses_concurrency(program: &Program) -> bool {
 fn collect_chan_inner_types(program: &Program) -> Vec<Type> {
     let mut found = std::collections::BTreeMap::<String, Type>::new();
     for stmt in program {
-        collect_in_stmt(stmt, &mut found);
+        collect_in_stmt(stmt, &mut found, false);
     }
     found.into_values().collect()
 }
 
-fn collect_in_stmt(stmt: &Stmt, out: &mut std::collections::BTreeMap<String, Type>) {
+fn collect_slice_inner_types(program: &Program) -> Vec<Type> {
+    let mut found = std::collections::BTreeMap::<String, Type>::new();
+    for stmt in program {
+        collect_in_stmt(stmt, &mut found, true);
+    }
+    found.into_values().collect()
+}
+
+fn collect_in_stmt(
+    stmt: &Stmt,
+    out: &mut std::collections::BTreeMap<String, Type>,
+    slices: bool,
+) {
     match &stmt.kind {
         StmtKind::Let { ty, .. } | StmtKind::Const { ty, .. } => {
-            if let Some(t) = ty { collect_in_type(t, out); }
+            if let Some(t) = ty { collect_in_type(t, out, slices); }
         }
         StmtKind::Fn { params, ret_type, body, .. } => {
-            for p in params { collect_in_type(&p.ty, out); }
-            if let Some(t) = ret_type { collect_in_type(t, out); }
-            for s in body { collect_in_stmt(s, out); }
+            for p in params { collect_in_type(&p.ty, out, slices); }
+            if let Some(t) = ret_type { collect_in_type(t, out, slices); }
+            for s in body { collect_in_stmt(s, out, slices); }
         }
         StmtKind::Struct { fields, .. } => {
-            for f in fields { collect_in_type(&f.ty, out); }
+            for f in fields { collect_in_type(&f.ty, out, slices); }
         }
-        StmtKind::Block(stmts) => for s in stmts { collect_in_stmt(s, out); },
+        StmtKind::Block(stmts) => for s in stmts { collect_in_stmt(s, out, slices); },
         StmtKind::If { then_block, else_block, .. } => {
-            for s in then_block { collect_in_stmt(s, out); }
+            for s in then_block { collect_in_stmt(s, out, slices); }
             if let Some(b) = else_block {
-                for s in b { collect_in_stmt(s, out); }
+                for s in b { collect_in_stmt(s, out, slices); }
             }
         }
-        StmtKind::While { body, .. } => for s in body { collect_in_stmt(s, out); },
+        StmtKind::While { body, .. } => for s in body { collect_in_stmt(s, out, slices); },
         StmtKind::For { init, body, .. } => {
-            if let Some(s) = init { collect_in_stmt(s, out); }
-            for s in body { collect_in_stmt(s, out); }
+            if let Some(s) = init { collect_in_stmt(s, out, slices); }
+            for s in body { collect_in_stmt(s, out, slices); }
+        }
+        StmtKind::ExternFn { params, ret_type, .. } => {
+            for p in params { collect_in_type(&p.ty, out, slices); }
+            if let Some(t) = ret_type { collect_in_type(t, out, slices); }
         }
         _ => {}
     }
 }
 
-fn collect_in_type(ty: &Type, out: &mut std::collections::BTreeMap<String, Type>) {
+fn collect_in_type(ty: &Type, out: &mut std::collections::BTreeMap<String, Type>, slices: bool) {
     match ty {
         Type::Chan(inner) => {
-            out.insert(inner.mangle(), (**inner).clone());
-            collect_in_type(inner, out);
+            if !slices { out.insert(inner.mangle(), (**inner).clone()); }
+            collect_in_type(inner, out, slices);
         }
-        Type::Pointer(inner) => collect_in_type(inner, out),
-        Type::Borrow(inner) => collect_in_type(inner, out),
-        Type::BorrowMut(inner) => collect_in_type(inner, out),
+        Type::Slice(inner) => {
+            if slices { out.insert(inner.mangle(), (**inner).clone()); }
+            collect_in_type(inner, out, slices);
+        }
+        Type::Pointer(inner) => collect_in_type(inner, out, slices),
+        Type::Borrow(inner) => collect_in_type(inner, out, slices),
+        Type::BorrowMut(inner) => collect_in_type(inner, out, slices),
         Type::Named(_) => {}
         Type::FnPtr { params, ret } => {
-            for p in params { collect_in_type(p, out); }
-            if let Some(r) = ret { collect_in_type(r, out); }
+            for p in params { collect_in_type(p, out, slices); }
+            if let Some(r) = ret { collect_in_type(r, out, slices); }
         }
     }
 }
@@ -1445,6 +1499,7 @@ fn ty_has_chan(ty: &Type) -> bool {
         Type::Pointer(inner) => ty_has_chan(inner),
         Type::Borrow(inner) => ty_has_chan(inner),
         Type::BorrowMut(inner) => ty_has_chan(inner),
+        Type::Slice(inner) => ty_has_chan(inner),
         Type::Named(_) => false,
         Type::FnPtr { params, ret } => {
             params.iter().any(ty_has_chan)

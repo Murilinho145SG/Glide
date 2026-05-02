@@ -729,6 +729,7 @@ fn format_type(ty: &Type) -> String {
         Type::Borrow(inner) => format!("&{}", format_type(inner)),
         Type::BorrowMut(inner) => format!("&mut {}", format_type(inner)),
         Type::Chan(inner) => format!("chan<{}>", format_type(inner)),
+        Type::Slice(inner) => format!("[]{}", format_type(inner)),
         Type::FnPtr { params, ret } => {
             let p = params.iter().map(format_type).collect::<Vec<_>>().join(", ");
             match ret {

@@ -823,6 +823,10 @@
         {
           "type": "pointer_type",
           "named": true
+        },
+        {
+          "type": "slice_type",
+          "named": true
         }
       ]
     }
@@ -857,6 +861,10 @@
         },
         {
           "type": "pointer_type",
+          "named": true
+        },
+        {
+          "type": "slice_type",
           "named": true
         }
       ]
@@ -1096,6 +1104,10 @@
           "named": true
         },
         {
+          "type": "slice_type",
+          "named": true
+        },
+        {
           "type": "string_literal",
           "named": true
         },
@@ -1141,6 +1153,10 @@
         {
           "type": "pointer_type",
           "named": true
+        },
+        {
+          "type": "slice_type",
+          "named": true
         }
       ]
     }
@@ -1185,6 +1201,10 @@
           },
           {
             "type": "pointer_type",
+            "named": true
+          },
+          {
+            "type": "slice_type",
             "named": true
           }
         ]
@@ -1457,6 +1477,10 @@
         {
           "type": "pointer_type",
           "named": true
+        },
+        {
+          "type": "slice_type",
+          "named": true
         }
       ]
     }
@@ -1611,6 +1635,10 @@
           {
             "type": "pointer_type",
             "named": true
+          },
+          {
+            "type": "slice_type",
+            "named": true
           }
         ]
       }
@@ -1728,6 +1756,10 @@
           {
             "type": "pointer_type",
             "named": true
+          },
+          {
+            "type": "slice_type",
+            "named": true
           }
         ]
       }
@@ -1764,6 +1796,10 @@
           {
             "type": "pointer_type",
             "named": true
+          },
+          {
+            "type": "slice_type",
+            "named": true
           }
         ]
       }
@@ -1798,6 +1834,10 @@
         },
         {
           "type": "pointer_type",
+          "named": true
+        },
+        {
+          "type": "slice_type",
           "named": true
         }
       ]
@@ -2041,6 +2081,10 @@
           },
           {
             "type": "pointer_type",
+            "named": true
+          },
+          {
+            "type": "slice_type",
             "named": true
           }
         ]
@@ -2419,6 +2463,10 @@
           {
             "type": "pointer_type",
             "named": true
+          },
+          {
+            "type": "slice_type",
+            "named": true
           }
         ]
       }
@@ -2724,6 +2772,10 @@
           {
             "type": "pointer_type",
             "named": true
+          },
+          {
+            "type": "slice_type",
+            "named": true
           }
         ]
       }
@@ -2769,6 +2821,10 @@
           },
           {
             "type": "pointer_type",
+            "named": true
+          },
+          {
+            "type": "slice_type",
             "named": true
           }
         ]
@@ -3426,6 +3482,10 @@
           {
             "type": "pointer_type",
             "named": true
+          },
+          {
+            "type": "slice_type",
+            "named": true
           }
         ]
       }
@@ -3601,6 +3661,10 @@
         },
         {
           "type": "pointer_type",
+          "named": true
+        },
+        {
+          "type": "slice_type",
           "named": true
         }
       ]
@@ -3833,6 +3897,49 @@
         },
         {
           "type": "pointer_type",
+          "named": true
+        },
+        {
+          "type": "slice_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "slice_type",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
+          "type": "chan_type",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
+          "named": true
+        },
+        {
+          "type": "named_type",
+          "named": true
+        },
+        {
+          "type": "pointer_type",
+          "named": true
+        },
+        {
+          "type": "slice_type",
           "named": true
         }
       ]
@@ -4068,6 +4175,10 @@
           {
             "type": "pointer_type",
             "named": true
+          },
+          {
+            "type": "slice_type",
+            "named": true
           }
         ]
       }
@@ -4249,6 +4360,10 @@
           },
           {
             "type": "pointer_type",
+            "named": true
+          },
+          {
+            "type": "slice_type",
             "named": true
           }
         ]

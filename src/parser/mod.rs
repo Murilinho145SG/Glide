@@ -871,6 +871,12 @@ impl Parser {
             let inner = self.parse_type()?;
             return Ok(Type::Pointer(Box::new(inner)));
         }
+        if self.at_op(Operator::LBracket) && matches!(&self.peek.token, TokenKind::Operator(Operator::RBracket)) {
+            self.advance(); // '['
+            self.advance(); // ']'
+            let inner = self.parse_type()?;
+            return Ok(Type::Slice(Box::new(inner)));
+        }
         if self.eat_op(Operator::BitAnd) {
             if self.at_keyword(Keyword::Mut) {
                 self.advance();
@@ -1080,7 +1086,7 @@ impl Parser {
                 }
                 self.no_struct_lit = saved;
                 self.expect_op(Operator::RBracket)?;
-                ExprKind::ArrayLit { elements: elems, elem_type: None }
+                ExprKind::ArrayLit { elements: elems, elem_type: None, as_slice: false }
             }
             TokenKind::Operator(op) => {
                 let unary = match op {

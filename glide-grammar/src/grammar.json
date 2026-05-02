@@ -1765,6 +1765,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "slice_type"
+        },
+        {
+          "type": "SYMBOL",
           "name": "fn_ptr_type"
         }
       ]
@@ -1842,6 +1846,23 @@
         {
           "type": "STRING",
           "value": ">"
+        }
+      ]
+    },
+    "slice_type": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "["
+        },
+        {
+          "type": "STRING",
+          "value": "]"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_type"
         }
       ]
     },

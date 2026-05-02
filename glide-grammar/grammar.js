@@ -326,6 +326,7 @@ module.exports = grammar({
       $.borrow_type,
       $.borrow_mut_type,
       $.chan_type,
+      $.slice_type,
       $.fn_ptr_type,
     ),
 
@@ -334,6 +335,7 @@ module.exports = grammar({
     borrow_type:     $ => prec.right(seq('&', $._type)),
     borrow_mut_type: $ => prec.right(seq('&', 'mut', $._type)),
     chan_type:       $ => seq('chan', '<', $._type, '>'),
+    slice_type:      $ => seq('[', ']', $._type),
     fn_ptr_type:     $ => seq(
       'fn',
       '(',

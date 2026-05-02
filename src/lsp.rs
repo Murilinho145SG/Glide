@@ -923,6 +923,7 @@ fn struct_from_type(ty: &Type) -> Option<String> {
         Type::Borrow(inner) => struct_from_type(inner),
         Type::BorrowMut(inner) => struct_from_type(inner),
         Type::Chan(_) => None,
+        Type::Slice(_) => None,
         Type::FnPtr { .. } => None,
     }
 }
@@ -934,6 +935,7 @@ fn method_type_prefix_for_completion(ty: &Type) -> Option<String> {
         Type::Borrow(inner) => method_type_prefix_for_completion(inner),
         Type::BorrowMut(inner) => method_type_prefix_for_completion(inner),
         Type::Chan(_) => Some("chan".into()),
+        Type::Slice(_) => Some("slice".into()),
         Type::FnPtr { .. } => None,
     }
 }

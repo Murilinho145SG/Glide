@@ -477,6 +477,7 @@ impl Typer {
             Type::Borrow(inner) => Type::Borrow(Box::new(self.resolve_alias(inner))),
             Type::BorrowMut(inner) => Type::BorrowMut(Box::new(self.resolve_alias(inner))),
             Type::Chan(inner) => Type::Chan(Box::new(self.resolve_alias(inner))),
+            Type::Slice(inner) => Type::Slice(Box::new(self.resolve_alias(inner))),
             Type::FnPtr { params, ret } => Type::FnPtr {
                 params: params.iter().map(|p| self.resolve_alias(p)).collect(),
                 ret: ret.as_ref().map(|r| Box::new(self.resolve_alias(r))),
@@ -892,6 +893,16 @@ impl Typer {
             }
         }
 
+        // Slice literal: `let s: []T = [a, b, c];` flips ArrayLit's as_slice flag.
+        let mut value = value;
+        if let (Some(annot_ty), Some(v)) = (&ty, value.as_mut()) {
+            if let Type::Slice(_) = self.resolve_alias(annot_ty) {
+                if let ExprKind::ArrayLit { as_slice, .. } = &mut v.kind {
+                    *as_slice = true;
+                }
+            }
+        }
+
         // Auto-allocation pattern: `let p: *T = T { ... };` rewrites to New (heap alloc)
         // and marks the slot as owned (auto-drop at scope end).
         let mut auto_owned_value: Option<Expr> = None;
@@ -1251,8 +1262,10 @@ impl Typer {
                 let (obj_new, obj_ty) = self.check_expr(*obj);
                 let (idx_new, idx_ty) = self.check_expr(*idx);
                 self.expect_type(&int_ty(), &idx_ty, "array index");
-                let elem_ty = match &obj_ty {
+                let resolved = self.resolve_alias(&obj_ty);
+                let elem_ty = match &resolved {
                     Type::Pointer(t) => (**t).clone(),
+                    Type::Slice(t) => (**t).clone(),
                     t if is_error(t) => error_ty(),
                     _ => {
                         self.error(format!(
@@ -1262,7 +1275,20 @@ impl Typer {
                         error_ty()
                     }
                 };
-                (ExprKind::Index(Box::new(obj_new), Box::new(idx_new)), elem_ty)
+                // For slices, rewrite `s[i]` to `s.data[i]` so codegen indexes the
+                // backing pointer rather than the slice struct.
+                let obj_for_index = if matches!(resolved, Type::Slice(_)) {
+                    Expr::new(
+                        ExprKind::Member(Box::new(obj_new.clone()), "data".into()),
+                        obj_new.pos,
+                    )
+                } else {
+                    obj_new
+                };
+                (
+                    ExprKind::Index(Box::new(obj_for_index), Box::new(idx_new)),
+                    elem_ty,
+                )
             }
 
             ExprKind::Cast(inner, target) => {
@@ -1357,11 +1383,11 @@ impl Typer {
                 )
             }
 
-            ExprKind::ArrayLit { elements, .. } => {
+            ExprKind::ArrayLit { elements, as_slice, .. } => {
                 if elements.is_empty() {
                     self.error("empty array literal `[]` requires a type annotation".into());
                     return (
-                        ExprKind::ArrayLit { elements: Vec::new(), elem_type: None },
+                        ExprKind::ArrayLit { elements: Vec::new(), elem_type: None, as_slice },
                         error_ty(),
                     );
                 }
@@ -1379,11 +1405,13 @@ impl Typer {
                 let inner = elem_ty.clone().unwrap_or_else(error_ty);
                 let result_ty = if is_error(&inner) {
                     error_ty()
+                } else if as_slice {
+                    Type::Slice(Box::new(inner))
                 } else {
                     Type::Pointer(Box::new(inner))
                 };
                 (
-                    ExprKind::ArrayLit { elements: new_elems, elem_type: elem_ty },
+                    ExprKind::ArrayLit { elements: new_elems, elem_type: elem_ty, as_slice },
                     result_ty,
                 )
             }
@@ -2158,6 +2186,31 @@ impl Typer {
         let obj_pos = obj_new.pos;
         let obj_ty = self.resolve_alias(&obj_ty);
 
+        if let Type::Slice(_) = &obj_ty {
+            if field == "len" {
+                return (
+                    Expr::new(ExprKind::Member(Box::new(obj_new), field), pos),
+                    Type::Named("usize".into()),
+                );
+            }
+            if field == "data" {
+                if let Type::Slice(inner) = &obj_ty {
+                    return (
+                        Expr::new(ExprKind::Member(Box::new(obj_new), field), pos),
+                        Type::Pointer(inner.clone()),
+                    );
+                }
+            }
+            self.error(format!(
+                "slice has no field `{}` (only `.len` and `.data`)",
+                field
+            ));
+            return (
+                Expr::new(ExprKind::Member(Box::new(obj_new), field), pos),
+                error_ty(),
+            );
+        }
+
         let (final_obj, struct_name) = match &obj_ty {
             Type::Named(n) => (obj_new, n.clone()),
             Type::Pointer(inner) | Type::Borrow(inner) | Type::BorrowMut(inner) => match inner.as_ref() {
@@ -2420,6 +2473,7 @@ pub fn type_name(t: &Type) -> String {
         Type::Borrow(inner) => format!("&{}", type_name(inner)),
         Type::BorrowMut(inner) => format!("&mut {}", type_name(inner)),
         Type::Chan(inner) => format!("chan<{}>", type_name(inner)),
+        Type::Slice(inner) => format!("[]{}", type_name(inner)),
         Type::FnPtr { params, ret } => {
             let p = params.iter().map(type_name).collect::<Vec<_>>().join(", ");
             match ret {
@@ -2721,9 +2775,10 @@ fn rewrite_captures_expr(expr: Expr, captured: &std::collections::HashSet<String
             type_name,
             fields: fields.into_iter().map(|(n, v)| (n, rewrite_captures_expr(v, captured))).collect(),
         },
-        ExprKind::ArrayLit { elements, elem_type } => ExprKind::ArrayLit {
+        ExprKind::ArrayLit { elements, elem_type, as_slice } => ExprKind::ArrayLit {
             elements: elements.into_iter().map(|e| rewrite_captures_expr(e, captured)).collect(),
             elem_type,
+            as_slice,
         },
         ExprKind::AddrOfTemp { value, ty } => ExprKind::AddrOfTemp {
             value: Box::new(rewrite_captures_expr(*value, captured)),
@@ -2751,6 +2806,7 @@ fn is_copy_type(t: &Type) -> bool {
         Type::Pointer(_) => false,
         Type::BorrowMut(_) => false,
         Type::Chan(_) => false,
+        Type::Slice(_) => true,
     }
 }
 
@@ -2782,6 +2838,7 @@ fn format_spec_for(ty: &Type, arg: Expr, pos: Pos) -> (&'static str, Expr) {
             _ => ("%p", arg),
         },
         Type::Pointer(_) | Type::Borrow(_) | Type::BorrowMut(_) | Type::Chan(_) | Type::FnPtr { .. } => ("%p", arg),
+        Type::Slice(_) => ("%p", arg),
     }
 }
 

@@ -1,0 +1,20 @@
+fn sum(s: []int) -> int {
+    let mut total: int = 0;
+    for let i: int = 0; i < s.len as int; i++ {
+        total += s[i];
+    }
+    return total;
+}
+
+fn main() -> int {
+    let nums: []int = [10, 20, 30, 40, 50];
+    println!("len =", nums.len);
+    println!("nums[2] =", nums[2]);
+    println!("sum =", sum(nums));
+
+    let words: []string = ["one", "two", "three"];
+    for let i: int = 0; i < words.len as int; i++ {
+        println!(words[i]);
+    }
+    return 0;
+}

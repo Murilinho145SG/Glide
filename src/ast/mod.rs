@@ -93,6 +93,7 @@ pub enum ExprKind {
     ArrayLit {
         elements: Vec<Expr>,
         elem_type: Option<Type>,
+        as_slice: bool,
     },
 
     AddrOfTemp {
