@@ -419,6 +419,26 @@ impl Typer {
                     is_method: false,
                 });
             }
+            StmtKind::ExternFn { name, params, ret_type, variadic } => {
+                self.fns.insert(name.clone(), FnSig {
+                    params: params.clone(),
+                    ret_type: ret_type.clone(),
+                    variadic: *variadic,
+                    decl_pos: Some(stmt.pos),
+                    home_file: file.clone(),
+                    is_pub: true,
+                });
+                self.index.decls.push(DeclInfo {
+                    pos: stmt.pos,
+                    name: name.clone(),
+                    kind: DeclKind::Fn,
+                    ty: ret_type.clone(),
+                    detail: format_fn_detail(name, params, ret_type.as_ref()),
+                    module: module.clone(),
+                    file: file.clone(),
+                    is_method: false,
+                });
+            }
             _ => {}
         }
     }
@@ -506,6 +526,9 @@ impl Typer {
             StmtKind::Enum { name, variants } => StmtKind::Enum { name, variants },
             StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
             StmtKind::TypeAlias { name, ty } => StmtKind::TypeAlias { name, ty },
+            StmtKind::ExternFn { name, params, ret_type, variadic } => {
+                StmtKind::ExternFn { name, params, ret_type, variadic }
+            }
             other => {
                 self.error("unsupported top-level statement".into());
                 other
@@ -730,6 +753,10 @@ impl Typer {
             }
             StmtKind::Enum { .. } => {
                 self.error("`enum` only allowed at top level".into());
+                StmtKind::Break
+            }
+            StmtKind::ExternFn { .. } => {
+                self.error("`extern fn` only allowed at top level".into());
                 StmtKind::Break
             }
             StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
@@ -2663,7 +2690,7 @@ fn is_copy_type(t: &Type) -> bool {
 }
 
 fn is_always_visible(kind: &StmtKind) -> bool {
-    matches!(kind, StmtKind::Impl { .. })
+    matches!(kind, StmtKind::Impl { .. } | StmtKind::ExternFn { .. })
 }
 
 fn format_spec_for(ty: &Type, arg: Expr, pos: Pos) -> (&'static str, Expr) {

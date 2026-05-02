@@ -227,6 +227,12 @@ pub enum StmtKind {
         name: String,
         ty: Type,
     },
+    ExternFn {
+        name: String,
+        params: Vec<Param>,
+        ret_type: Option<Type>,
+        variadic: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

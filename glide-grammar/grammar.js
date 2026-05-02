@@ -32,6 +32,7 @@ module.exports = grammar({
     _top_item: $ => choice(
       $.import_stmt,
       $.fn_decl,
+      $.extern_fn,
       $.struct_decl,
       $.enum_decl,
       $.interface_decl,
@@ -92,6 +93,26 @@ module.exports = grammar({
       field('params', $.param_list),
       optional(seq('->', field('return_type', $._type))),
       field('body', $.block),
+    ),
+
+    extern_fn: $ => seq(
+      'extern',
+      optional($.string_literal),
+      'fn',
+      field('name', $.identifier),
+      field('params', $.extern_param_list),
+      optional(seq('->', field('return_type', $._type))),
+      ';',
+    ),
+
+    extern_param_list: $ => seq(
+      '(',
+      optional(seq(
+        $.param,
+        repeat(seq(',', $.param)),
+        optional(seq(',', '...')),
+      )),
+      ')',
     ),
 
     param_list: $ => seq(

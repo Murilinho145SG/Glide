@@ -68,6 +68,9 @@ pub enum Operator {
     // arrows
     Arrow,         // ->  (return type)
     ArrowFunction, // =>  (lambda / match arm)
+
+    // misc
+    Ellipsis,      // ... (variadic params)
 }
 
 impl Operator {
@@ -130,6 +133,8 @@ impl Operator {
 
             Operator::Arrow         => "->",
             Operator::ArrowFunction => "=>",
+
+            Operator::Ellipsis      => "...",
         }
     }
 
@@ -192,6 +197,8 @@ impl Operator {
 
             "->" => Some(Operator::Arrow),
             "=>" => Some(Operator::ArrowFunction),
+
+            "..." => Some(Operator::Ellipsis),
 
             _ => None,
         }

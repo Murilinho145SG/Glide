@@ -35,6 +35,7 @@ pub enum Keyword {
     Mut,
     Type,
     Move,
+    Extern,
 }
 
 impl Keyword {
@@ -70,6 +71,7 @@ impl Keyword {
             Keyword::Mut       => "mut",
             Keyword::Type      => "type",
             Keyword::Move      => "move",
+            Keyword::Extern    => "extern",
         }
     }
 
@@ -105,6 +107,7 @@ impl Keyword {
             "mut"       => Some(Keyword::Mut),
             "type"      => Some(Keyword::Type),
             "move"      => Some(Keyword::Move),
+            "extern"    => Some(Keyword::Extern),
             _ => None,
         }
     }

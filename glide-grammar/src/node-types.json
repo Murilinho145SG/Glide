@@ -1531,6 +1531,87 @@
     }
   },
   {
+    "type": "extern_fn",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "params": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "extern_param_list",
+            "named": true
+          }
+        ]
+      },
+      "return_type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
+            "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
+            "named": true
+          },
+          {
+            "type": "named_type",
+            "named": true
+          },
+          {
+            "type": "pointer_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "string_literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "extern_param_list",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "param",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "fn_decl",
     "named": true,
     "fields": {
@@ -3719,6 +3800,10 @@
           "named": true
         },
         {
+          "type": "extern_fn",
+          "named": true
+        },
+        {
           "type": "fn_decl",
           "named": true
         },
@@ -4450,6 +4535,10 @@
     "named": false
   },
   {
+    "type": "...",
+    "named": false
+  },
+  {
     "type": "/",
     "named": false
   },
@@ -4568,6 +4657,10 @@
   },
   {
     "type": "enum",
+    "named": false
+  },
+  {
+    "type": "extern",
     "named": false
   },
   {

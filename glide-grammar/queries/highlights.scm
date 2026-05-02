@@ -23,6 +23,7 @@
   "as"
   "sizeof"
   "new"
+  "extern"
 ] @keyword
 
 ; Constants
@@ -47,6 +48,7 @@
 
 ; Function declaration & calls
 (fn_decl   name: (identifier) @function)
+(extern_fn name: (identifier) @function)
 (call_expr callee: (identifier_expr (identifier) @function.call))
 (macro_call name: (identifier) @function.macro
             "!" @function.macro)

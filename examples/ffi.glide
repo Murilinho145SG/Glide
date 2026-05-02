@@ -1,0 +1,22 @@
+extern fn pow(x: float, y: float) -> float;
+extern fn sqrt(x: float) -> float;
+extern fn floor(x: float) -> float;
+extern fn ceil(x: float) -> float;
+extern fn abs(x: int) -> int;
+
+fn main() -> int {
+    let p: float = pow(2.0, 10.0);
+    printf("2^10 = %g\n", p);
+
+    let r: float = sqrt(2.0);
+    printf("sqrt(2) = %.6f\n", r);
+
+    let f: float = floor(3.7);
+    let c: float = ceil(3.2);
+    printf("floor(3.7) = %g, ceil(3.2) = %g\n", f, c);
+
+    let a: int = abs(-42);
+    printf("abs(-42) = %d\n", a);
+
+    return 0;
+}

@@ -211,7 +211,15 @@ impl Lexer {
 
             ';' => TokenKind::Operator(Operator::Semicolon),
             ',' => TokenKind::Operator(Operator::Comma),
-            '.' => TokenKind::Operator(Operator::Dot),
+            '.' => {
+                if self.peek_char() == '.' && self.peek_at(1) == '.' {
+                    self.read_char();
+                    self.read_char();
+                    TokenKind::Operator(Operator::Ellipsis)
+                } else {
+                    TokenKind::Operator(Operator::Dot)
+                }
+            }
             ':' => {
                 if self.peek_char() == ':' {
                     self.read_char();

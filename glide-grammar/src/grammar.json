@@ -23,6 +23,10 @@
         },
         {
           "type": "SYMBOL",
+          "name": "extern_fn"
+        },
+        {
+          "type": "SYMBOL",
           "name": "struct_decl"
         },
         {
@@ -350,6 +354,143 @@
             "type": "SYMBOL",
             "name": "block"
           }
+        }
+      ]
+    },
+    "extern_fn": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "extern"
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SYMBOL",
+              "name": "string_literal"
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": "fn"
+        },
+        {
+          "type": "FIELD",
+          "name": "name",
+          "content": {
+            "type": "SYMBOL",
+            "name": "identifier"
+          }
+        },
+        {
+          "type": "FIELD",
+          "name": "params",
+          "content": {
+            "type": "SYMBOL",
+            "name": "extern_param_list"
+          }
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "STRING",
+                  "value": "->"
+                },
+                {
+                  "type": "FIELD",
+                  "name": "return_type",
+                  "content": {
+                    "type": "SYMBOL",
+                    "name": "_type"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ";"
+        }
+      ]
+    },
+    "extern_param_list": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "("
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
+              "type": "SEQ",
+              "members": [
+                {
+                  "type": "SYMBOL",
+                  "name": "param"
+                },
+                {
+                  "type": "REPEAT",
+                  "content": {
+                    "type": "SEQ",
+                    "members": [
+                      {
+                        "type": "STRING",
+                        "value": ","
+                      },
+                      {
+                        "type": "SYMBOL",
+                        "name": "param"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "type": "CHOICE",
+                  "members": [
+                    {
+                      "type": "SEQ",
+                      "members": [
+                        {
+                          "type": "STRING",
+                          "value": ","
+                        },
+                        {
+                          "type": "STRING",
+                          "value": "..."
+                        }
+                      ]
+                    },
+                    {
+                      "type": "BLANK"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "STRING",
+          "value": ")"
         }
       ]
     },

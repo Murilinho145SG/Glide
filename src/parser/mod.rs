@@ -184,6 +184,8 @@ impl Parser {
             self.parse_defer()
         } else if self.at_keyword(Keyword::Type) {
             self.parse_type_alias()
+        } else if self.at_keyword(Keyword::Extern) {
+            self.parse_extern()
         } else if self.at_keyword(Keyword::Return) {
             self.parse_return()
         } else if self.at_op(Operator::LBrace) {
@@ -668,6 +670,60 @@ impl Parser {
         let ty = self.parse_type()?;
         self.expect_op(Operator::Semicolon)?;
         Ok(StmtKind::TypeAlias { name, ty })
+    }
+
+    fn parse_extern(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'extern'
+        // optional ABI string: extern "C" fn ...;
+        if let TokenKind::String(_) = &self.current.token {
+            self.advance();
+        }
+        if !self.at_keyword(Keyword::Fn) {
+            return Err(self.err(format!(
+                "expected `fn` after `extern` but found '{}'",
+                self.current.lexeme
+            )));
+        }
+        self.advance(); // 'fn'
+        let name = self.expect_ident()?;
+        self.expect_op(Operator::LParen)?;
+        let (params, variadic) = self.parse_extern_params()?;
+        let ret_type = if self.eat_op(Operator::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect_op(Operator::Semicolon)?;
+        Ok(StmtKind::ExternFn { name, params, ret_type, variadic })
+    }
+
+    fn parse_extern_params(&mut self) -> Result<(Vec<Param>, bool), ParseError> {
+        let mut params = Vec::new();
+        if self.at_op(Operator::RParen) {
+            self.advance();
+            return Ok((params, false));
+        }
+        loop {
+            if self.at_op(Operator::Ellipsis) {
+                self.advance();
+                self.expect_op(Operator::RParen)?;
+                return Ok((params, true));
+            }
+            let (name, pos) = self.expect_ident_with_pos()?;
+            self.expect_op(Operator::Colon)?;
+            let ty = self.parse_type()?;
+            params.push(Param { name, ty, pos });
+
+            if self.eat_op(Operator::Comma) {
+                if self.at_op(Operator::RParen) {
+                    self.advance();
+                    return Ok((params, false));
+                }
+                continue;
+            }
+            self.expect_op(Operator::RParen)?;
+            return Ok((params, false));
+        }
     }
 
     fn parse_const(&mut self) -> Result<StmtKind, ParseError> {

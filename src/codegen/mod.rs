@@ -134,6 +134,16 @@ impl Codegen {
             }
         }
 
+        let mut any_extern = false;
+        for stmt in program {
+            if let StmtKind::ExternFn { name, params, ret_type, variadic } = &stmt.kind {
+                self.emit_extern_signature(name, params, ret_type.as_ref(), *variadic)?;
+                self.push(";\n");
+                any_extern = true;
+            }
+        }
+        if any_extern { self.push("\n"); }
+
         for (name, params, ret_type) in &all_fns {
             self.emit_fn_signature(name, params, ret_type.as_ref())?;
             self.push(";\n");
@@ -326,7 +336,7 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::Let { .. } | StmtKind::Const { .. } => self.emit_stmt(stmt),
             StmtKind::Struct { name, fields } => self.emit_struct_def(name, fields),
-            StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } | StmtKind::TypeAlias { .. } => Ok(()),
+            StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } | StmtKind::TypeAlias { .. } | StmtKind::ExternFn { .. } => Ok(()),
             StmtKind::Impl { methods, .. } => {
                 for m in methods {
                     self.emit_top_level(m)?;
@@ -370,6 +380,38 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                 if i > 0 { self.push(", "); }
                 let decl = self.emit_c_decl(&p.ty, &p.name);
                 self.push(&decl);
+            }
+        }
+        self.push(")");
+        Ok(())
+    }
+
+    fn emit_extern_signature(
+        &mut self,
+        name: &str,
+        params: &[Param],
+        ret_type: Option<&Type>,
+        variadic: bool,
+    ) -> Result<(), CodegenError> {
+        let ret_c = match ret_type {
+            Some(t) => self.type_to_c(t),
+            None => "void".to_string(),
+        };
+        self.push(&ret_c);
+        self.push(" ");
+        self.push(name);
+        self.push("(");
+        if params.is_empty() && !variadic {
+            self.push("void");
+        } else {
+            for (i, p) in params.iter().enumerate() {
+                if i > 0 { self.push(", "); }
+                let decl = self.emit_c_decl(&p.ty, &p.name);
+                self.push(&decl);
+            }
+            if variadic {
+                if !params.is_empty() { self.push(", "); }
+                self.push("...");
             }
         }
         self.push(")");
@@ -635,6 +677,9 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::TypeAlias { .. } => {
                 // type aliases are erased at codegen time
+            }
+            StmtKind::ExternFn { .. } => {
+                return Err(self.err("`extern fn` only allowed at top level".into()));
             }
         }
         Ok(())
@@ -1329,6 +1374,10 @@ fn stmt_uses_concurrency(stmt: &Stmt) -> bool {
         }
         StmtKind::Defer(e) => expr_uses_chan(e),
         StmtKind::TypeAlias { .. } => false,
+        StmtKind::ExternFn { params, ret_type, .. } => {
+            params.iter().any(|p| ty_has_chan(&p.ty))
+                || ret_type.as_ref().map_or(false, ty_has_chan)
+        }
     }
 }
 
