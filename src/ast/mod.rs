@@ -7,6 +7,7 @@ pub enum UnaryOp {
     BitNot,
     Deref,
     AddrOf,
+    AddrOfMut,
     PostInc,
     PostDec,
 }
@@ -156,6 +157,8 @@ pub enum StmtKind {
         name: String,
         ty: Option<Type>,
         value: Option<Expr>,
+        is_mut: bool,
+        is_owned: bool,
     },
     Const {
         name: String,
@@ -213,6 +216,10 @@ pub enum StmtKind {
         arms: Vec<MatchArm>,
     },
     Defer(Expr),
+    TypeAlias {
+        name: String,
+        ty: Type,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

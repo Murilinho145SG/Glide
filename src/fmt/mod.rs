@@ -368,8 +368,9 @@ impl Formatter {
 
     fn emit_simple_stmt(&mut self, s: &Stmt) {
         match &s.kind {
-            StmtKind::Let { name, ty, value } => {
+            StmtKind::Let { name, ty, value, is_mut, .. } => {
                 self.write("let ");
+                if *is_mut { self.write("mut "); }
                 self.write(name);
                 if let Some(t) = ty {
                     self.write(": ");
@@ -423,8 +424,9 @@ impl Formatter {
 
     fn emit_for_init(&mut self, s: &Stmt) {
         match &s.kind {
-            StmtKind::Let { name, ty, value } => {
+            StmtKind::Let { name, ty, value, is_mut, .. } => {
                 self.write("let ");
+                if *is_mut { self.write("mut "); }
                 self.write(name);
                 if let Some(t) = ty {
                     self.write(": ");
@@ -473,6 +475,7 @@ impl Formatter {
                     UnaryOp::BitNot => { self.write("~"); self.emit_expr(inner, PREC_UNARY); }
                     UnaryOp::Deref => { self.write("*"); self.emit_expr(inner, PREC_UNARY); }
                     UnaryOp::AddrOf => { self.write("&"); self.emit_expr(inner, PREC_UNARY); }
+                    UnaryOp::AddrOfMut => { self.write("&mut "); self.emit_expr(inner, PREC_UNARY); }
                     UnaryOp::PostInc => { self.emit_expr(inner, PREC_POSTFIX); self.write("++"); }
                     UnaryOp::PostDec => { self.emit_expr(inner, PREC_POSTFIX); self.write("--"); }
                 }
@@ -702,7 +705,16 @@ fn format_type(ty: &Type) -> String {
     match ty {
         Type::Named(n) => n.clone(),
         Type::Pointer(inner) => format!("*{}", format_type(inner)),
+        Type::Borrow(inner) => format!("&{}", format_type(inner)),
+        Type::BorrowMut(inner) => format!("&mut {}", format_type(inner)),
         Type::Chan(inner) => format!("chan<{}>", format_type(inner)),
+        Type::FnPtr { params, ret } => {
+            let p = params.iter().map(format_type).collect::<Vec<_>>().join(", ");
+            match ret {
+                Some(r) => format!("fn({}) -> {}", p, format_type(r)),
+                None => format!("fn({})", p),
+            }
+        }
     }
 }
 

@@ -49,6 +49,8 @@ struct EnumInfo {
 struct LocalSlot {
     ty: Type,
     decl_pos: Pos,
+    is_owned: bool,
+    moved_at: Option<Pos>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,6 +116,7 @@ pub struct Typer {
     structs: HashMap<String, StructInfo>,
     enums: HashMap<String, EnumInfo>,
     fns: HashMap<String, FnSig>,
+    type_aliases: HashMap<String, Type>,
     scopes: Vec<HashMap<String, LocalSlot>>,
     current_ret: Option<Type>,
     current_pos: Pos,
@@ -135,6 +138,7 @@ impl Typer {
             structs: HashMap::new(),
             enums: HashMap::new(),
             fns: HashMap::new(),
+            type_aliases: HashMap::new(),
             scopes: Vec::new(),
             current_ret: None,
             current_pos: Pos::default(),
@@ -396,7 +400,39 @@ impl Typer {
                     }
                 }
             }
+            StmtKind::TypeAlias { name, ty } => {
+                self.type_aliases.insert(name.clone(), ty.clone());
+                self.index.decls.push(DeclInfo {
+                    pos: stmt.pos,
+                    name: name.clone(),
+                    kind: DeclKind::Struct,
+                    ty: Some(ty.clone()),
+                    detail: format!("type {} {}", name, type_name(ty)),
+                    module: module.clone(),
+                    file: file.clone(),
+                    is_method: false,
+                });
+            }
             _ => {}
+        }
+    }
+
+    fn resolve_alias(&self, t: &Type) -> Type {
+        match t {
+            Type::Named(n) => {
+                if let Some(target) = self.type_aliases.get(n) {
+                    return self.resolve_alias(target);
+                }
+                t.clone()
+            }
+            Type::Pointer(inner) => Type::Pointer(Box::new(self.resolve_alias(inner))),
+            Type::Borrow(inner) => Type::Borrow(Box::new(self.resolve_alias(inner))),
+            Type::BorrowMut(inner) => Type::BorrowMut(Box::new(self.resolve_alias(inner))),
+            Type::Chan(inner) => Type::Chan(Box::new(self.resolve_alias(inner))),
+            Type::FnPtr { params, ret } => Type::FnPtr {
+                params: params.iter().map(|p| self.resolve_alias(p)).collect(),
+                ret: ret.as_ref().map(|r| Box::new(self.resolve_alias(r))),
+            },
         }
     }
 
@@ -425,8 +461,21 @@ impl Typer {
             StmtKind::Fn { name, params, ret_type, body } => {
                 self.check_fn(name, params, ret_type, body)
             }
-            StmtKind::Struct { name, fields } => StmtKind::Struct { name, fields },
-            StmtKind::Let { name, ty, value } => self.check_let(name, ty, value),
+            StmtKind::Struct { name, fields } => {
+                for f in &fields {
+                    if matches!(self.resolve_alias(&f.ty), Type::Borrow(_) | Type::BorrowMut(_)) {
+                        let saved = self.current_pos;
+                        self.current_pos = f.pos;
+                        self.error(format!(
+                            "field `{}.{}`: borrow types (`&T`, `&mut T`) cannot be stored in struct fields (use `*T` for raw pointer)",
+                            name, f.name
+                        ));
+                        self.current_pos = saved;
+                    }
+                }
+                StmtKind::Struct { name, fields }
+            }
+            StmtKind::Let { name, ty, value, is_mut, .. } => self.check_let(name, ty, value, is_mut),
             StmtKind::Const { name, ty, value } => self.check_const(name, ty, value),
             StmtKind::Interface { name, methods } => StmtKind::Interface { name, methods },
             StmtKind::Impl { interface, target, methods } => {
@@ -435,6 +484,7 @@ impl Typer {
             StmtKind::Import(p) => StmtKind::Import(p),
             StmtKind::Enum { name, variants } => StmtKind::Enum { name, variants },
             StmtKind::Match { scrutinee, arms } => self.check_match(scrutinee, arms),
+            StmtKind::TypeAlias { name, ty } => StmtKind::TypeAlias { name, ty },
             other => {
                 self.error("unsupported top-level statement".into());
                 other
@@ -478,7 +528,7 @@ impl Typer {
         for p in &params {
             self.scopes.last_mut().unwrap().insert(
                 p.name.clone(),
-                LocalSlot { ty: p.ty.clone(), decl_pos: p.pos },
+                LocalSlot { ty: p.ty.clone(), decl_pos: p.pos, is_owned: false, moved_at: None },
             );
             self.index.decls.push(DeclInfo {
                 pos: p.pos,
@@ -512,8 +562,9 @@ impl Typer {
 
     fn check_stmt_kind(&mut self, kind: StmtKind) -> StmtKind {
         match kind {
-            StmtKind::Let { name, ty, value } => self.check_let(name, ty, value),
+            StmtKind::Let { name, ty, value, is_mut, .. } => self.check_let(name, ty, value, is_mut),
             StmtKind::Const { name, ty, value } => self.check_const(name, ty, value),
+            StmtKind::TypeAlias { name, ty } => StmtKind::TypeAlias { name, ty },
 
             StmtKind::Block(stmts) => {
                 self.scopes.push(HashMap::new());
@@ -569,6 +620,37 @@ impl Typer {
             StmtKind::Return(value) => {
                 let value_new = match value {
                     Some(e) => {
+                        // Reject returning an owned local: would conflict with auto-drop.
+                        if let ExprKind::Ident(n) = &e.kind {
+                            if let Some(slot) = self.lookup(n) {
+                                if slot.is_owned {
+                                    self.error(format!(
+                                        "cannot return owned value `{}` (auto-drop would free it)",
+                                        n
+                                    ));
+                                }
+                            }
+                        }
+                        // Reject return of borrow expressions where the source is a local
+                        // (escape rule, except pass-through of borrow params).
+                        if let ExprKind::Unary(op, inner) = &e.kind {
+                            if matches!(op, UnaryOp::AddrOf | UnaryOp::AddrOfMut) {
+                                if let ExprKind::Ident(n) = &inner.kind {
+                                    if let Some(slot) = self.lookup(n) {
+                                        let is_param_borrow = matches!(
+                                            self.resolve_alias(&slot.ty),
+                                            Type::Borrow(_) | Type::BorrowMut(_)
+                                        );
+                                        if !is_param_borrow {
+                                            self.error(format!(
+                                                "cannot return borrow of local `{}` (would dangle after function returns)",
+                                                n
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         let (e_new, e_ty) = self.check_expr(e);
                         match self.current_ret.clone() {
                             Some(ret) => self.expect_type(&ret, &e_ty, "return value"),
@@ -710,6 +792,7 @@ impl Typer {
         name: String,
         ty: Option<Type>,
         value: Option<Expr>,
+        is_mut: bool,
     ) -> StmtKind {
         let decl_pos = self.current_pos;
         if let (Some(annot_ty), Some(v)) = (&ty, value.as_ref()) {
@@ -720,16 +803,59 @@ impl Typer {
                     name,
                     ty,
                     value: Some(rewritten),
+                    is_mut,
+                    is_owned: false,
                 };
             }
         }
 
-        let (value_new, value_ty) = match value {
-            Some(v) => {
-                let (v_new, v_ty) = self.check_expr(v);
-                (Some(v_new), Some(v_ty))
+        // Auto-allocation pattern: `let p: *T = T { ... };` rewrites to New (heap alloc)
+        // and marks the slot as owned (auto-drop at scope end).
+        let mut auto_owned_value: Option<Expr> = None;
+        if let (Some(annot_ty), Some(v)) = (&ty, value.as_ref()) {
+            if let (Type::Pointer(inner), ExprKind::StructLit { type_name, fields }) =
+                (self.resolve_alias(annot_ty), &v.kind)
+            {
+                if let Type::Named(want_name) = inner.as_ref() {
+                    if want_name == type_name {
+                        let new_expr = Expr::new(
+                            ExprKind::New {
+                                type_name: type_name.clone(),
+                                fields: fields.clone(),
+                            },
+                            v.pos,
+                        );
+                        auto_owned_value = Some(new_expr);
+                    }
+                }
             }
-            None => (None, None),
+        }
+
+        let was_auto_owned = auto_owned_value.is_some();
+
+        let (value_new, value_ty) = if let Some(rewritten) = auto_owned_value {
+            let (v_new, v_ty) = self.check_expr(rewritten);
+            (Some(v_new), Some(v_ty))
+        } else {
+            match value {
+                Some(v) => {
+                    // Reject moving an owned value (would double-free).
+                    // Raw *T (from arena, fn calls, casts) can be freely copied.
+                    if let ExprKind::Ident(src_name) = &v.kind {
+                        if let Some(slot) = self.lookup(src_name) {
+                            if slot.is_owned {
+                                self.error(format!(
+                                    "cannot move owned value `{}` into another binding (auto-drop conflict)",
+                                    src_name
+                                ));
+                            }
+                        }
+                    }
+                    let (v_new, v_ty) = self.check_expr(v);
+                    (Some(v_new), Some(v_ty))
+                }
+                None => (None, None),
+            }
         };
 
         let final_ty = match (ty, value_ty.as_ref()) {
@@ -749,11 +875,21 @@ impl Typer {
         };
 
         if let Some(t) = &final_ty {
-            self.declare(name.clone(), t.clone(), decl_pos);
+            if was_auto_owned {
+                self.declare_owned(name.clone(), t.clone(), decl_pos);
+            } else {
+                self.declare(name.clone(), t.clone(), decl_pos);
+            }
             self.record_let_decl(&name, t, decl_pos);
         }
 
-        StmtKind::Let { name, ty: final_ty, value: value_new }
+        StmtKind::Let {
+            name,
+            ty: final_ty,
+            value: value_new,
+            is_mut,
+            is_owned: was_auto_owned,
+        }
     }
 
     fn check_const(&mut self, name: String, ty: Option<Type>, value: Expr) -> StmtKind {
@@ -857,7 +993,29 @@ impl Typer {
         if self.scopes.is_empty() {
             self.scopes.push(HashMap::new());
         }
-        self.scopes.last_mut().unwrap().insert(name, LocalSlot { ty, decl_pos: pos });
+        self.scopes.last_mut().unwrap().insert(
+            name,
+            LocalSlot { ty, decl_pos: pos, is_owned: false, moved_at: None },
+        );
+    }
+
+    fn declare_owned(&mut self, name: String, ty: Type, pos: Pos) {
+        if self.scopes.is_empty() {
+            self.scopes.push(HashMap::new());
+        }
+        self.scopes.last_mut().unwrap().insert(
+            name,
+            LocalSlot { ty, decl_pos: pos, is_owned: true, moved_at: None },
+        );
+    }
+
+    fn mark_moved(&mut self, name: &str, pos: Pos) {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(name) {
+                slot.moved_at = Some(pos);
+                return;
+            }
+        }
     }
 
     fn lookup(&self, name: &str) -> Option<LocalSlot> {
@@ -889,6 +1047,12 @@ impl Typer {
 
             ExprKind::Ident(name) => {
                 if let Some(slot) = self.lookup(&name) {
+                    if let Some(moved_pos) = slot.moved_at {
+                        self.error(format!(
+                            "use of moved value `{}` (moved at line {})",
+                            name, moved_pos.line
+                        ));
+                    }
                     self.index.refs.push(RefInfo {
                         pos,
                         name: name.clone(),
@@ -898,14 +1062,18 @@ impl Typer {
                     });
                     (ExprKind::Ident(name), slot.ty)
                 } else if let Some(sig) = self.fns.get(&name).cloned() {
+                    let fn_ptr_ty = Type::FnPtr {
+                        params: sig.params.iter().map(|p| p.ty.clone()).collect(),
+                        ret: sig.ret_type.clone().map(Box::new),
+                    };
                     self.index.refs.push(RefInfo {
                         pos,
                         name: name.clone(),
-                        ty: sig.ret_type.clone().unwrap_or_else(void_ty),
+                        ty: fn_ptr_ty.clone(),
                         decl_pos: sig.decl_pos,
                         kind: RefKind::Function,
                     });
-                    (ExprKind::Ident(name), error_ty())
+                    (ExprKind::Ident(name), fn_ptr_ty)
                 } else {
                     self.error(format!("unknown name `{}`", name));
                     (ExprKind::Ident(name), error_ty())
@@ -917,9 +1085,9 @@ impl Typer {
                 let result_ty = match op {
                     UnaryOp::Neg | UnaryOp::BitNot => inner_ty.clone(),
                     UnaryOp::Not => bool_ty(),
-                    UnaryOp::Deref => match &inner_ty {
-                        Type::Pointer(t) => (**t).clone(),
-                        t if is_error(t) => error_ty(),
+                    UnaryOp::Deref => match self.resolve_alias(&inner_ty) {
+                        Type::Pointer(t) | Type::Borrow(t) | Type::BorrowMut(t) => (*t).clone(),
+                        t if is_error(&t) => error_ty(),
                         _ => {
                             self.error(format!(
                                 "cannot dereference non-pointer of type `{}`",
@@ -928,7 +1096,21 @@ impl Typer {
                             error_ty()
                         }
                     },
-                    UnaryOp::AddrOf => {
+                    UnaryOp::AddrOf | UnaryOp::AddrOfMut => {
+                        // If inner is already a pointer-like, `&x` and `&mut x`
+                        // collapse: the value already represents the address.
+                        let inner_resolved = self.resolve_alias(&inner_ty);
+                        if let Type::Pointer(t) | Type::Borrow(t) | Type::BorrowMut(t) =
+                            &inner_resolved
+                        {
+                            let inner_t = (**t).clone();
+                            let result_ty = if matches!(op, UnaryOp::AddrOfMut) {
+                                Type::BorrowMut(Box::new(inner_t))
+                            } else {
+                                Type::Borrow(Box::new(inner_t))
+                            };
+                            return (inner_new.kind, result_ty);
+                        }
                         if !is_lvalue(&inner_new) {
                             if is_error(&inner_ty) {
                                 Type::Pointer(Box::new(inner_ty.clone()))
@@ -943,7 +1125,11 @@ impl Typer {
                                 );
                             }
                         } else {
-                            Type::Pointer(Box::new(inner_ty.clone()))
+                            if matches!(op, UnaryOp::AddrOfMut) {
+                                Type::BorrowMut(Box::new(inner_ty.clone()))
+                            } else {
+                                Type::Borrow(Box::new(inner_ty.clone()))
+                            }
                         }
                     }
                     UnaryOp::PostInc | UnaryOp::PostDec => inner_ty.clone(),
@@ -1126,6 +1312,42 @@ impl Typer {
             return self.check_method_call(callee, args, pos);
         }
 
+        // Aliasing check: collect what each arg borrows.
+        // For source variable `x`, track if it's borrowed mut or shared in this call.
+        // Reject &x + &mut x in the same call, or &mut x + &mut x.
+        {
+            let mut shared: Vec<String> = Vec::new();
+            let mut mutable: Vec<String> = Vec::new();
+            for a in &args {
+                if let ExprKind::Unary(op, inner) = &a.kind {
+                    if let ExprKind::Ident(n) = &inner.kind {
+                        match op {
+                            UnaryOp::AddrOf => shared.push(n.clone()),
+                            UnaryOp::AddrOfMut => mutable.push(n.clone()),
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            for m in &mutable {
+                let dup_mut = mutable.iter().filter(|x| *x == m).count();
+                if dup_mut > 1 {
+                    self.error(format!(
+                        "cannot borrow `{}` as mutable more than once in the same call",
+                        m
+                    ));
+                    break;
+                }
+                if shared.iter().any(|s| s == m) {
+                    self.error(format!(
+                        "cannot borrow `{}` as both mutable and immutable in the same call",
+                        m
+                    ));
+                    break;
+                }
+            }
+        }
+
         if let ExprKind::Path { ty, member } = &callee.kind {
             if self.enums.contains_key(ty) {
                 let (kind, ret_ty) = self.check_expr_kind(
@@ -1137,6 +1359,41 @@ impl Typer {
                     pos,
                 );
                 return (Expr::new(kind, pos), ret_ty);
+            }
+        }
+
+        // Indirect call: variable holding fn pointer
+        if let ExprKind::Ident(n) = &callee.kind {
+            if let Some(slot) = self.lookup(n) {
+                let resolved = self.resolve_alias(&slot.ty);
+                if let Type::FnPtr { params, ret } = resolved {
+                    let mut args_new = Vec::with_capacity(args.len());
+                    let mut arg_tys = Vec::with_capacity(args.len());
+                    for a in args {
+                        let (a_new, a_ty) = self.check_expr(a);
+                        args_new.push(a_new);
+                        arg_tys.push(a_ty);
+                    }
+                    if params.len() != args_new.len() {
+                        self.error(format!(
+                            "indirect call: expected {} argument(s), got {}",
+                            params.len(),
+                            args_new.len()
+                        ));
+                    } else {
+                        for (i, p_ty) in params.iter().enumerate() {
+                            let saved = self.current_pos;
+                            self.current_pos = args_new[i].pos;
+                            self.expect_type(p_ty, &arg_tys[i], &format!("argument {} of fn pointer", i + 1));
+                            self.current_pos = saved;
+                        }
+                    }
+                    let ret_ty = ret.map(|r| *r).unwrap_or_else(void_ty);
+                    return (
+                        Expr::new(ExprKind::Call(Box::new(callee), args_new), pos),
+                        ret_ty,
+                    );
+                }
             }
         }
 
@@ -1187,6 +1444,23 @@ impl Typer {
                                 &arg_tys[i],
                                 &format!("argument `{}` of `{}`", p.name, name),
                             );
+                            // Reject passing owned value as `*T` argument (would double-free).
+                            if let ExprKind::Ident(n) = &args_new[i].kind {
+                                let is_ptr_param = matches!(
+                                    self.resolve_alias(&p.ty),
+                                    Type::Pointer(_)
+                                );
+                                if is_ptr_param {
+                                    if let Some(slot) = self.lookup(n) {
+                                        if slot.is_owned {
+                                            self.error(format!(
+                                                "cannot move owned value `{}` into `*T` parameter (auto-drop conflict)",
+                                                n
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                             self.current_pos = saved;
                         }
                     }
@@ -1270,7 +1544,8 @@ impl Typer {
             }
             let arg_pos = arg.pos;
             let (a_new, a_ty) = self.check_expr(arg);
-            let (spec, transformed) = format_spec_for(&a_ty, a_new, arg_pos);
+            let resolved_ty = self.resolve_alias(&a_ty);
+            let (spec, transformed) = format_spec_for(&resolved_ty, a_new, arg_pos);
             fmt.push_str(spec);
             printf_args.push(transformed);
         }
@@ -1297,7 +1572,8 @@ impl Typer {
                 if let Some(arg) = iter.next() {
                     let arg_pos = arg.pos;
                     let (a_new, a_ty) = self.check_expr(arg);
-                    let (spec, transformed) = format_spec_for(&a_ty, a_new, arg_pos);
+                    let resolved_ty = self.resolve_alias(&a_ty);
+            let (spec, transformed) = format_spec_for(&resolved_ty, a_new, arg_pos);
                     fmt.push_str(spec);
                     printf_args.push(transformed);
                 } else {
@@ -1543,10 +1819,11 @@ impl Typer {
     fn check_member(&mut self, obj: Expr, field: String, pos: Pos) -> (Expr, Type) {
         let (obj_new, obj_ty) = self.check_expr(obj);
         let obj_pos = obj_new.pos;
+        let obj_ty = self.resolve_alias(&obj_ty);
 
         let (final_obj, struct_name) = match &obj_ty {
             Type::Named(n) => (obj_new, n.clone()),
-            Type::Pointer(inner) => match inner.as_ref() {
+            Type::Pointer(inner) | Type::Borrow(inner) | Type::BorrowMut(inner) => match inner.as_ref() {
                 Type::Named(n) => {
                     let derefed = Expr::new(
                         ExprKind::Unary(UnaryOp::Deref, Box::new(obj_new)),
@@ -1701,7 +1978,9 @@ impl Typer {
     }
 
     fn expect_type(&mut self, expected: &Type, actual: &Type, ctx: &str) {
-        if !types_compat(expected, actual) {
+        let exp = self.resolve_alias(expected);
+        let act = self.resolve_alias(actual);
+        if !types_compat(&exp, &act) {
             self.error(format!(
                 "{}: expected `{}`, got `{}`",
                 ctx,
@@ -1756,26 +2035,53 @@ fn types_compat(expected: &Type, actual: &Type) -> bool {
     if expected == actual {
         return true;
     }
-    if is_null_ptr(actual) && matches!(expected, Type::Pointer(_)) {
+    if is_null_ptr(actual) && matches!(expected, Type::Pointer(_) | Type::Borrow(_) | Type::BorrowMut(_)) {
         return true;
     }
-    if is_null_ptr(expected) && matches!(actual, Type::Pointer(_)) {
+    if is_null_ptr(expected) && matches!(actual, Type::Pointer(_) | Type::Borrow(_) | Type::BorrowMut(_)) {
         return true;
     }
-    if is_void_ptr(actual) && matches!(expected, Type::Pointer(_)) {
+    if is_void_ptr(actual) && matches!(expected, Type::Pointer(_) | Type::Borrow(_) | Type::BorrowMut(_)) {
         return true;
     }
-    if is_void_ptr(expected) && matches!(actual, Type::Pointer(_)) {
+    if is_void_ptr(expected) && matches!(actual, Type::Pointer(_) | Type::Borrow(_) | Type::BorrowMut(_)) {
         return true;
+    }
+    // *T, &T, &mut T are interconvertible at this v1 stage
+    // (full move/borrow semantics arrive in step 2-3)
+    let expected_inner = pointer_like_inner(expected);
+    let actual_inner = pointer_like_inner(actual);
+    if let (Some(ei), Some(ai)) = (expected_inner, actual_inner) {
+        if types_compat(ei, ai) {
+            return true;
+        }
     }
     false
+}
+
+fn pointer_like_inner(t: &Type) -> Option<&Type> {
+    match t {
+        Type::Pointer(inner) => Some(inner),
+        Type::Borrow(inner) => Some(inner),
+        Type::BorrowMut(inner) => Some(inner),
+        _ => None,
+    }
 }
 
 pub fn type_name(t: &Type) -> String {
     match t {
         Type::Named(n) => n.clone(),
         Type::Pointer(inner) => format!("*{}", type_name(inner)),
+        Type::Borrow(inner) => format!("&{}", type_name(inner)),
+        Type::BorrowMut(inner) => format!("&mut {}", type_name(inner)),
         Type::Chan(inner) => format!("chan<{}>", type_name(inner)),
+        Type::FnPtr { params, ret } => {
+            let p = params.iter().map(type_name).collect::<Vec<_>>().join(", ");
+            match ret {
+                Some(r) => format!("fn({}) -> {}", p, type_name(r)),
+                None => format!("fn({})", p),
+            }
+        }
     }
 }
 
@@ -1838,6 +2144,17 @@ fn synth_param(name: &str, ty: Type) -> Param {
     Param { name: name.into(), ty, pos: Pos::default() }
 }
 
+fn is_copy_type(t: &Type) -> bool {
+    match t {
+        Type::Named(n) => matches!(n.as_str(), "int" | "float" | "bool" | "char" | "string"),
+        Type::Borrow(_) => true,
+        Type::FnPtr { .. } => true,
+        Type::Pointer(_) => false,
+        Type::BorrowMut(_) => false,
+        Type::Chan(_) => false,
+    }
+}
+
 fn is_always_visible(kind: &StmtKind) -> bool {
     matches!(kind, StmtKind::Impl { .. })
 }
@@ -1858,7 +2175,7 @@ fn format_spec_for(ty: &Type, arg: Expr, pos: Pos) -> (&'static str, Expr) {
             }
             _ => ("%p", arg),
         },
-        Type::Pointer(_) | Type::Chan(_) => ("%p", arg),
+        Type::Pointer(_) | Type::Borrow(_) | Type::BorrowMut(_) | Type::Chan(_) | Type::FnPtr { .. } => ("%p", arg),
     }
 }
 

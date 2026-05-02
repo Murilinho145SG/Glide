@@ -793,6 +793,76 @@
     "fields": {}
   },
   {
+    "type": "borrow_mut_type",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
+          "type": "chan_type",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
+          "named": true
+        },
+        {
+          "type": "named_type",
+          "named": true
+        },
+        {
+          "type": "pointer_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "borrow_type",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": false,
+      "required": true,
+      "types": [
+        {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
+          "type": "chan_type",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
+          "named": true
+        },
+        {
+          "type": "named_type",
+          "named": true
+        },
+        {
+          "type": "pointer_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "break_stmt",
     "named": true,
     "fields": {}
@@ -912,6 +982,14 @@
           "named": true
         },
         {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
           "type": "call_expr",
           "named": true
         },
@@ -929,6 +1007,10 @@
         },
         {
           "type": "float_literal",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
           "named": true
         },
         {
@@ -1007,7 +1089,19 @@
       "required": true,
       "types": [
         {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
           "type": "chan_type",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
           "named": true
         },
         {
@@ -1040,7 +1134,19 @@
         "required": false,
         "types": [
           {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
             "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
             "named": true
           },
           {
@@ -1299,7 +1405,19 @@
       "required": false,
       "types": [
         {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
           "type": "chan_type",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
           "named": true
         },
         {
@@ -1451,7 +1569,19 @@
         "required": false,
         "types": [
           {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
             "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
             "named": true
           },
           {
@@ -1464,6 +1594,76 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "fn_ptr_type",
+    "named": true,
+    "fields": {
+      "return_type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
+            "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
+            "named": true
+          },
+          {
+            "type": "named_type",
+            "named": true
+          },
+          {
+            "type": "pointer_type",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
+          "type": "chan_type",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
+          "named": true
+        },
+        {
+          "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "named_type",
+          "named": true
+        },
+        {
+          "type": "pointer_type",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -1683,7 +1883,19 @@
         "required": false,
         "types": [
           {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
             "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
             "named": true
           },
           {
@@ -2048,7 +2260,19 @@
         "required": false,
         "types": [
           {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
             "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
             "named": true
           },
           {
@@ -2341,7 +2565,19 @@
         "required": false,
         "types": [
           {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
             "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
             "named": true
           },
           {
@@ -2375,7 +2611,19 @@
         "required": false,
         "types": [
           {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
             "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
             "named": true
           },
           {
@@ -3019,7 +3267,19 @@
         "required": true,
         "types": [
           {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
             "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
             "named": true
           },
           {
@@ -3183,7 +3443,19 @@
       "required": true,
       "types": [
         {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
           "type": "chan_type",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
           "named": true
         },
         {
@@ -3403,7 +3675,19 @@
       "required": true,
       "types": [
         {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
           "type": "chan_type",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
           "named": true
         },
         {
@@ -3456,6 +3740,10 @@
         },
         {
           "type": "struct_decl",
+          "named": true
+        },
+        {
+          "type": "type_alias",
           "named": true
         }
       ]
@@ -3605,7 +3893,19 @@
         "required": true,
         "types": [
           {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
             "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
             "named": true
           },
           {
@@ -3757,11 +4057,57 @@
     }
   },
   {
+    "type": "type_alias",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "target": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "borrow_mut_type",
+            "named": true
+          },
+          {
+            "type": "borrow_type",
+            "named": true
+          },
+          {
+            "type": "chan_type",
+            "named": true
+          },
+          {
+            "type": "fn_ptr_type",
+            "named": true
+          },
+          {
+            "type": "named_type",
+            "named": true
+          },
+          {
+            "type": "pointer_type",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "unary_expr",
     "named": true,
     "fields": {
       "op": {
-        "multiple": false,
+        "multiple": true,
         "required": true,
         "types": [
           {
@@ -3778,6 +4124,10 @@
           },
           {
             "type": "-",
+            "named": false
+          },
+          {
+            "type": "mut",
             "named": false
           },
           {
@@ -4270,6 +4620,10 @@
     "named": false
   },
   {
+    "type": "mut",
+    "named": false
+  },
+  {
     "type": "new",
     "named": false
   },
@@ -4307,6 +4661,10 @@
   },
   {
     "type": "true",
+    "named": false
+  },
+  {
+    "type": "type",
     "named": false
   },
   {

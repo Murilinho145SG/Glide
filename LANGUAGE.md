@@ -12,11 +12,41 @@ Snapshot of what the language supports today.
 | `char`    | `'a'`        | C `char` |
 | `string`  | `"hi"`       | C `const char*` |
 | `void`    |              | only as fn return / `*void` |
-| `*T`      | `*int`       | pointer |
+| `*T`      | `*int`       | owned heap pointer |
+| `&T`      | `&int`       | shared (immutable) borrow |
+| `&mut T`  | `&mut int`   | exclusive mutable borrow |
 | `chan<T>` | `chan<int>`  | channel; created with `make_chan(N)` |
+| `fn(...) -> T` | `fn(int, int) -> int` | function pointer |
 | `<Struct>`| `Point`      | user-defined |
 
 `null` is the typed null pointer; assignable to any `*T`.
+
+### Memory model
+
+| Form | Allocates? | Auto-frees? | Can be moved/returned? |
+| --- | --- | --- | --- |
+| `T` (value) | stack | scope-local | yes (copy or move) |
+| `*T` from `T { ... }` | heap (auto) | yes (auto-drop) | **no** in v1 |
+| `*T` from `arena_alloc()` etc | allocator-managed | no | yes (raw) |
+| `&T` / `&mut T` | no | no (view) | only pass-through of param |
+
+The pattern `let p: *T = T { ... };` triggers heap allocation and auto-drop at scope end. Other `*T` (from arena, function returns, casts) are raw pointers without auto-drop.
+
+### Borrow rules (v1)
+
+- `&T` and `&mut T` exist only as parameters or local variables; **not allowed in struct fields**.
+- Cannot return a borrow of a local variable (escape rule).
+- Within a single call, cannot borrow the same variable as both `&` and `&mut`, or as `&mut` twice.
+- `*T` decays to `&T` or `&mut T` automatically at call sites.
+
+### Type aliases
+
+```glide
+type UserId int;
+type Callback fn(int);
+type Handler fn(*Request) -> *Response;
+pub type ServerHandler fn(*Request) -> *Response;
+```
 
 ## Literals
 
@@ -40,7 +70,8 @@ String / char escapes: `\n \t \r \\ \" \' \0 \xNN`.
 ## Declarations
 
 ```glide
-let x: int = 5;                 // typed
+let x: int = 5;                 // typed, immutable
+let mut y: int = 5;             // mutable
 let x = 5;                      // inferred from value
 let x: int;                     // uninitialized (type required)
 const PI: float = 3.14;
@@ -108,7 +139,7 @@ spawn worker(arg1, arg2);
 | Bitwise    | `& \| ^ ~ << >>` |
 | Assignment | `= += -= *= /= %= &= \|= ^= <<= >>=` |
 | Postfix    | `++ --` |
-| Unary      | `- ! ~ * &` |
+| Unary      | `- ! ~ * & &mut` |
 | Member     | `obj.field` (auto-deref on `*Struct`) |
 | Index      | `arr[i]` |
 | Call       | `f(args)` |

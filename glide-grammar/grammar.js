@@ -38,6 +38,15 @@ module.exports = grammar({
       $.impl_decl,
       $.let_stmt,
       $.const_stmt,
+      $.type_alias,
+    ),
+
+    type_alias: $ => seq(
+      optional('pub'),
+      'type',
+      field('name', $.identifier),
+      field('target', $._type),
+      ';',
     ),
 
     enum_decl: $ => seq(
@@ -213,6 +222,7 @@ module.exports = grammar({
 
     let_stmt: $ => seq(
       'let',
+      optional('mut'),
       field('name', $.identifier),
       optional(seq(':', field('type', $._type))),
       optional(seq('=', field('value', $._expression))),
@@ -255,6 +265,7 @@ module.exports = grammar({
     _for_init: $ => choice(
       seq(
         'let',
+        optional('mut'),
         field('name', $.identifier),
         optional(seq(':', field('type', $._type))),
         optional(seq('=', field('value', $._expression))),
@@ -277,12 +288,32 @@ module.exports = grammar({
     _type: $ => choice(
       $.named_type,
       $.pointer_type,
+      $.borrow_type,
+      $.borrow_mut_type,
       $.chan_type,
+      $.fn_ptr_type,
     ),
 
-    named_type:   $ => $.identifier,
-    pointer_type: $ => seq('*', $._type),
-    chan_type:    $ => seq('chan', '<', $._type, '>'),
+    named_type:      $ => $.identifier,
+    pointer_type:    $ => seq('*', $._type),
+    borrow_type:     $ => prec.right(seq('&', $._type)),
+    borrow_mut_type: $ => prec.right(seq('&', 'mut', $._type)),
+    chan_type:       $ => seq('chan', '<', $._type, '>'),
+    fn_ptr_type:     $ => seq(
+      'fn',
+      '(',
+      optional(seq(
+        $._fn_ptr_param,
+        repeat(seq(',', $._fn_ptr_param)),
+        optional(','),
+      )),
+      ')',
+      optional(seq('->', field('return_type', $._type))),
+    ),
+    _fn_ptr_param: $ => choice(
+      seq($.identifier, ':', $._type),
+      $._type,
+    ),
 
     // ---- expressions ----
 
@@ -332,7 +363,7 @@ module.exports = grammar({
     ),
 
     unary_expr: $ => prec(PREC.unary, seq(
-      field('op', choice('-', '!', '~', '*', '&')),
+      field('op', choice('-', '!', '~', '*', '&', seq('&', 'mut'))),
       field('operand', $._binary_or_unary),
     )),
 

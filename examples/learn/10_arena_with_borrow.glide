@@ -1,0 +1,42 @@
+// 10: Arena + borrow combined
+//
+// The most common production pattern: data lives in an arena (cheap, batch-freed),
+// and helper functions accept borrows (&T, &mut T) to read/modify the data.
+//
+// Within a single function, the arena's lifetime contains all borrows derived
+// from it, so everything is safe.
+
+struct Item {
+    id: int,
+    weight: int,
+}
+
+// Reads via shared borrow. *Item from arena decays to &Item at the call site.
+fn total_weight(items: *Item, count: int) -> int {
+    let sum: int = 0;
+    for let i: int = 0; i < count; i++ {
+        let it: *Item = items;
+        // pointer arithmetic via index-style access: items[i]
+        sum += items[i].weight;
+    }
+    return sum;
+}
+
+fn main() -> int {
+    let arena: *void = arena_new(4096);
+    defer arena_free(arena);
+
+    // Allocate space for 5 items.
+    let items: *Item = arena_alloc(arena, sizeof(Item) * 5) as *Item;
+    for let i: int = 0; i < 5; i++ {
+        items[i] = Item { id: i, weight: (i + 1) * 10 };
+    }
+
+    // Pass to a helper. Helper sees a raw *Item, but treats it as read-only.
+    let total: int = total_weight(items, 5);
+    println!("total weight =", total);
+    println!("arena used:", arena_used(arena), "bytes");
+
+    return 0;
+    // arena_free runs; all 5 Items disappear together.
+}

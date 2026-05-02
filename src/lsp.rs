@@ -920,7 +920,10 @@ fn struct_from_type(ty: &Type) -> Option<String> {
             other => Some(other.into()),
         },
         Type::Pointer(inner) => struct_from_type(inner),
+        Type::Borrow(inner) => struct_from_type(inner),
+        Type::BorrowMut(inner) => struct_from_type(inner),
         Type::Chan(_) => None,
+        Type::FnPtr { .. } => None,
     }
 }
 
@@ -928,7 +931,10 @@ fn method_type_prefix_for_completion(ty: &Type) -> Option<String> {
     match ty {
         Type::Named(n) => Some(n.clone()),
         Type::Pointer(inner) => method_type_prefix_for_completion(inner),
+        Type::Borrow(inner) => method_type_prefix_for_completion(inner),
+        Type::BorrowMut(inner) => method_type_prefix_for_completion(inner),
         Type::Chan(_) => Some("chan".into()),
+        Type::FnPtr { .. } => None,
     }
 }
 

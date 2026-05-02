@@ -36,6 +36,7 @@ pub struct Codegen {
     match_count: usize,
     known_enums: std::collections::HashSet<String>,
     enum_infos: HashMap<String, Vec<(String, Vec<Type>)>>,
+    type_aliases: HashMap<String, Type>,
     defer_stack: Vec<Vec<Expr>>,
 }
 
@@ -52,7 +53,27 @@ impl Codegen {
             match_count: 0,
             known_enums: std::collections::HashSet::new(),
             enum_infos: HashMap::new(),
+            type_aliases: HashMap::new(),
             defer_stack: Vec::new(),
+        }
+    }
+
+    fn resolve_alias(&self, t: &Type) -> Type {
+        match t {
+            Type::Named(n) => {
+                if let Some(target) = self.type_aliases.get(n) {
+                    return self.resolve_alias(target);
+                }
+                t.clone()
+            }
+            Type::Pointer(inner) => Type::Pointer(Box::new(self.resolve_alias(inner))),
+            Type::Borrow(inner) => Type::Borrow(Box::new(self.resolve_alias(inner))),
+            Type::BorrowMut(inner) => Type::BorrowMut(Box::new(self.resolve_alias(inner))),
+            Type::Chan(inner) => Type::Chan(Box::new(self.resolve_alias(inner))),
+            Type::FnPtr { params, ret } => Type::FnPtr {
+                params: params.iter().map(|p| self.resolve_alias(p)).collect(),
+                ret: ret.as_ref().map(|r| Box::new(self.resolve_alias(r))),
+            },
         }
     }
 
@@ -78,6 +99,9 @@ impl Codegen {
                     .map(|v| (v.name.clone(), v.fields.clone()))
                     .collect();
                 self.enum_infos.insert(name.clone(), info);
+            }
+            if let StmtKind::TypeAlias { name, ty } = &stmt.kind {
+                self.type_aliases.insert(name.clone(), ty.clone());
             }
         }
 
@@ -144,10 +168,8 @@ impl Codegen {
         self.indent += 1;
         for f in fields {
             self.write_indent();
-            let ty = self.type_to_c(&f.ty);
-            self.push(&ty);
-            self.push(" ");
-            self.push(&f.name);
+            let decl = self.emit_c_decl(&f.ty, &f.name);
+            self.push(&decl);
             self.push(";\n");
         }
         self.indent -= 1;
@@ -304,7 +326,7 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::Let { .. } | StmtKind::Const { .. } => self.emit_stmt(stmt),
             StmtKind::Struct { name, fields } => self.emit_struct_def(name, fields),
-            StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } => Ok(()),
+            StmtKind::Interface { .. } | StmtKind::Import(_) | StmtKind::Enum { .. } | StmtKind::TypeAlias { .. } => Ok(()),
             StmtKind::Impl { methods, .. } => {
                 for m in methods {
                     self.emit_top_level(m)?;
@@ -346,10 +368,8 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
         } else {
             for (i, p) in params.iter().enumerate() {
                 if i > 0 { self.push(", "); }
-                let ty = self.type_to_c(&p.ty);
-                self.push(&ty);
-                self.push(" ");
-                self.push(&p.name);
+                let decl = self.emit_c_decl(&p.ty, &p.name);
+                self.push(&decl);
             }
         }
         self.push(")");
@@ -411,17 +431,40 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
 
     fn emit_stmt(&mut self, stmt: &Stmt) -> Result<(), CodegenError> {
         match &stmt.kind {
-            StmtKind::Let { name, ty, value } => {
+            StmtKind::Let { name, ty, value, is_owned, .. } => {
                 self.write_indent();
-                let resolved = self.resolve_let_type(ty.as_ref(), value.as_ref())?;
-                self.push(&resolved);
-                self.push(" ");
-                self.push(name);
+                let decl = if let Some(t) = ty {
+                    self.emit_c_decl(t, name)
+                } else {
+                    let resolved = self.resolve_let_type(ty.as_ref(), value.as_ref())?;
+                    format!("{} {}", resolved, name)
+                };
+                self.push(&decl);
                 if let Some(v) = value {
                     self.push(" = ");
                     self.emit_expr(v)?;
                 }
                 self.push(";\n");
+
+                if *is_owned {
+                    // Inject auto-drop: defers a free of this owned variable.
+                    let free_call = Expr::new(
+                        ExprKind::Call(
+                            Box::new(Expr::new(ExprKind::Ident("free".into()), stmt.pos)),
+                            vec![Expr::new(
+                                ExprKind::Cast(
+                                    Box::new(Expr::new(ExprKind::Ident(name.clone()), stmt.pos)),
+                                    Type::Pointer(Box::new(Type::Named("void".into()))),
+                                ),
+                                stmt.pos,
+                            )],
+                        ),
+                        stmt.pos,
+                    );
+                    if let Some(top) = self.defer_stack.last_mut() {
+                        top.push(free_call);
+                    }
+                }
             }
             StmtKind::Const { name, ty, value } => {
                 self.write_indent();
@@ -589,6 +632,9 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             }
             StmtKind::Match { scrutinee, arms } => {
                 self.emit_match(scrutinee, arms)?;
+            }
+            StmtKind::TypeAlias { .. } => {
+                // type aliases are erased at codegen time
             }
         }
         Ok(())
@@ -828,11 +874,14 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
 
     fn emit_for_init(&mut self, stmt: &Stmt) -> Result<(), CodegenError> {
         match &stmt.kind {
-            StmtKind::Let { name, ty, value } => {
-                let resolved = self.resolve_let_type(ty.as_ref(), value.as_ref())?;
-                self.push(&resolved);
-                self.push(" ");
-                self.push(name);
+            StmtKind::Let { name, ty, value, .. } => {
+                let decl = if let Some(t) = ty {
+                    self.emit_c_decl(t, name)
+                } else {
+                    let resolved = self.resolve_let_type(ty.as_ref(), value.as_ref())?;
+                    format!("{} {}", resolved, name)
+                };
+                self.push(&decl);
                 if let Some(v) = value {
                     self.push(" = ");
                     self.emit_expr(v)?;
@@ -883,6 +932,7 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                     UnaryOp::BitNot  => { self.push("~"); self.emit_expr(inner)?; }
                     UnaryOp::Deref   => { self.push("*"); self.emit_expr(inner)?; }
                     UnaryOp::AddrOf  => { self.push("&"); self.emit_expr(inner)?; }
+                    UnaryOp::AddrOfMut => { self.push("&"); self.emit_expr(inner)?; }
                     UnaryOp::PostInc => { self.emit_expr(inner)?; self.push("++"); }
                     UnaryOp::PostDec => { self.emit_expr(inner)?; self.push("--"); }
                 }
@@ -1049,18 +1099,60 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
 
     fn type_to_c(&self, ty: &Type) -> String {
         match ty {
-            Type::Named(name) => match name.as_str() {
-                "int"    => "int".into(),
-                "float"  => "double".into(),
-                "bool"   => "bool".into(),
-                "char"   => "char".into(),
-                "string" => "const char*".into(),
-                "void"   => "void".into(),
-                other    => other.into(),
-            },
+            Type::Named(name) => {
+                if let Some(target) = self.type_aliases.get(name) {
+                    return self.type_to_c(&target.clone());
+                }
+                match name.as_str() {
+                    "int"    => "int".into(),
+                    "float"  => "double".into(),
+                    "bool"   => "bool".into(),
+                    "char"   => "char".into(),
+                    "string" => "const char*".into(),
+                    "void"   => "void".into(),
+                    other    => other.into(),
+                }
+            }
             Type::Pointer(inner) => format!("{}*", self.type_to_c(inner)),
+            Type::Borrow(inner) => format!("{} const*", self.type_to_c(inner)),
+            Type::BorrowMut(inner) => format!("{}*", self.type_to_c(inner)),
             Type::Chan(inner) => format!("__glide_chan_{}_t*", inner.mangle()),
+            Type::FnPtr { params, ret } => {
+                let ret_c = match ret {
+                    Some(r) => self.type_to_c(r),
+                    None => "void".into(),
+                };
+                let params_c = if params.is_empty() {
+                    "void".to_string()
+                } else {
+                    params.iter().map(|p| self.type_to_c(p)).collect::<Vec<_>>().join(", ")
+                };
+                format!("{} (*)({})", ret_c, params_c)
+            }
         }
+    }
+
+    fn emit_c_decl(&self, ty: &Type, name: &str) -> String {
+        // For fn pointer types, the variable name must go inside the parens.
+        // For Named types that are aliases of FnPtr, we still use the alias name as a typedef.
+        let resolved = match ty {
+            Type::Named(n) => self.type_aliases.get(n).cloned(),
+            _ => None,
+        };
+        let effective = resolved.as_ref().unwrap_or(ty);
+        if let Type::FnPtr { params, ret } = effective {
+            let ret_c = match ret {
+                Some(r) => self.type_to_c(r),
+                None => "void".into(),
+            };
+            let params_c = if params.is_empty() {
+                "void".to_string()
+            } else {
+                params.iter().map(|p| self.type_to_c(p)).collect::<Vec<_>>().join(", ")
+            };
+            return format!("{} (*{})({})", ret_c, name, params_c);
+        }
+        format!("{} {}", self.type_to_c(ty), name)
     }
 
     fn resolve_let_type(
@@ -1178,7 +1270,13 @@ fn collect_in_type(ty: &Type, out: &mut std::collections::BTreeMap<String, Type>
             collect_in_type(inner, out);
         }
         Type::Pointer(inner) => collect_in_type(inner, out),
+        Type::Borrow(inner) => collect_in_type(inner, out),
+        Type::BorrowMut(inner) => collect_in_type(inner, out),
         Type::Named(_) => {}
+        Type::FnPtr { params, ret } => {
+            for p in params { collect_in_type(p, out); }
+            if let Some(r) = ret { collect_in_type(r, out); }
+        }
     }
 }
 
@@ -1225,6 +1323,7 @@ fn stmt_uses_concurrency(stmt: &Stmt) -> bool {
                 || arms.iter().any(|a| a.body.iter().any(stmt_uses_concurrency))
         }
         StmtKind::Defer(e) => expr_uses_chan(e),
+        StmtKind::TypeAlias { .. } => false,
     }
 }
 
@@ -1232,7 +1331,13 @@ fn ty_has_chan(ty: &Type) -> bool {
     match ty {
         Type::Chan(_) => true,
         Type::Pointer(inner) => ty_has_chan(inner),
+        Type::Borrow(inner) => ty_has_chan(inner),
+        Type::BorrowMut(inner) => ty_has_chan(inner),
         Type::Named(_) => false,
+        Type::FnPtr { params, ret } => {
+            params.iter().any(ty_has_chan)
+                || ret.as_ref().map_or(false, |r| ty_has_chan(r))
+        }
     }
 }
 

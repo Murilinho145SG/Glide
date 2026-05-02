@@ -23,6 +23,8 @@
   "as"
   "sizeof"
   "new"
+  "mut"
+  "type"
 ] @keyword
 
 ; Constants

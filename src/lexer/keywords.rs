@@ -32,6 +32,9 @@ pub enum Keyword {
     Enum,
     Match,
     Defer,
+    Mut,
+    Type,
+    Move,
 }
 
 impl Keyword {
@@ -64,6 +67,9 @@ impl Keyword {
             Keyword::Enum      => "enum",
             Keyword::Match     => "match",
             Keyword::Defer     => "defer",
+            Keyword::Mut       => "mut",
+            Keyword::Type      => "type",
+            Keyword::Move      => "move",
         }
     }
 
@@ -96,6 +102,9 @@ impl Keyword {
             "enum"      => Some(Keyword::Enum),
             "match"     => Some(Keyword::Match),
             "defer"     => Some(Keyword::Defer),
+            "mut"       => Some(Keyword::Mut),
+            "type"      => Some(Keyword::Type),
+            "move"      => Some(Keyword::Move),
             _ => None,
         }
     }

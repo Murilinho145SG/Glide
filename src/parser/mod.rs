@@ -160,6 +160,8 @@ impl Parser {
             self.parse_spawn()
         } else if self.at_keyword(Keyword::Defer) {
             self.parse_defer()
+        } else if self.at_keyword(Keyword::Type) {
+            self.parse_type_alias()
         } else if self.at_keyword(Keyword::Return) {
             self.parse_return()
         } else if self.at_op(Operator::LBrace) {
@@ -516,6 +518,12 @@ impl Parser {
         let pos = self.current_pos();
         let kind = if self.at_keyword(Keyword::Let) {
             self.advance();
+            let is_mut = if self.at_keyword(Keyword::Mut) {
+                self.advance();
+                true
+            } else {
+                false
+            };
             let name = self.expect_ident()?;
             let ty = if self.eat_op(Operator::Colon) {
                 Some(self.parse_type()?)
@@ -527,7 +535,7 @@ impl Parser {
             } else {
                 None
             };
-            StmtKind::Let { name, ty, value }
+            StmtKind::Let { name, ty, value, is_mut, is_owned: false }
         } else {
             let lhs = self.parse_expr(0)?;
             let expr = self.parse_assign_chain(lhs)?;
@@ -592,6 +600,12 @@ impl Parser {
 
     fn parse_let(&mut self) -> Result<StmtKind, ParseError> {
         self.advance(); // 'let'
+        let is_mut = if self.at_keyword(Keyword::Mut) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let name = self.expect_ident()?;
 
         let ty = if self.eat_op(Operator::Colon) {
@@ -607,7 +621,15 @@ impl Parser {
         };
 
         self.expect_op(Operator::Semicolon)?;
-        Ok(StmtKind::Let { name, ty, value })
+        Ok(StmtKind::Let { name, ty, value, is_mut, is_owned: false })
+    }
+
+    fn parse_type_alias(&mut self) -> Result<StmtKind, ParseError> {
+        self.advance(); // 'type'
+        let name = self.expect_ident()?;
+        let ty = self.parse_type()?;
+        self.expect_op(Operator::Semicolon)?;
+        Ok(StmtKind::TypeAlias { name, ty })
     }
 
     fn parse_const(&mut self) -> Result<StmtKind, ParseError> {
@@ -698,12 +720,52 @@ impl Parser {
             let inner = self.parse_type()?;
             return Ok(Type::Pointer(Box::new(inner)));
         }
+        if self.eat_op(Operator::BitAnd) {
+            if self.at_keyword(Keyword::Mut) {
+                self.advance();
+                let inner = self.parse_type()?;
+                return Ok(Type::BorrowMut(Box::new(inner)));
+            }
+            let inner = self.parse_type()?;
+            return Ok(Type::Borrow(Box::new(inner)));
+        }
         if self.at_keyword(Keyword::Chan) {
             self.advance();
             self.expect_op(Operator::LessThan)?;
             let inner = self.parse_type()?;
             self.expect_op(Operator::GreaterThan)?;
             return Ok(Type::Chan(Box::new(inner)));
+        }
+        if self.at_keyword(Keyword::Fn) {
+            self.advance();
+            self.expect_op(Operator::LParen)?;
+            let mut params = Vec::new();
+            if !self.at_op(Operator::RParen) {
+                loop {
+                    // accept either `name: type` or just `type`
+                    if let TokenKind::Identifier(_) = &self.current.token {
+                        if matches!(&self.peek.token, TokenKind::Operator(Operator::Colon)) {
+                            self.advance(); // consume name
+                            self.advance(); // consume ':'
+                            params.push(self.parse_type()?);
+                        } else {
+                            params.push(self.parse_type()?);
+                        }
+                    } else {
+                        params.push(self.parse_type()?);
+                    }
+                    if !self.eat_op(Operator::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.expect_op(Operator::RParen)?;
+            let ret = if self.eat_op(Operator::Arrow) {
+                Some(Box::new(self.parse_type()?))
+            } else {
+                None
+            };
+            return Ok(Type::FnPtr { params, ret });
         }
         let name = self.expect_ident()?;
         Ok(Type::Named(name))
@@ -862,7 +924,22 @@ impl Parser {
                     Operator::Bang   => UnaryOp::Not,
                     Operator::BitNot => UnaryOp::BitNot,
                     Operator::Star   => UnaryOp::Deref,
-                    Operator::BitAnd => UnaryOp::AddrOf,
+                    Operator::BitAnd => {
+                        self.advance();
+                        if self.at_keyword(Keyword::Mut) {
+                            self.advance();
+                            let rhs = self.parse_expr(PREFIX_BP)?;
+                            return Ok(Expr::new(
+                                ExprKind::Unary(UnaryOp::AddrOfMut, Box::new(rhs)),
+                                pos,
+                            ));
+                        }
+                        let rhs = self.parse_expr(PREFIX_BP)?;
+                        return Ok(Expr::new(
+                            ExprKind::Unary(UnaryOp::AddrOf, Box::new(rhs)),
+                            pos,
+                        ));
+                    }
                     _ => return Err(self.err(format!(
                         "unexpected operator '{}' at start of expression",
                         tok.lexeme
