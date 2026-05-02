@@ -38,7 +38,10 @@ fn main() {
             let result = compile_to_c(&file);
             let exe = temp_exe_path(&file);
             invoke_gcc(&result, &exe, mode);
-            let status = Command::new(&exe).status().unwrap_or_else(|e| {
+            // Forward args after `--` (or after our recognized flags) to the
+            // built program. Lets users do: `glide run prog.glide -- a b c`.
+            let user_args = collect_user_args(&argv);
+            let status = Command::new(&exe).args(&user_args).status().unwrap_or_else(|e| {
                 eprintln!("glide: failed to run {}: {}", exe.display(), e);
                 let _ = std::fs::remove_file(&exe);
                 std::process::exit(1);
@@ -259,6 +262,38 @@ enum BuildMode {
     Default,
     Release,
     Debug,
+}
+
+fn collect_user_args(argv: &[String]) -> Vec<String> {
+    // argv[0] = glide, argv[1] = subcommand, argv[2] = file. Everything after
+    // a `--` goes to the user program. Without `--`, anything past the file
+    // that isn't a glide flag is passed through.
+    let mut out = Vec::new();
+    let mut after_dashdash = false;
+    let mut seen_file = false;
+    for a in argv.iter().skip(2) {
+        if after_dashdash {
+            out.push(a.clone());
+            continue;
+        }
+        if a == "--" {
+            after_dashdash = true;
+            continue;
+        }
+        if a == "--release" || a == "--debug" {
+            continue;
+        }
+        if a == "-o" {
+            // not relevant for run; skip a value too
+            continue;
+        }
+        if !seen_file {
+            seen_file = true;
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
 }
 
 fn parse_build_mode(argv: &[String]) -> BuildMode {

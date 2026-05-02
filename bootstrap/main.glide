@@ -1,0 +1,37 @@
+// Drives the Glide-in-Glide lexer over a source file.
+//
+// Usage: glide run bootstrap/main.glide -- path/to/source.glide
+
+import "lexer.glide";
+
+fn main() -> int {
+    let argc: int = args_count();
+    if argc < 2 {
+        println!("usage: glide_boot <file>");
+        return 1;
+    }
+
+    let path: string = args_at(argc - 1);
+    let src: string = read_file(path);
+    if src.eq("") {
+        println!("could not read or empty file:", path);
+        return 1;
+    }
+
+    let lex: *Lexer = Lexer::new(src);
+    let mut count: int = 0;
+    while true {
+        let t: Token = lex.next_token();
+        if t.kind == TOK_EOF {
+            println!("EOF at", t.line, ":", t.column);
+            break;
+        }
+        println!(token_kind_name(t.kind), "(", t.lexeme, ") @", t.line, ":", t.column);
+        count = count + 1;
+        if count > 200 { println!("... (truncated)"); break; }
+    }
+    println!("total tokens:", count);
+
+    lex.free();
+    return 0;
+}

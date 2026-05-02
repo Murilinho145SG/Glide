@@ -1,0 +1,225 @@
+// Glide-in-Glide lexer. First piece of the self-hosted compiler.
+
+pub const TOK_EOF: int = 0;
+pub const TOK_IDENT: int = 1;
+pub const TOK_INT: int = 2;
+pub const TOK_FLOAT: int = 3;
+pub const TOK_STRING: int = 4;
+pub const TOK_CHAR: int = 5;
+pub const TOK_KEYWORD: int = 6;
+pub const TOK_OP: int = 7;
+pub const TOK_ERROR: int = 8;
+
+pub struct Token {
+    kind: int,
+    lexeme: string,
+    line: int,
+    column: int,
+}
+
+pub struct Lexer {
+    src: string,
+    src_len: int,
+    pos: int,
+    line: int,
+    column: int,
+}
+
+impl Lexer {
+    pub fn new(src: string) -> *Lexer {
+        let l: *Lexer = malloc(sizeof(Lexer)) as *Lexer;
+        l.src = src;
+        l.src_len = src.len();
+        l.pos = 0;
+        l.line = 1;
+        l.column = 1;
+        return l;
+    }
+
+    pub fn free(self: *Lexer) {
+        free(self as *void);
+    }
+
+    fn peek(self: *Lexer) -> char {
+        if self.pos >= self.src_len { return '\0'; }
+        return self.src.at(self.pos);
+    }
+
+    fn peek_at(self: *Lexer, offset: int) -> char {
+        let i: int = self.pos + offset;
+        if i >= self.src_len { return '\0'; }
+        return self.src.at(i);
+    }
+
+    fn advance(self: *Lexer) {
+        let c: char = self.peek();
+        self.pos = self.pos + 1;
+        if c.to_int() == 10 {
+            self.line = self.line + 1;
+            self.column = 1;
+        } else {
+            self.column = self.column + 1;
+        }
+    }
+
+    fn skip_trivia(self: *Lexer) {
+        while self.pos < self.src_len {
+            let c: char = self.peek();
+            let ci: int = c.to_int();
+            if ci == 32 || ci == 9 || ci == 13 || ci == 10 {
+                self.advance();
+            } else if ci == 47 {
+                // '/'
+                let n: char = self.peek_at(1);
+                if n.to_int() == 47 {
+                    while self.pos < self.src_len {
+                        let cc: char = self.peek();
+                        if cc.to_int() == 10 { break; }
+                        self.advance();
+                    }
+                } else if n.to_int() == 42 {
+                    self.advance(); self.advance();
+                    while self.pos < self.src_len {
+                        let cc: char = self.peek();
+                        let nn: char = self.peek_at(1);
+                        if cc.to_int() == 42 && nn.to_int() == 47 {
+                            self.advance(); self.advance();
+                            break;
+                        }
+                        self.advance();
+                    }
+                } else {
+                    return;
+                }
+            } else {
+                return;
+            }
+        }
+    }
+
+    pub fn next_token(self: *Lexer) -> Token {
+        self.skip_trivia();
+
+        let start_line: int = self.line;
+        let start_col: int = self.column;
+        let start_pos: int = self.pos;
+
+        if self.pos >= self.src_len {
+            return Token { kind: TOK_EOF, lexeme: "", line: start_line, column: start_col };
+        }
+
+        let c: char = self.peek();
+        let ci: int = c.to_int();
+
+        // identifier / keyword
+        if c.is_alpha() || ci == 95 {
+            while self.pos < self.src_len {
+                let cc: char = self.peek();
+                if cc.is_alpha() || cc.is_digit() || cc.to_int() == 95 {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            let lex: string = self.src.substring(start_pos, self.pos);
+            let mut kind: int = TOK_IDENT;
+            if is_keyword(lex) { kind = TOK_KEYWORD; }
+            return Token { kind: kind, lexeme: lex, line: start_line, column: start_col };
+        }
+
+        // number
+        if c.is_digit() {
+            let mut is_float: bool = false;
+            while self.pos < self.src_len {
+                let cc: char = self.peek();
+                if cc.is_digit() || cc.to_int() == 95 {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            if self.peek().to_int() == 46 && self.peek_at(1).is_digit() {
+                is_float = true;
+                self.advance();
+                while self.pos < self.src_len {
+                    let cc: char = self.peek();
+                    if cc.is_digit() || cc.to_int() == 95 {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            let lex: string = self.src.substring(start_pos, self.pos);
+            let mut kind: int = TOK_INT;
+            if is_float { kind = TOK_FLOAT; }
+            return Token { kind: kind, lexeme: lex, line: start_line, column: start_col };
+        }
+
+        // string literal
+        if ci == 34 {
+            self.advance();
+            while self.pos < self.src_len {
+                let cc: char = self.peek();
+                if cc.to_int() == 34 { self.advance(); break; }
+                if cc.to_int() == 92 { self.advance(); }
+                self.advance();
+            }
+            let lex: string = self.src.substring(start_pos, self.pos);
+            return Token { kind: TOK_STRING, lexeme: lex, line: start_line, column: start_col };
+        }
+
+        // operator (single char fallback)
+        self.advance();
+        let lex: string = self.src.substring(start_pos, self.pos);
+        return Token { kind: TOK_OP, lexeme: lex, line: start_line, column: start_col };
+    }
+}
+
+pub fn is_keyword(s: string) -> bool {
+    if s.eq("fn") { return true; }
+    if s.eq("let") { return true; }
+    if s.eq("mut") { return true; }
+    if s.eq("const") { return true; }
+    if s.eq("struct") { return true; }
+    if s.eq("enum") { return true; }
+    if s.eq("impl") { return true; }
+    if s.eq("if") { return true; }
+    if s.eq("else") { return true; }
+    if s.eq("while") { return true; }
+    if s.eq("for") { return true; }
+    if s.eq("return") { return true; }
+    if s.eq("break") { return true; }
+    if s.eq("continue") { return true; }
+    if s.eq("match") { return true; }
+    if s.eq("true") { return true; }
+    if s.eq("false") { return true; }
+    if s.eq("null") { return true; }
+    if s.eq("as") { return true; }
+    if s.eq("sizeof") { return true; }
+    if s.eq("new") { return true; }
+    if s.eq("pub") { return true; }
+    if s.eq("import") { return true; }
+    if s.eq("interface") { return true; }
+    if s.eq("defer") { return true; }
+    if s.eq("type") { return true; }
+    if s.eq("move") { return true; }
+    if s.eq("extern") { return true; }
+    if s.eq("c_include") { return true; }
+    if s.eq("c_link") { return true; }
+    if s.eq("spawn") { return true; }
+    if s.eq("chan") { return true; }
+    return false;
+}
+
+pub fn token_kind_name(k: int) -> string {
+    if k == TOK_EOF { return "EOF"; }
+    if k == TOK_IDENT { return "IDENT"; }
+    if k == TOK_INT { return "INT"; }
+    if k == TOK_FLOAT { return "FLOAT"; }
+    if k == TOK_STRING { return "STRING"; }
+    if k == TOK_CHAR { return "CHAR"; }
+    if k == TOK_KEYWORD { return "KEYWORD"; }
+    if k == TOK_OP { return "OP"; }
+    return "ERROR";
+}

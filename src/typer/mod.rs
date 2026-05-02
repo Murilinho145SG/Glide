@@ -3666,10 +3666,13 @@ pub fn stdlib_signatures() -> Vec<(&'static str, Vec<Param>, Option<Type>)> {
         ("float_floor",     vec![synth_param("f", float_ty())], Some(float_ty())),
         ("float_ceil",      vec![synth_param("f", float_ty())], Some(float_ty())),
 
-        ("string_len",      vec![synth_param("s", string_ty())], Some(int_ty())),
-        ("string_eq",       vec![synth_param("a", string_ty()), synth_param("b", string_ty())], Some(bool_ty())),
-        ("string_at",       vec![synth_param("s", string_ty()), synth_param("i", int_ty())],     Some(char_ty())),
-        ("string_concat",   vec![synth_param("a", string_ty()), synth_param("b", string_ty())], Some(string_ty())),
+        ("string_len",       vec![synth_param("s", string_ty())], Some(int_ty())),
+        ("string_eq",        vec![synth_param("a", string_ty()), synth_param("b", string_ty())], Some(bool_ty())),
+        ("string_at",        vec![synth_param("s", string_ty()), synth_param("i", int_ty())],     Some(char_ty())),
+        ("string_concat",    vec![synth_param("a", string_ty()), synth_param("b", string_ty())], Some(string_ty())),
+        ("string_substring", vec![synth_param("s", string_ty()), synth_param("start", int_ty()), synth_param("end", int_ty())], Some(string_ty())),
+        ("string_index_of",  vec![synth_param("s", string_ty()), synth_param("needle", string_ty())], Some(int_ty())),
+        ("string_from_char", vec![synth_param("c", char_ty())], Some(string_ty())),
 
         ("bool_to_string",  vec![synth_param("b", bool_ty())],  Some(string_ty())),
 

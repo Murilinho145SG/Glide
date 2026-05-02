@@ -39,6 +39,7 @@ pub struct Codegen {
     enum_infos: HashMap<String, Vec<(String, Vec<Type>)>>,
     type_aliases: HashMap<String, Type>,
     defer_stack: Vec<Vec<Expr>>,
+    current_fn_ret: Option<Type>,
 }
 
 impl Codegen {
@@ -56,6 +57,7 @@ impl Codegen {
             enum_infos: HashMap::new(),
             type_aliases: HashMap::new(),
             defer_stack: Vec::new(),
+            current_fn_ret: None,
         }
     }
 
@@ -516,12 +518,15 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
             self.write_indent();
             self.push("__glide_args_init(__glide_main_argc, __glide_main_argv);\n");
         }
+        let saved_ret = self.current_fn_ret.take();
+        self.current_fn_ret = ret_type.cloned();
         self.defer_stack.push(Vec::new());
         for s in body {
             self.emit_stmt(s)?;
         }
         self.emit_deferred_in_reverse()?;
         self.defer_stack.pop();
+        self.current_fn_ret = saved_ret;
         if is_main && ret_type.is_none() {
             self.write_indent();
             self.push("return 0;\n");
@@ -684,9 +689,19 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
                     let tmp = format!("__glide_ret_{}", self.match_count + 1);
                     self.match_count += 1;
                     self.write_indent();
-                    self.push(&format!("__typeof__("));
-                    self.emit_expr(v)?;
-                    self.push(&format!(") {} = ", tmp));
+                    // Use the function's declared return type when available so
+                    // string literals don't decay to local char arrays via
+                    // __typeof__("...") yielding `char const[N]`.
+                    let ret_decl = self.current_fn_ret.clone()
+                        .map(|t| self.type_to_c(&t));
+                    match ret_decl {
+                        Some(t) => self.push(&format!("{} {} = ", t, tmp)),
+                        None => {
+                            self.push("__typeof__(");
+                            self.emit_expr(v)?;
+                            self.push(&format!(") {} = ", tmp));
+                        }
+                    }
                     self.emit_expr(v)?;
                     self.push(";\n");
                     let stack: Vec<Vec<Expr>> = self.defer_stack.clone();
@@ -1660,6 +1675,31 @@ static const char* __glide_string_concat(const char* a, const char* b) {
     memcpy(out, a, la);
     memcpy(out + la, b, lb);
     out[la + lb] = 0;
+    return out;
+}
+
+static const char* __glide_string_substring(const char* s, int start, int end) {
+    int n = (int)strlen(s);
+    if (start < 0) start = 0;
+    if (end > n) end = n;
+    if (start > end) start = end;
+    int len = end - start;
+    char* out = (char*)malloc((size_t)len + 1);
+    memcpy(out, s + start, (size_t)len);
+    out[len] = 0;
+    return out;
+}
+
+static int __glide_string_index_of(const char* s, const char* needle) {
+    const char* p = strstr(s, needle);
+    if (!p) return -1;
+    return (int)(p - s);
+}
+
+static const char* __glide_string_from_char(char c) {
+    char* out = (char*)malloc(2);
+    out[0] = c;
+    out[1] = 0;
     return out;
 }
 
