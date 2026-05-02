@@ -121,12 +121,21 @@ struct GenericFnInfo {
     decl_pos: Pos,
 }
 
+#[derive(Clone)]
+struct GenericStructInfo {
+    type_params: Vec<String>,
+    fields: Vec<Field>,
+    decl_pos: Pos,
+}
+
 pub struct Typer {
     structs: HashMap<String, StructInfo>,
     enums: HashMap<String, EnumInfo>,
     fns: HashMap<String, FnSig>,
     generic_fns: HashMap<String, GenericFnInfo>,
+    generic_structs: HashMap<String, GenericStructInfo>,
     mono_queue: Vec<(String, Vec<Type>)>,
+    struct_mono_queue: Vec<(String, Vec<Type>)>,
     mono_done: std::collections::HashSet<String>,
     type_aliases: HashMap<String, Type>,
     scopes: Vec<HashMap<String, LocalSlot>>,
@@ -140,6 +149,7 @@ pub struct Typer {
     anon_counter: usize,
     closure_struct_names: std::collections::HashSet<String>,
     type_param_scope: std::collections::HashSet<String>,
+    expected_ret_hint: Option<Type>,
 }
 
 impl Default for Typer {
@@ -155,7 +165,9 @@ impl Typer {
             enums: HashMap::new(),
             fns: HashMap::new(),
             generic_fns: HashMap::new(),
+            generic_structs: HashMap::new(),
             mono_queue: Vec::new(),
+            struct_mono_queue: Vec::new(),
             mono_done: std::collections::HashSet::new(),
             type_aliases: HashMap::new(),
             scopes: Vec::new(),
@@ -169,6 +181,7 @@ impl Typer {
             anon_counter: 0,
             closure_struct_names: std::collections::HashSet::new(),
             type_param_scope: std::collections::HashSet::new(),
+            expected_ret_hint: None,
         };
         t.register_builtins();
         t.register_stdlib();
@@ -323,7 +336,25 @@ impl Typer {
         let module = self.current_module.clone();
         let file = stmt.source_file.clone().or_else(|| self.current_file.clone());
         match &stmt.kind {
-            StmtKind::Struct { name, fields, .. } => {
+            StmtKind::Struct { name, type_params, fields } => {
+                if !type_params.is_empty() {
+                    self.generic_structs.insert(name.clone(), GenericStructInfo {
+                        type_params: type_params.clone(),
+                        fields: fields.clone(),
+                        decl_pos: stmt.pos,
+                    });
+                    self.index.decls.push(DeclInfo {
+                        pos: stmt.pos,
+                        name: name.clone(),
+                        kind: DeclKind::Struct,
+                        ty: None,
+                        detail: format_struct_detail(name, fields),
+                        module: module.clone(),
+                        file: file.clone(),
+                        is_method: false,
+                    });
+                    return;
+                }
                 self.structs.insert(
                     name.clone(),
                     StructInfo {
@@ -502,6 +533,170 @@ impl Typer {
         }
     }
 
+    /// Walks a type tree, replacing any Type::Generic whose name is a known
+    /// generic struct with Type::Named(mangled). Side-effect: queues additional
+    /// monos onto self.struct_mono_queue.
+    fn finalize_generic(&mut self, t: &Type) -> Type {
+        match t {
+            Type::Generic { name, args } => {
+                let new_args: Vec<Type> = args.iter().map(|a| self.finalize_generic(a)).collect();
+                if self.generic_structs.contains_key(name) {
+                    let mangled = mono_mangle(name, &new_args);
+                    if !self.mono_done.contains(&mangled) {
+                        self.mono_done.insert(mangled.clone());
+                        self.struct_mono_queue.push((name.clone(), new_args));
+                    }
+                    return Type::Named(mangled);
+                }
+                Type::Generic { name: name.clone(), args: new_args }
+            }
+            Type::Pointer(inner) => Type::Pointer(Box::new(self.finalize_generic(inner))),
+            Type::Borrow(inner) => Type::Borrow(Box::new(self.finalize_generic(inner))),
+            Type::BorrowMut(inner) => Type::BorrowMut(Box::new(self.finalize_generic(inner))),
+            Type::Chan(inner) => Type::Chan(Box::new(self.finalize_generic(inner))),
+            Type::Slice(inner) => Type::Slice(Box::new(self.finalize_generic(inner))),
+            Type::FnPtr { params, ret } => Type::FnPtr {
+                params: params.iter().map(|p| self.finalize_generic(p)).collect(),
+                ret: ret.as_ref().map(|r| Box::new(self.finalize_generic(r))),
+            },
+            Type::Named(_) => t.clone(),
+        }
+    }
+
+    fn collect_generic_uses_in_type(&mut self, t: &Type) {
+        match t {
+            Type::Generic { name, args } => {
+                for a in args {
+                    self.collect_generic_uses_in_type(a);
+                }
+                if self.generic_structs.contains_key(name) {
+                    let mangled = mono_mangle(name, args);
+                    if !self.mono_done.contains(&mangled) {
+                        self.mono_done.insert(mangled);
+                        self.struct_mono_queue.push((name.clone(), args.clone()));
+                    }
+                }
+            }
+            Type::Pointer(inner)
+            | Type::Borrow(inner)
+            | Type::BorrowMut(inner)
+            | Type::Chan(inner)
+            | Type::Slice(inner) => self.collect_generic_uses_in_type(inner),
+            Type::FnPtr { params, ret } => {
+                for p in params { self.collect_generic_uses_in_type(p); }
+                if let Some(r) = ret { self.collect_generic_uses_in_type(r); }
+            }
+            Type::Named(_) => {}
+        }
+    }
+
+    fn collect_generic_uses_in_expr(&mut self, e: &Expr) {
+        match &e.kind {
+            ExprKind::Cast(inner, t) => {
+                self.collect_generic_uses_in_expr(inner);
+                self.collect_generic_uses_in_type(t);
+            }
+            ExprKind::Sizeof(t) => self.collect_generic_uses_in_type(t),
+            ExprKind::Unary(_, inner) => self.collect_generic_uses_in_expr(inner),
+            ExprKind::Binary(_, l, r) => {
+                self.collect_generic_uses_in_expr(l);
+                self.collect_generic_uses_in_expr(r);
+            }
+            ExprKind::Assign(l, _, r) => {
+                self.collect_generic_uses_in_expr(l);
+                self.collect_generic_uses_in_expr(r);
+            }
+            ExprKind::Call(c, args) => {
+                self.collect_generic_uses_in_expr(c);
+                for a in args { self.collect_generic_uses_in_expr(a); }
+            }
+            ExprKind::Index(a, b) => {
+                self.collect_generic_uses_in_expr(a);
+                self.collect_generic_uses_in_expr(b);
+            }
+            ExprKind::Member(a, _) => self.collect_generic_uses_in_expr(a),
+            ExprKind::StructLit { fields, .. }
+            | ExprKind::New { fields, .. } => {
+                for (_, v) in fields { self.collect_generic_uses_in_expr(v); }
+            }
+            ExprKind::ArrayLit { elements, elem_type, .. } => {
+                for e in elements { self.collect_generic_uses_in_expr(e); }
+                if let Some(t) = elem_type { self.collect_generic_uses_in_type(t); }
+            }
+            ExprKind::AddrOfTemp { value, ty } => {
+                self.collect_generic_uses_in_expr(value);
+                self.collect_generic_uses_in_type(ty);
+            }
+            ExprKind::MacroCall { args, .. } => {
+                for a in args { self.collect_generic_uses_in_expr(a); }
+            }
+            ExprKind::EnumCtor { args, .. } => {
+                for a in args { self.collect_generic_uses_in_expr(a); }
+            }
+            ExprKind::FnExpr { params, ret_type, body, .. } => {
+                for p in params { self.collect_generic_uses_in_type(&p.ty); }
+                if let Some(t) = ret_type { self.collect_generic_uses_in_type(t); }
+                for s in body { self.collect_generic_uses_in_stmt(s); }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_generic_uses_in_stmt(&mut self, stmt: &Stmt) {
+        match &stmt.kind {
+            StmtKind::Let { ty, value, .. } => {
+                if let Some(t) = ty { self.collect_generic_uses_in_type(t); }
+                if let Some(v) = value { self.collect_generic_uses_in_expr(v); }
+            }
+            StmtKind::Const { ty, value, .. } => {
+                if let Some(t) = ty { self.collect_generic_uses_in_type(t); }
+                self.collect_generic_uses_in_expr(value);
+            }
+            StmtKind::Fn { type_params, params, ret_type, body, .. } => {
+                if !type_params.is_empty() { return; }
+                for p in params { self.collect_generic_uses_in_type(&p.ty); }
+                if let Some(t) = ret_type { self.collect_generic_uses_in_type(t); }
+                for s in body { self.collect_generic_uses_in_stmt(s); }
+            }
+            StmtKind::Struct { type_params, fields, .. } => {
+                if !type_params.is_empty() { return; }
+                for f in fields { self.collect_generic_uses_in_type(&f.ty); }
+            }
+            StmtKind::Block(stmts) => for s in stmts { self.collect_generic_uses_in_stmt(s); },
+            StmtKind::If { cond, then_block, else_block } => {
+                self.collect_generic_uses_in_expr(cond);
+                for s in then_block { self.collect_generic_uses_in_stmt(s); }
+                if let Some(b) = else_block { for s in b { self.collect_generic_uses_in_stmt(s); } }
+            }
+            StmtKind::While { cond, body } => {
+                self.collect_generic_uses_in_expr(cond);
+                for s in body { self.collect_generic_uses_in_stmt(s); }
+            }
+            StmtKind::For { init, cond, step, body } => {
+                if let Some(s) = init { self.collect_generic_uses_in_stmt(s); }
+                if let Some(c) = cond { self.collect_generic_uses_in_expr(c); }
+                if let Some(s) = step { self.collect_generic_uses_in_expr(s); }
+                for s in body { self.collect_generic_uses_in_stmt(s); }
+            }
+            StmtKind::Return(v) => if let Some(e) = v { self.collect_generic_uses_in_expr(e); },
+            StmtKind::Expr(e) | StmtKind::Spawn(e) | StmtKind::Defer(e) => {
+                self.collect_generic_uses_in_expr(e);
+            }
+            StmtKind::Match { scrutinee, arms } => {
+                self.collect_generic_uses_in_expr(scrutinee);
+                for a in arms {
+                    for s in &a.body { self.collect_generic_uses_in_stmt(s); }
+                }
+            }
+            StmtKind::Impl { methods, .. } => for m in methods { self.collect_generic_uses_in_stmt(m); },
+            StmtKind::ExternFn { params, ret_type, .. } => {
+                for p in params { self.collect_generic_uses_in_type(&p.ty); }
+                if let Some(t) = ret_type { self.collect_generic_uses_in_type(t); }
+            }
+            _ => {}
+        }
+    }
+
     fn resolve_alias(&self, t: &Type) -> Type {
         match t {
             Type::Named(n) => {
@@ -510,6 +705,7 @@ impl Typer {
                 }
                 t.clone()
             }
+            Type::Generic { .. } => Type::Named(t.mangle()),
             Type::Pointer(inner) => Type::Pointer(Box::new(self.resolve_alias(inner))),
             Type::Borrow(inner) => Type::Borrow(Box::new(self.resolve_alias(inner))),
             Type::BorrowMut(inner) => Type::BorrowMut(Box::new(self.resolve_alias(inner))),
@@ -525,7 +721,54 @@ impl Typer {
     pub fn check(mut self, program: Program) -> (Result<Program, Vec<TypeError>>, SymbolIndex) {
         self.pre_register(&program);
 
-        let mut new_program = Vec::with_capacity(program.len());
+        // Collect all generic struct uses across the program, queue monomorphizations.
+        for stmt in &program {
+            self.collect_generic_uses_in_stmt(stmt);
+        }
+
+        // Drain struct monomorphization queue eagerly so subsequent type checks
+        // see the resulting concrete struct in self.structs. Substituted field
+        // types may themselves be generic; finalize_type converts those to
+        // Named(mangled) and queues additional monos as a side effect.
+        let mut struct_monos: Vec<Stmt> = Vec::new();
+        while let Some((orig_name, type_args)) = self.struct_mono_queue.pop() {
+            if let Some(g) = self.generic_structs.get(&orig_name).cloned() {
+                let mangled = mono_mangle(&orig_name, &type_args);
+                let subst: HashMap<String, Type> = g.type_params.iter()
+                    .cloned()
+                    .zip(type_args.iter().cloned())
+                    .collect();
+                let new_fields: Vec<Field> = g.fields.iter().map(|f| Field {
+                    name: f.name.clone(),
+                    ty: self.finalize_generic(&subst_type(&f.ty, &subst)),
+                    pos: f.pos,
+                }).collect();
+                self.structs.insert(mangled.clone(), StructInfo {
+                    fields: new_fields.clone(),
+                    decl_pos: g.decl_pos,
+                    home_file: None,
+                    is_pub: true,
+                });
+                self.index.structs.insert(mangled.clone(), new_fields.clone());
+                struct_monos.push(Stmt {
+                    kind: StmtKind::Struct {
+                        name: mangled,
+                        type_params: Vec::new(),
+                        fields: new_fields,
+                    },
+                    pos: g.decl_pos,
+                    is_pub: false,
+                    source_file: None,
+                });
+            }
+        }
+
+        let mut new_program = Vec::with_capacity(program.len() + struct_monos.len());
+        // Insert struct monos first so they appear before user code in C output.
+        // Reverse so that dependencies (mono'd first via finalize_generic) come
+        // before their users (who triggered the recursive mono).
+        struct_monos.reverse();
+        for s in struct_monos { new_program.push(s); }
         for stmt in program {
             new_program.push(self.check_top(stmt));
         }
@@ -991,6 +1234,23 @@ impl Typer {
             }
         }
 
+        // Generic struct literal: `let v: Vec<int> = Vec { ... };` rewrites the
+        // StructLit's `type_name` to the mangled mono name.
+        if let (Some(annot_ty), Some(v)) = (&ty, value.as_mut()) {
+            if let Type::Generic { name: gname, args } = annot_ty {
+                let mangled = mono_mangle(gname, args);
+                match &mut v.kind {
+                    ExprKind::StructLit { type_name, .. } if type_name == gname => {
+                        *type_name = mangled.clone();
+                    }
+                    ExprKind::New { type_name, .. } if type_name == gname => {
+                        *type_name = mangled.clone();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Auto-allocation pattern: `let p: *T = T { ... };` rewrites to New (heap alloc)
         // and marks the slot as owned (auto-drop at scope end).
         let mut auto_owned_value: Option<Expr> = None;
@@ -1033,7 +1293,10 @@ impl Typer {
                             }
                         }
                     }
+                    let saved_hint = self.expected_ret_hint.take();
+                    self.expected_ret_hint = ty.clone();
                     let (v_new, v_ty) = self.check_expr(v);
+                    self.expected_ret_hint = saved_hint;
                     (Some(v_new), Some(v_ty))
                 }
                 None => (None, None),
@@ -1847,7 +2110,29 @@ impl Typer {
         // Generic fn call: infer type args, mangle name, queue monomorphization.
         if let Some(name) = &fn_name {
             if let Some(g) = self.generic_fns.get(name).cloned() {
-                let inferred = self.infer_type_args(&g.type_params, &g.params, &arg_tys);
+                let mut inferred = self.infer_type_args(&g.type_params, &g.params, &arg_tys);
+                // If inference from args failed and we have a return-type hint,
+                // try unifying ret_type against the hint to bind type vars.
+                if inferred.is_none() {
+                    if let (Some(hint), Some(ret_ty)) = (
+                        self.expected_ret_hint.clone(),
+                        g.ret_type.clone(),
+                    ) {
+                        let mut bindings: HashMap<String, Type> = HashMap::new();
+                        let pset: std::collections::HashSet<&String> =
+                            g.type_params.iter().collect();
+                        unify_for_inference(&ret_ty, &hint, &pset, &mut bindings);
+                        let mut all = Vec::with_capacity(g.type_params.len());
+                        let mut complete = true;
+                        for tp in &g.type_params {
+                            match bindings.get(tp) {
+                                Some(t) => all.push(t.clone()),
+                                None => { complete = false; break; }
+                            }
+                        }
+                        if complete { inferred = Some(all); }
+                    }
+                }
                 if let Some(args_ty) = inferred {
                     let mangled = mono_mangle(name, &args_ty);
                     if !self.mono_done.contains(&mangled) {
@@ -2479,7 +2764,25 @@ impl Typer {
         let struct_fields = struct_info.fields;
 
         let mut new_fields = Vec::with_capacity(fields.len());
-        for (fname, fexpr) in fields {
+        for (fname, mut fexpr) in fields {
+            // Propagate generic-struct hint from field type into nested
+            // StructLit / New so `Box { ... }` inside `Pair<int, Box<int>>` works.
+            if let Some(f) = struct_fields.iter().find(|f| f.name == fname) {
+                if let Type::Named(expected_named) = &f.ty {
+                    let rewrite = match &mut fexpr.kind {
+                        ExprKind::StructLit { type_name: tn, .. } => Some(tn),
+                        ExprKind::New { type_name: tn, .. } => Some(tn),
+                        _ => None,
+                    };
+                    if let Some(tn) = rewrite {
+                        if self.generic_structs.contains_key(&*tn)
+                            && expected_named.starts_with(&format!("{}__", tn))
+                        {
+                            *tn = expected_named.clone();
+                        }
+                    }
+                }
+            }
             let (fexpr_new, fexpr_ty) = self.check_expr(fexpr);
             match struct_fields.iter().find(|f| f.name == fname) {
                 Some(f) => {
@@ -2656,6 +2959,13 @@ pub fn unify_for_inference(
         | (Type::Chan(a), Type::Chan(b)) => {
             unify_for_inference(a, b, type_params, bindings);
         }
+        (Type::Generic { name: pn, args: pa }, Type::Generic { name: an, args: aa })
+            if pn == an && pa.len() == aa.len() =>
+        {
+            for (pi, ai) in pa.iter().zip(aa.iter()) {
+                unify_for_inference(pi, ai, type_params, bindings);
+            }
+        }
         _ => {}
     }
 }
@@ -2668,6 +2978,10 @@ fn subst_type(t: &Type, subst: &HashMap<String, Type>) -> Type {
             }
             t.clone()
         }
+        Type::Generic { name, args } => Type::Generic {
+            name: name.clone(),
+            args: args.iter().map(|a| subst_type(a, subst)).collect(),
+        },
         Type::Pointer(inner) => Type::Pointer(Box::new(subst_type(inner, subst))),
         Type::Borrow(inner) => Type::Borrow(Box::new(subst_type(inner, subst))),
         Type::BorrowMut(inner) => Type::BorrowMut(Box::new(subst_type(inner, subst))),
@@ -2809,6 +3123,10 @@ fn subst_expr(expr: Expr, subst: &HashMap<String, Type>) -> Expr {
 pub fn type_name(t: &Type) -> String {
     match t {
         Type::Named(n) => n.clone(),
+        Type::Generic { name, args } => {
+            let a = args.iter().map(type_name).collect::<Vec<_>>().join(", ");
+            format!("{}<{}>", name, a)
+        }
         Type::Pointer(inner) => format!("*{}", type_name(inner)),
         Type::Borrow(inner) => format!("&{}", type_name(inner)),
         Type::BorrowMut(inner) => format!("&mut {}", type_name(inner)),
@@ -3141,6 +3459,7 @@ fn rewrite_captures_expr(expr: Expr, captured: &std::collections::HashSet<String
 fn is_copy_type(t: &Type) -> bool {
     match t {
         Type::Named(n) => is_known_primitive(n),
+        Type::Generic { .. } => false,
         Type::Borrow(_) => true,
         Type::FnPtr { .. } => true,
         Type::Pointer(_) => false,
@@ -3179,6 +3498,7 @@ fn format_spec_for(ty: &Type, arg: Expr, pos: Pos) -> (&'static str, Expr) {
         },
         Type::Pointer(_) | Type::Borrow(_) | Type::BorrowMut(_) | Type::Chan(_) | Type::FnPtr { .. } => ("%p", arg),
         Type::Slice(_) => ("%p", arg),
+        Type::Generic { .. } => ("%p", arg),
     }
 }
 

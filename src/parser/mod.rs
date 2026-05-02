@@ -70,6 +70,27 @@ impl Parser {
         }
     }
 
+    /// Consume a closing `>` for type-arg lists. Handles the `>>` token used
+    /// to close nested generics (`Vec<Pair<int, U>>`) by splitting it into
+    /// two `>` tokens.
+    fn expect_close_gt(&mut self) -> Result<(), ParseError> {
+        if self.at_op(Operator::GreaterThan) {
+            self.advance();
+            return Ok(());
+        }
+        if self.at_op(Operator::RightShift) {
+            // Replace current `>>` with a `>` so the outer level can consume it.
+            self.current.token = TokenKind::Operator(Operator::GreaterThan);
+            self.current.lexeme = ">".to_string();
+            self.current.column += 1;
+            return Ok(());
+        }
+        Err(self.err(format!(
+            "expected '>' but found '{}'",
+            self.current.lexeme
+        )))
+    }
+
     fn expect_ident(&mut self) -> Result<String, ParseError> {
         if let TokenKind::Identifier(name) = &self.current.token {
             let name = name.clone();
@@ -481,7 +502,7 @@ impl Parser {
                 break;
             }
         }
-        self.expect_op(Operator::GreaterThan)?;
+        self.expect_close_gt()?;
         Ok(tps)
     }
 
@@ -907,7 +928,7 @@ impl Parser {
             self.advance();
             self.expect_op(Operator::LessThan)?;
             let inner = self.parse_type()?;
-            self.expect_op(Operator::GreaterThan)?;
+            self.expect_close_gt()?;
             return Ok(Type::Chan(Box::new(inner)));
         }
         if self.at_keyword(Keyword::Fn) {
@@ -942,6 +963,16 @@ impl Parser {
             return Ok(Type::FnPtr { params, ret });
         }
         let name = self.expect_ident()?;
+        if self.at_op(Operator::LessThan) {
+            self.advance(); // '<'
+            let mut args = Vec::new();
+            loop {
+                args.push(self.parse_type()?);
+                if !self.eat_op(Operator::Comma) { break; }
+            }
+            self.expect_close_gt()?;
+            return Ok(Type::Generic { name, args });
+        }
         Ok(Type::Named(name))
     }
 

@@ -1763,6 +1763,16 @@
           }
         ]
       }
+    },
+    "children": {
+      "multiple": false,
+      "required": false,
+      "types": [
+        {
+          "type": "type_params",
+          "named": true
+        }
+      ]
     }
   },
   {
@@ -3405,11 +3415,15 @@
     "named": true,
     "fields": {},
     "children": {
-      "multiple": false,
+      "multiple": true,
       "required": true,
       "types": [
         {
           "type": "identifier",
+          "named": true
+        },
+        {
+          "type": "type_args",
           "named": true
         }
       ]
@@ -4130,6 +4144,10 @@
         {
           "type": "struct_field",
           "named": true
+        },
+        {
+          "type": "type_params",
+          "named": true
         }
       ]
     }
@@ -4368,6 +4386,60 @@
           }
         ]
       }
+    }
+  },
+  {
+    "type": "type_args",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "borrow_mut_type",
+          "named": true
+        },
+        {
+          "type": "borrow_type",
+          "named": true
+        },
+        {
+          "type": "chan_type",
+          "named": true
+        },
+        {
+          "type": "fn_ptr_type",
+          "named": true
+        },
+        {
+          "type": "named_type",
+          "named": true
+        },
+        {
+          "type": "pointer_type",
+          "named": true
+        },
+        {
+          "type": "slice_type",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "type_params",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "identifier",
+          "named": true
+        }
+      ]
     }
   },
   {

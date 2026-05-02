@@ -1,0 +1,61 @@
+struct Vec<T> {
+    data: *T,
+    len: int,
+    cap: int,
+}
+
+fn vec_new<T>() -> *Vec<T> {
+    let v: *Vec<T> = malloc(sizeof(Vec<T>)) as *Vec<T>;
+    v.data = null;
+    v.len = 0;
+    v.cap = 0;
+    return v;
+}
+
+fn vec_push<T>(v: *Vec<T>, x: T) {
+    if v.len == v.cap {
+        let mut new_cap: int = 4;
+        if v.cap > 0 { new_cap = v.cap * 2; }
+        let new_data: *T = malloc(new_cap * sizeof(T)) as *T;
+        for let i: int = 0; i < v.len; i++ {
+            new_data[i] = v.data[i];
+        }
+        if v.cap > 0 { free(v.data as *void); }
+        v.data = new_data;
+        v.cap = new_cap;
+    }
+    v.data[v.len] = x;
+    v.len = v.len + 1;
+}
+
+fn vec_get<T>(v: *Vec<T>, i: int) -> T {
+    return v.data[i];
+}
+
+fn vec_free<T>(v: *Vec<T>) {
+    if v.cap > 0 { free(v.data as *void); }
+    free(v as *void);
+}
+
+fn main() -> int {
+    let v: *Vec<int> = vec_new();
+    vec_push(v, 10);
+    vec_push(v, 20);
+    vec_push(v, 30);
+
+    for let i: int = 0; i < v.len; i++ {
+        println!("v[", i, "] =", vec_get(v, i));
+    }
+
+    vec_free(v);
+
+    let s: *Vec<string> = vec_new();
+    vec_push(s, "hello");
+    vec_push(s, "world");
+    for let i: int = 0; i < s.len; i++ {
+        println!(vec_get(s, i));
+    }
+    vec_free(s);
+
+    return 0;
+}

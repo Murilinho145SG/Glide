@@ -1,6 +1,10 @@
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Type {
     Named(String),
+    Generic {
+        name: String,
+        args: Vec<Type>,
+    },
     Pointer(Box<Type>),
     Borrow(Box<Type>),
     BorrowMut(Box<Type>),
@@ -16,6 +20,15 @@ impl Type {
     pub fn mangle(&self) -> String {
         match self {
             Type::Named(n) => n.clone(),
+            Type::Generic { name, args } => {
+                let mut out = name.clone();
+                out.push_str("__");
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 { out.push('_'); }
+                    out.push_str(&a.mangle());
+                }
+                out
+            }
             Type::Pointer(inner) => format!("{}_ptr", inner.mangle()),
             Type::Borrow(inner) => format!("{}_ref", inner.mangle()),
             Type::BorrowMut(inner) => format!("{}_refmut", inner.mangle()),

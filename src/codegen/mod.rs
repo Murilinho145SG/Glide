@@ -67,6 +67,7 @@ impl Codegen {
                 }
                 t.clone()
             }
+            Type::Generic { .. } => Type::Named(t.mangle()),
             Type::Pointer(inner) => Type::Pointer(Box::new(self.resolve_alias(inner))),
             Type::Borrow(inner) => Type::Borrow(Box::new(self.resolve_alias(inner))),
             Type::BorrowMut(inner) => Type::BorrowMut(Box::new(self.resolve_alias(inner))),
@@ -141,7 +142,8 @@ impl Codegen {
 
         let mut any_struct = false;
         for stmt in program {
-            if let StmtKind::Struct { name, .. } = &stmt.kind {
+            if let StmtKind::Struct { name, type_params, .. } = &stmt.kind {
+                if !type_params.is_empty() { continue; }
                 self.push(&format!("typedef struct {} {};\n", name, name));
                 any_struct = true;
             }
@@ -153,7 +155,8 @@ impl Codegen {
         if any_struct { self.push("\n"); }
 
         for stmt in program {
-            if let StmtKind::Struct { name, fields, .. } = &stmt.kind {
+            if let StmtKind::Struct { name, type_params, fields } = &stmt.kind {
+                if !type_params.is_empty() { continue; }
                 self.emit_struct_def(name, fields)?;
             }
             if let StmtKind::Enum { name, variants } = &stmt.kind {
@@ -1226,6 +1229,7 @@ static void __glide_close_{m}(__glide_chan_{m}_t* c) {{
 
     fn type_to_c(&self, ty: &Type) -> String {
         match ty {
+            Type::Generic { .. } => ty.mangle(),
             Type::Named(name) => {
                 if let Some(target) = self.type_aliases.get(name) {
                     return self.type_to_c(&target.clone());
@@ -1436,6 +1440,9 @@ fn collect_in_type(ty: &Type, out: &mut std::collections::BTreeMap<String, Type>
         Type::Borrow(inner) => collect_in_type(inner, out, slices),
         Type::BorrowMut(inner) => collect_in_type(inner, out, slices),
         Type::Named(_) => {}
+        Type::Generic { args, .. } => {
+            for a in args { collect_in_type(a, out, slices); }
+        }
         Type::FnPtr { params, ret } => {
             for p in params { collect_in_type(p, out, slices); }
             if let Some(r) = ret { collect_in_type(r, out, slices); }
@@ -1504,6 +1511,7 @@ fn ty_has_chan(ty: &Type) -> bool {
         Type::BorrowMut(inner) => ty_has_chan(inner),
         Type::Slice(inner) => ty_has_chan(inner),
         Type::Named(_) => false,
+        Type::Generic { args, .. } => args.iter().any(ty_has_chan),
         Type::FnPtr { params, ret } => {
             params.iter().any(ty_has_chan)
                 || ret.as_ref().map_or(false, |r| ty_has_chan(r))

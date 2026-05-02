@@ -725,6 +725,10 @@ fn stmt_last_line(s: &Stmt) -> usize {
 fn format_type(ty: &Type) -> String {
     match ty {
         Type::Named(n) => n.clone(),
+        Type::Generic { name, args } => {
+            let a = args.iter().map(format_type).collect::<Vec<_>>().join(", ");
+            format!("{}<{}>", name, a)
+        }
         Type::Pointer(inner) => format!("*{}", format_type(inner)),
         Type::Borrow(inner) => format!("&{}", format_type(inner)),
         Type::BorrowMut(inner) => format!("&mut {}", format_type(inner)),

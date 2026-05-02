@@ -924,6 +924,7 @@ fn struct_from_type(ty: &Type) -> Option<String> {
         Type::BorrowMut(inner) => struct_from_type(inner),
         Type::Chan(_) => None,
         Type::Slice(_) => None,
+        Type::Generic { name, .. } => Some(name.clone()),
         Type::FnPtr { .. } => None,
     }
 }
@@ -936,6 +937,7 @@ fn method_type_prefix_for_completion(ty: &Type) -> Option<String> {
         Type::BorrowMut(inner) => method_type_prefix_for_completion(inner),
         Type::Chan(_) => Some("chan".into()),
         Type::Slice(_) => Some("slice".into()),
+        Type::Generic { name, .. } => Some(name.clone()),
         Type::FnPtr { .. } => None,
     }
 }

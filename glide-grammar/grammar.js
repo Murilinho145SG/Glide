@@ -96,10 +96,13 @@ module.exports = grammar({
       optional('pub'),
       'fn',
       field('name', $.identifier),
+      optional($.type_params),
       field('params', $.param_list),
       optional(seq('->', field('return_type', $._type))),
       field('body', $.block),
     ),
+
+    type_params: $ => seq('<', $.identifier, repeat(seq(',', $.identifier)), '>'),
 
     extern_fn: $ => seq(
       'extern',
@@ -149,6 +152,7 @@ module.exports = grammar({
       optional('pub'),
       'struct',
       field('name', $.identifier),
+      optional($.type_params),
       '{',
       optional(seq(
         $.struct_field,
@@ -330,7 +334,12 @@ module.exports = grammar({
       $.fn_ptr_type,
     ),
 
-    named_type:      $ => $.identifier,
+    named_type:      $ => prec.right(seq(
+      $.identifier,
+      optional($.type_args),
+    )),
+
+    type_args: $ => prec.right(seq('<', $._type, repeat(seq(',', $._type)), '>')),
     pointer_type:    $ => seq('*', $._type),
     borrow_type:     $ => prec.right(seq('&', $._type)),
     borrow_mut_type: $ => prec.right(seq('&', 'mut', $._type)),
