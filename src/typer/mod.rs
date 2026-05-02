@@ -175,6 +175,11 @@ impl Typer {
             ("read_file",   vec![synth_param("path", string_ty())],           Some(string_ty()),   "fn read_file(path: string) -> string"),
             ("write_file",  vec![synth_param("path", string_ty()), synth_param("content", string_ty())], Some(bool_ty()), "fn write_file(path: string, content: string) -> bool"),
             ("file_exists", vec![synth_param("path", string_ty())],           Some(bool_ty()),     "fn file_exists(path: string) -> bool"),
+            ("arena_new",   vec![synth_param("cap", int_ty())],                                          Some(Type::Pointer(Box::new(void_ty()))), "fn arena_new(cap: int) -> *void"),
+            ("arena_alloc", vec![synth_param("a", Type::Pointer(Box::new(void_ty()))), synth_param("size", int_ty())], Some(Type::Pointer(Box::new(void_ty()))), "fn arena_alloc(a: *void, size: int) -> *void"),
+            ("arena_free",  vec![synth_param("a", Type::Pointer(Box::new(void_ty())))],                  None,                                    "fn arena_free(a: *void)"),
+            ("arena_used",  vec![synth_param("a", Type::Pointer(Box::new(void_ty())))],                  Some(int_ty()),                          "fn arena_used(a: *void) -> int"),
+            ("arena_reset", vec![synth_param("a", Type::Pointer(Box::new(void_ty())))],                  None,                                    "fn arena_reset(a: *void)"),
         ];
         for (name, params, ret, detail) in entries {
             self.fns.insert(name.into(), FnSig {

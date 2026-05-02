@@ -1,0 +1,31 @@
+struct Point {
+    x: int,
+    y: int,
+}
+
+fn build_polygon(arena: *void, n: int) -> *void {
+    let first: *Point = arena_alloc(arena, sizeof(Point)) as *Point;
+    *first = Point { x: 0, y: 0 };
+
+    for let i: int = 1; i < n; i++ {
+        let p: *Point = arena_alloc(arena, sizeof(Point)) as *Point;
+        *p = Point { x: i, y: i * i };
+    }
+
+    return first as *void;
+}
+
+fn main() -> int {
+    let arena: *void = arena_new(4096);
+    defer arena_free(arena);
+
+    println!("before:", arena_used(arena), "bytes used");
+
+    let _ = build_polygon(arena, 100);
+    println!("after polygon:", arena_used(arena), "bytes used");
+
+    arena_reset(arena);
+    println!("after reset:", arena_used(arena), "bytes used");
+
+    return 0;
+}

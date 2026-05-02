@@ -1466,4 +1466,47 @@ static bool file_exists(const char* path) {
     fclose(f);
     return true;
 }
+
+typedef struct __glide_arena {
+    unsigned char* head;
+    int            cap;
+    int            used;
+} __glide_arena;
+
+static void* arena_new(int cap) {
+    __glide_arena* a = (__glide_arena*)malloc(sizeof(__glide_arena));
+    a->head = (unsigned char*)malloc((size_t)cap);
+    a->cap  = cap;
+    a->used = 0;
+    return (void*)a;
+}
+
+static void* arena_alloc(void* arena, int size) {
+    __glide_arena* a = (__glide_arena*)arena;
+    int aligned = (size + 7) & ~7;
+    if (a->used + aligned > a->cap) {
+        fprintf(stderr, "arena out of memory: requested %d, %d/%d used\n",
+            aligned, a->used, a->cap);
+        exit(1);
+    }
+    void* p = (void*)(a->head + a->used);
+    a->used += aligned;
+    return p;
+}
+
+static void arena_free(void* arena) {
+    __glide_arena* a = (__glide_arena*)arena;
+    free(a->head);
+    free(a);
+}
+
+static int arena_used(void* arena) {
+    __glide_arena* a = (__glide_arena*)arena;
+    return a->used;
+}
+
+static void arena_reset(void* arena) {
+    __glide_arena* a = (__glide_arena*)arena;
+    a->used = 0;
+}
 "#;
