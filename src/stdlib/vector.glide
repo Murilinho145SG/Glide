@@ -1,0 +1,71 @@
+// Vector<T>: growable owning array. Calls libc malloc/free directly.
+
+struct Vector<T> {
+    data: *T,
+    len: int,
+    cap: int,
+}
+
+impl<T> Vector<T> {
+    fn new() -> *Vector<T> {
+        let v: *Vector<T> = malloc(sizeof(Vector<T>)) as *Vector<T>;
+        v.data = null;
+        v.len = 0;
+        v.cap = 0;
+        return v;
+    }
+
+    fn with_cap(cap: int) -> *Vector<T> {
+        let v: *Vector<T> = malloc(sizeof(Vector<T>)) as *Vector<T>;
+        v.data = null;
+        v.len = 0;
+        v.cap = 0;
+        if cap > 0 {
+            v.data = malloc(cap * sizeof(T)) as *T;
+            v.cap = cap;
+        }
+        return v;
+    }
+
+    fn push(self: *Vector<T>, x: T) {
+        if self.len == self.cap {
+            let mut new_cap: int = 4;
+            if self.cap > 0 { new_cap = self.cap * 2; }
+            let new_data: *T = malloc(new_cap * sizeof(T)) as *T;
+            for let i: int = 0; i < self.len; i++ {
+                new_data[i] = self.data[i];
+            }
+            if self.cap > 0 { free(self.data as *void); }
+            self.data = new_data;
+            self.cap = new_cap;
+        }
+        self.data[self.len] = x;
+        self.len = self.len + 1;
+    }
+
+    fn pop(self: *Vector<T>) -> T {
+        self.len = self.len - 1;
+        return self.data[self.len];
+    }
+
+    fn get(self: *Vector<T>, i: int) -> T {
+        return self.data[i];
+    }
+
+    fn set(self: *Vector<T>, i: int, x: T) {
+        self.data[i] = x;
+    }
+
+    fn len(self: *Vector<T>) -> int {
+        return self.len;
+    }
+
+    fn clear(self: *Vector<T>) {
+        self.len = 0;
+    }
+
+    fn free(self: *Vector<T>) {
+        if self.cap > 0 { free(self.data as *void); }
+        free(self as *void);
+    }
+}

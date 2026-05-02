@@ -7,4 +7,5 @@ pub mod codegen;
 pub mod diagnostics;
 pub mod fmt;
 pub mod lsp;
+pub mod stdlib;
 

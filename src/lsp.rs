@@ -335,7 +335,7 @@ fn analyze(source: &str, base_dir: Option<&Path>) -> Analysis {
                     preload_module(&path, Some(module_name), &mut loaded, &mut typer);
                 }
             }
-            let (_, index) = typer.check(Vec::new());
+            let (_, index) = typer.check(crate::stdlib::prelude());
             return Analysis {
                 diagnostics: vec![make_diagnostic(e.line, e.column, &e.message)],
                 program: None,
@@ -343,7 +343,11 @@ fn analyze(source: &str, base_dir: Option<&Path>) -> Analysis {
                 imported_modules,
             };
         }
-        Ok(p) => p,
+        Ok(p) => {
+            let mut full = crate::stdlib::prelude();
+            full.extend(p);
+            full
+        }
     };
 
     let mut typer = Typer::new();

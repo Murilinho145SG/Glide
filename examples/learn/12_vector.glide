@@ -1,43 +1,5 @@
-struct Vector<T> {
-    data: *T,
-    len: int,
-    cap: int,
-}
-
-impl<T> Vector<T> {
-    fn new() -> *Vector<T> {
-        let v: *Vector<T> = malloc(sizeof(Vector<T>)) as *Vector<T>;
-        v.data = null;
-        v.len = 0;
-        v.cap = 0;
-        return v;
-    }
-
-    fn push(self: *Vector<T>, x: T) {
-        if self.len == self.cap {
-            let mut new_cap: int = 4;
-            if self.cap > 0 { new_cap = self.cap * 2; }
-            let new_data: *T = malloc(new_cap * sizeof(T)) as *T;
-            for let i: int = 0; i < self.len; i++ {
-                new_data[i] = self.data[i];
-            }
-            if self.cap > 0 { free(self.data as *void); }
-            self.data = new_data;
-            self.cap = new_cap;
-        }
-        self.data[self.len] = x;
-        self.len = self.len + 1;
-    }
-
-    fn get(self: *Vector<T>, i: int) -> T {
-        return self.data[i];
-    }
-
-    fn free(self: *Vector<T>) {
-        if self.cap > 0 { free(self.data as *void); }
-        free(self as *void);
-    }
-}
+// `Vector<T>` is a growable owning array, available from stdlib.
+// No declaration or import needed.
 
 fn main() -> int {
     let v: *Vector<int> = Vector::new();
@@ -45,15 +7,22 @@ fn main() -> int {
     v.push(20);
     v.push(30);
 
-    for let i: int = 0; i < v.len; i++ {
+    for let i: int = 0; i < v.len(); i++ {
         println!("v[", i, "] =", v.get(i));
     }
+
+    v.set(0, 99);
+    println!("after set: v[0] =", v.get(0));
+
+    let last: int = v.pop();
+    println!("popped =", last, "new len =", v.len());
+
     v.free();
 
     let s: *Vector<string> = Vector::new();
     s.push("hello");
     s.push("world");
-    for let i: int = 0; i < s.len; i++ {
+    for let i: int = 0; i < s.len(); i++ {
         println!(s.get(i));
     }
     s.free();

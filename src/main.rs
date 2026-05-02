@@ -131,7 +131,10 @@ fn parse_o_flag(argv: &[String]) -> Option<String> {
 
 fn compile_to_c(filename: &str) -> EmitResult {
     let mut loaded = HashSet::new();
-    let program = load_program_with_origin(Path::new(filename), &mut loaded, true);
+    let user_program = load_program_with_origin(Path::new(filename), &mut loaded, true);
+
+    let mut program = glide::stdlib::prelude();
+    program.extend(user_program);
 
     let typer = Typer::new();
     let (result, _index) = typer.check(program);
