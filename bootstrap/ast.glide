@@ -173,6 +173,9 @@ pub struct Stmt {
     kind: int,
     line: int,
     column: int,
+    name_line: int,            // position of the declared name (fn/struct/enum/const/let)
+    name_col: int,
+    name_len: int,
     is_pub: bool,
     origin: string,            // file path; set by load_into_str on top-level stmts
     doc_comment: string,       // contiguous `//` block above the decl (LSP hover)

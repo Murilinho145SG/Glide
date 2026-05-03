@@ -894,7 +894,7 @@ fn check_unused_in_body(t: *Typer, body: *Vector<Stmt>) {
                 if stmt_uses_name(&s2, name) { used = true; break; }
             }
             if !used {
-                t.warn_unused(s.line, s.column, "unused-var",
+                t.warn_unused_range(s.name_line, s.name_col, s.name_len, "unused-var",
                     "unused local `".concat(name).concat("` (prefix with `_` to silence)"));
             }
         }
@@ -1126,7 +1126,7 @@ pub fn analysis_unused_fn(t: *Typer, program: *Vector<Stmt>) {
         if s.type_params != null && s.type_params.len() > 0 { continue; }   // generic, may be referenced indirectly
         if called.contains(s.name) { continue; }
         t.current_origin = s.origin;
-        t.warn_unused(s.line, s.column, "unused-fn",
+        t.warn_unused_range(s.name_line, s.name_col, s.name_len, "unused-fn",
             "function `".concat(s.name).concat("` is never called"));
     }
     called.free();
@@ -1210,7 +1210,7 @@ fn check_mut_body(t: *Typer, body: *Vector<Stmt>) {
                 if stmt_reassigns(&s2, s.name) { reassigned = true; break; }
             }
             if !reassigned {
-                t.warn(s.line, s.column, "unnecessary-mut",
+                t.warn(s.name_line, s.name_col, "unnecessary-mut",
                     "`mut` on `".concat(s.name).concat("` is unnecessary; binding is never reassigned"));
             }
         }
@@ -1347,7 +1347,10 @@ fn check_unused_params_fn(t: *Typer, fnstmt: *Stmt) {
         }
         if !used {
             t.current_origin = fnstmt.origin;
-            t.warn_unused(fnstmt.line, fnstmt.column, "unused-param",
+            // Param positions aren't tracked individually yet; aim at the fn
+            // name (close enough that the editor still surfaces the warning
+            // on the right declaration).
+            t.warn_unused_range(fnstmt.name_line, fnstmt.name_col, fnstmt.name_len, "unused-param",
                 "parameter `".concat(p.name).concat("` of `")
                 .concat(fnstmt.name).concat("` is never used (prefix with `_` to silence)"));
         }

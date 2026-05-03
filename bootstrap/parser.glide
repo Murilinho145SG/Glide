@@ -133,6 +133,9 @@ fn parse_fn(p: *Parser) -> *Stmt {
     let col: int = p.current.column;
     p.advance(); // 'fn'
 
+    let nline: int = p.current.line;
+    let ncol: int = p.current.column;
+    let nlen: int = p.current.lexeme.len();
     let name: string = p.expect_ident();
 
     // Optional generic params <T, U>
@@ -156,13 +159,13 @@ fn parse_fn(p: *Parser) -> *Stmt {
     // Bodyless form: `fn name(args) -> ret;` (used after `extern`).
     if p.eat_op(";") {
         let s: *Stmt = stmt_fn(name, params, ret_ty, null, line, col);
-        if s != null { s.type_params = tps; }
+        if s != null { s.type_params = tps; s.name_line = nline; s.name_col = ncol; s.name_len = nlen; }
         return s;
     }
 
     let body: *Vector<Stmt> = parse_block(p);
     let s: *Stmt = stmt_fn(name, params, ret_ty, body, line, col);
-    if s != null { s.type_params = tps; }
+    if s != null { s.type_params = tps; s.name_line = nline; s.name_col = ncol; s.name_len = nlen; }
     return s;
 }
 
@@ -190,6 +193,9 @@ fn parse_struct(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
     p.advance(); // 'struct'
+    let nline: int = p.current.line;
+    let ncol: int = p.current.column;
+    let nlen: int = p.current.lexeme.len();
     let name: string = p.expect_ident();
     let tps: *Vector<string> = parse_type_params(p);
     p.expect_op("{");
@@ -204,7 +210,7 @@ fn parse_struct(p: *Parser) -> *Stmt {
     }
     p.expect_op("}");
     let s: *Stmt = stmt_struct(name, fields, line, col);
-    if s != null { s.type_params = tps; }
+    if s != null { s.type_params = tps; s.name_line = nline; s.name_col = ncol; s.name_len = nlen; }
     return s;
 }
 
@@ -212,6 +218,9 @@ fn parse_enum(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
     p.advance(); // 'enum'
+    let nline: int = p.current.line;
+    let ncol: int = p.current.column;
+    let nlen: int = p.current.lexeme.len();
     let name: string = p.expect_ident();
     if p.at_op("<") { skip_type_params(p); }
     p.expect_op("{");
@@ -232,7 +241,9 @@ fn parse_enum(p: *Parser) -> *Stmt {
         if !p.eat_op(",") { break; }
     }
     p.expect_op("}");
-    return stmt_enum(name, variants, line, col);
+    let s: *Stmt = stmt_enum(name, variants, line, col);
+    if s != null { s.name_line = nline; s.name_col = ncol; s.name_len = nlen; }
+    return s;
 }
 
 fn parse_impl(p: *Parser) -> *Stmt {
@@ -368,6 +379,9 @@ fn parse_let(p: *Parser) -> *Stmt {
     p.advance(); // 'let'
     let mut is_mut: bool = false;
     if p.eat_kw("mut") { is_mut = true; }
+    let nline: int = p.current.line;
+    let ncol: int = p.current.column;
+    let nlen: int = p.current.lexeme.len();
     let name: string = p.expect_ident();
     // Postfix `*` on the binding: explicit auto-drop ownership marker.
     let mut is_auto_owned: bool = false;
@@ -379,6 +393,7 @@ fn parse_let(p: *Parser) -> *Stmt {
     p.expect_op(";");
     let s: *Stmt = stmt_let(name, ty, value, is_mut, line, col);
     s.is_auto_owned = is_auto_owned;
+    s.name_line = nline; s.name_col = ncol; s.name_len = nlen;
     return s;
 }
 
@@ -386,13 +401,18 @@ fn parse_const(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
     p.advance(); // 'const'
+    let nline: int = p.current.line;
+    let ncol: int = p.current.column;
+    let nlen: int = p.current.lexeme.len();
     let name: string = p.expect_ident();
     let mut ty: *Type = null;
     if p.eat_op(":") { ty = parse_type(p); }
     p.expect_op("=");
     let value: *Expr = parse_expr(p, 0);
     p.expect_op(";");
-    return stmt_const(name, ty, value, line, col);
+    let s: *Stmt = stmt_const(name, ty, value, line, col);
+    if s != null { s.name_line = nline; s.name_col = ncol; s.name_len = nlen; }
+    return s;
 }
 
 fn parse_return(p: *Parser) -> *Stmt {

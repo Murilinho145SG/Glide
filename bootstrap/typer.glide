@@ -178,6 +178,24 @@ impl Typer {
         self.push_diag_tag(line, col, 2, code, msg, 1);  // tag 1 = Unnecessary
     }
 
+    // Same as warn_unused but with explicit end-column so the editor's
+    // fade / strikethrough effect spans the whole identifier instead of a
+    // single character. Pass the position of the name and its length.
+    fn warn_unused_range(self: *Typer, line: int, col: int, len: int, code: string, msg: string) {
+        let mut origin: string = self.current_origin;
+        if origin == null { origin = ""; }
+        let mut e_len: int = len;
+        if e_len < 1 { e_len = 1; }
+        let e: DiagEntry = DiagEntry {
+            line: line, col: col,
+            end_line: line, end_col: col + e_len,
+            severity: 2, code: code, message: msg,
+            origin: origin,
+            tag: 1,
+        };
+        self.diagnostics.push(e);
+    }
+
     fn err(self: *Typer, line: int, col: int, msg: string) {
         self.push_diag(line, col, 1, "", msg);
         self.error_count = self.error_count + 1;

@@ -434,6 +434,9 @@ typedef struct  Stmt  {
      int   kind;
      int   line;
      int   column;
+     int   name_line;
+     int   name_col;
+     int   name_len;
      bool   is_pub;
      const char*   origin;
      const char*   doc_comment;
@@ -2041,6 +2044,9 @@ Stmt*   parse_fn (Parser*   p) {
     int   line = ((p-> current ). line );
     int   col = ((p-> current ). column );
     Parser_advance(p);
+    int   nline = ((p-> current ). line );
+    int   ncol = ((p-> current ). column );
+    int   nlen = __glide_string_len(((p-> current ). lexeme ));
     const char*   name = Parser_expect_ident(p);
     Vector__string*   tps = parse_type_params(p);
     Parser_expect_op(p, "(");
@@ -2064,6 +2070,9 @@ Stmt*   parse_fn (Parser*   p) {
         Stmt*   s = stmt_fn(name, params, ret_ty, NULL, line, col);
         if ((s  !=  NULL)) {
             ((s-> type_params )  =  tps);
+            ((s-> name_line )  =  nline);
+            ((s-> name_col )  =  ncol);
+            ((s-> name_len )  =  nlen);
         }
         return s;
     }
@@ -2071,6 +2080,9 @@ Stmt*   parse_fn (Parser*   p) {
     Stmt*   s = stmt_fn(name, params, ret_ty, body, line, col);
     if ((s  !=  NULL)) {
         ((s-> type_params )  =  tps);
+        ((s-> name_line )  =  nline);
+        ((s-> name_col )  =  ncol);
+        ((s-> name_len )  =  nlen);
     }
     return s;
 }
@@ -2103,6 +2115,9 @@ Stmt*   parse_struct (Parser*   p) {
     int   line = ((p-> current ). line );
     int   col = ((p-> current ). column );
     Parser_advance(p);
+    int   nline = ((p-> current ). line );
+    int   ncol = ((p-> current ). column );
+    int   nlen = __glide_string_len(((p-> current ). lexeme ));
     const char*   name = Parser_expect_ident(p);
     Vector__string*   tps = parse_type_params(p);
     Parser_expect_op(p, "{");
@@ -2121,6 +2136,9 @@ Stmt*   parse_struct (Parser*   p) {
     Stmt*   s = stmt_struct(name, fields, line, col);
     if ((s  !=  NULL)) {
         ((s-> type_params )  =  tps);
+        ((s-> name_line )  =  nline);
+        ((s-> name_col )  =  ncol);
+        ((s-> name_len )  =  nlen);
     }
     return s;
 }
@@ -2129,6 +2147,9 @@ Stmt*   parse_enum (Parser*   p) {
     int   line = ((p-> current ). line );
     int   col = ((p-> current ). column );
     Parser_advance(p);
+    int   nline = ((p-> current ). line );
+    int   ncol = ((p-> current ). column );
+    int   nlen = __glide_string_len(((p-> current ). lexeme ));
     const char*   name = Parser_expect_ident(p);
     if (Parser_at_op(p, "<")) {
         skip_type_params(p);
@@ -2157,7 +2178,13 @@ Stmt*   parse_enum (Parser*   p) {
         }
     }
     Parser_expect_op(p, "}");
-    return stmt_enum(name, variants, line, col);
+    Stmt*   s = stmt_enum(name, variants, line, col);
+    if ((s  !=  NULL)) {
+        ((s-> name_line )  =  nline);
+        ((s-> name_col )  =  ncol);
+        ((s-> name_len )  =  nlen);
+    }
+    return s;
 }
 
 Stmt*   parse_impl (Parser*   p) {
@@ -2337,6 +2364,9 @@ Stmt*   parse_let (Parser*   p) {
     if (Parser_eat_kw(p, "mut")) {
         (is_mut  =  true);
     }
+    int   nline = ((p-> current ). line );
+    int   ncol = ((p-> current ). column );
+    int   nlen = __glide_string_len(((p-> current ). lexeme ));
     const char*   name = Parser_expect_ident(p);
     bool   is_auto_owned = false;
     if (Parser_eat_op(p, "*")) {
@@ -2353,6 +2383,9 @@ Stmt*   parse_let (Parser*   p) {
     Parser_expect_op(p, ";");
     Stmt*   s = stmt_let(name, ty, value, is_mut, line, col);
     ((s-> is_auto_owned )  =  is_auto_owned);
+    ((s-> name_line )  =  nline);
+    ((s-> name_col )  =  ncol);
+    ((s-> name_len )  =  nlen);
     return s;
 }
 
@@ -2360,6 +2393,9 @@ Stmt*   parse_const (Parser*   p) {
     int   line = ((p-> current ). line );
     int   col = ((p-> current ). column );
     Parser_advance(p);
+    int   nline = ((p-> current ). line );
+    int   ncol = ((p-> current ). column );
+    int   nlen = __glide_string_len(((p-> current ). lexeme ));
     const char*   name = Parser_expect_ident(p);
     Type*   ty = NULL;
     if (Parser_eat_op(p, ":")) {
@@ -2368,7 +2404,13 @@ Stmt*   parse_const (Parser*   p) {
     Parser_expect_op(p, "=");
     Expr*   value = parse_expr(p, 0);
     Parser_expect_op(p, ";");
-    return stmt_const(name, ty, value, line, col);
+    Stmt*   s = stmt_const(name, ty, value, line, col);
+    if ((s  !=  NULL)) {
+        ((s-> name_line )  =  nline);
+        ((s-> name_col )  =  ncol);
+        ((s-> name_len )  =  nlen);
+    }
+    return s;
 }
 
 Stmt*   parse_return (Parser*   p) {
@@ -3180,6 +3222,19 @@ void   Typer_push_diag (Typer*   self, int   line, int   col, int   severity, co
 
 void   Typer_warn_unused (Typer*   self, int   line, int   col, const char*   code, const char*   msg) {
     Typer_push_diag_tag(self, line, col, 2, code, msg, 1);
+}
+
+void   Typer_warn_unused_range (Typer*   self, int   line, int   col, int   len, const char*   code, const char*   msg) {
+    const char*   origin = (self-> current_origin );
+    if ((origin  ==  NULL)) {
+        (origin  =  "");
+    }
+    int   e_len = len;
+    if ((e_len  <  1)) {
+        (e_len  =  1);
+    }
+    DiagEntry   e = (( DiagEntry ){. line  = line, . col  = col, . end_line  = line, . end_col  = (col  +  e_len), . severity  = 2, . code  = code, . message  = msg, . origin  = origin, . tag  = 1});
+    Vector_push__DiagEntry((self-> diagnostics ), e);
 }
 
 void   Typer_err (Typer*   self, int   line, int   col, const char*   msg) {
@@ -9216,7 +9271,7 @@ void   check_unused_in_body (Typer*   t, Vector__Stmt*   body) {
                 }
             }
             if ((!used)) {
-                Typer_warn_unused(t, (s. line ), (s. column ), "unused-var", __glide_string_concat(__glide_string_concat("unused local `", name), "` (prefix with `_` to silence)"));
+                Typer_warn_unused_range(t, (s. name_line ), (s. name_col ), (s. name_len ), "unused-var", __glide_string_concat(__glide_string_concat("unused local `", name), "` (prefix with `_` to silence)"));
             }
         }
         if (((s. then_body )  !=  NULL)) {
@@ -9512,7 +9567,7 @@ void   analysis_unused_fn (Typer*   t, Vector__Stmt*   program) {
             continue;
         }
         ((t-> current_origin )  =  (s. origin ));
-        Typer_warn_unused(t, (s. line ), (s. column ), "unused-fn", __glide_string_concat(__glide_string_concat("function `", (s. name )), "` is never called"));
+        Typer_warn_unused_range(t, (s. name_line ), (s. name_col ), (s. name_len ), "unused-fn", __glide_string_concat(__glide_string_concat("function `", (s. name )), "` is never called"));
     }
     HashMap_free__bool(called);
 }
@@ -9623,7 +9678,7 @@ void   check_mut_body (Typer*   t, Vector__Stmt*   body) {
                 }
             }
             if ((!reassigned)) {
-                Typer_warn(t, (s. line ), (s. column ), "unnecessary-mut", __glide_string_concat(__glide_string_concat("`mut` on `", (s. name )), "` is unnecessary; binding is never reassigned"));
+                Typer_warn(t, (s. name_line ), (s. name_col ), "unnecessary-mut", __glide_string_concat(__glide_string_concat("`mut` on `", (s. name )), "` is unnecessary; binding is never reassigned"));
             }
         }
         if (((s. then_body )  !=  NULL)) {
@@ -9814,7 +9869,7 @@ void   check_unused_params_fn (Typer*   t, Stmt*   fnstmt) {
         }
         if ((!used)) {
             ((t-> current_origin )  =  (fnstmt-> origin ));
-            Typer_warn_unused(t, (fnstmt-> line ), (fnstmt-> column ), "unused-param", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("parameter `", (p. name )), "` of `"), (fnstmt-> name )), "` is never used (prefix with `_` to silence)"));
+            Typer_warn_unused_range(t, (fnstmt-> name_line ), (fnstmt-> name_col ), (fnstmt-> name_len ), "unused-param", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("parameter `", (p. name )), "` of `"), (fnstmt-> name )), "` is never used (prefix with `_` to silence)"));
         }
     }
 }
