@@ -329,12 +329,33 @@ fn fn_signature(s: *Stmt) -> string {
     return sig;
 }
 
+// Render a `macro name!($x:expr, $($y:expr),*)` signature for hover/completion.
+fn macro_signature(s: *Stmt) -> string {
+    let mut sig: string = "macro ".concat(s.name).concat("!(");
+    if s.macro_params != null {
+        for let i: int = 0; i < s.macro_params.len(); i++ {
+            if i > 0 { sig = sig.concat(", "); }
+            let mp: MacroParam = s.macro_params.get(i);
+            if mp.is_variadic {
+                let mut sep: string = ",";
+                if !mp.separator.eq("") { sep = mp.separator; }
+                sig = sig.concat("$(").concat("$").concat(mp.name).concat(":expr)").concat(sep).concat("*");
+            } else {
+                sig = sig.concat("$").concat(mp.name).concat(":expr");
+            }
+        }
+    }
+    sig = sig.concat(")");
+    return sig;
+}
+
 // Walk top-level looking for a name match. Returns the declaring stmt or null.
 fn find_top_decl(stmts: *Vector<Stmt>, name: string) -> *Stmt {
     if stmts == null { return null; }
     for let i: int = 0; i < stmts.len(); i++ {
         let s: Stmt = stmts.get(i);
-        if (s.kind == ST_FN || s.kind == ST_STRUCT || s.kind == ST_ENUM || s.kind == ST_CONST)
+        if (s.kind == ST_FN || s.kind == ST_STRUCT || s.kind == ST_ENUM
+            || s.kind == ST_CONST || s.kind == ST_MACRO_DEF)
            && s.name.eq(name) {
             let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
             *p = s;
@@ -342,6 +363,107 @@ fn find_top_decl(stmts: *Vector<Stmt>, name: string) -> *Stmt {
         }
     }
     return null;
+}
+
+// Find any impl-scoped macro by name. Mirrors `find_method_anywhere` for fns.
+fn find_macro_in_impl_anywhere(stmts: *Vector<Stmt>, name: string) -> ImplMethodHit {
+    let miss: ImplMethodHit = ImplMethodHit { method: null, owner: "" };
+    if stmts == null { return miss; }
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if s.kind != ST_IMPL || s.impl_methods == null { continue; }
+        let mut tname: string = "";
+        if s.impl_target != null {
+            if s.impl_target.kind == TY_NAMED { tname = s.impl_target.name; }
+            if s.impl_target.kind == TY_GENERIC { tname = s.impl_target.name; }
+        }
+        for let j: int = 0; j < s.impl_methods.len(); j++ {
+            let m: Stmt = s.impl_methods.get(j);
+            if m.kind != ST_MACRO_DEF { continue; }
+            if !m.name.eq(name) { continue; }
+            let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+            *p = m;
+            if (p.origin == null || p.origin.eq("")) && s.origin != null {
+                p.origin = s.origin;
+            }
+            let hit: ImplMethodHit = ImplMethodHit { method: p, owner: tname };
+            return hit;
+        }
+    }
+    return miss;
+}
+
+// Description for the language-builtin macros. Returns "" for unknown names.
+fn builtin_macro_doc(name: string) -> string {
+    if name.eq("println") {
+        return "```glide\nmacro println!(...)\n```\n\n---\n\nPrint the args separated by spaces, terminated with a newline. Format spec is inferred per arg type.";
+    }
+    if name.eq("print") {
+        return "```glide\nmacro print!(...)\n```\n\n---\n\nLike `println!` but without a trailing newline.";
+    }
+    if name.eq("format") {
+        return "```glide\nmacro format!(\"fmt\", args...)\n```\n\n---\n\nReturn a formatted string. `{}` placeholders take the corresponding arg.";
+    }
+    return "";
+}
+
+// Scan every `impl Type { ... }` block for a method whose name matches; return
+// the first hit. Used by hover when the user points at an impl-method name and
+// we don't have a receiver type to disambiguate.
+pub struct ImplMethodHit {
+    method: *Stmt,
+    owner: string,
+}
+
+fn find_method_anywhere(stmts: *Vector<Stmt>, method_name: string) -> ImplMethodHit {
+    let miss: ImplMethodHit = ImplMethodHit { method: null, owner: "" };
+    if stmts == null { return miss; }
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if s.kind != ST_IMPL || s.impl_methods == null { continue; }
+        let mut tname: string = "";
+        if s.impl_target != null {
+            if s.impl_target.kind == TY_NAMED { tname = s.impl_target.name; }
+            if s.impl_target.kind == TY_GENERIC { tname = s.impl_target.name; }
+        }
+        for let j: int = 0; j < s.impl_methods.len(); j++ {
+            let m: Stmt = s.impl_methods.get(j);
+            if m.kind != ST_FN { continue; }
+            if !m.name.eq(method_name) { continue; }
+            let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+            *p = m;
+            if (p.origin == null || p.origin.eq("")) && s.origin != null {
+                p.origin = s.origin;
+            }
+            let hit: ImplMethodHit = ImplMethodHit { method: p, owner: tname };
+            return hit;
+        }
+    }
+    return miss;
+}
+
+// Result of `find_field_anywhere`: the parent struct's name + the field def.
+pub struct FieldHit {
+    owner: string,
+    name: string,
+    ty: *Type,
+    doc: string,
+}
+
+fn find_field_anywhere(stmts: *Vector<Stmt>, field_name: string) -> FieldHit {
+    let miss: FieldHit = FieldHit { owner: "", name: "", ty: null, doc: "" };
+    if stmts == null { return miss; }
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if s.kind != ST_STRUCT || s.struct_fields == null { continue; }
+        for let j: int = 0; j < s.struct_fields.len(); j++ {
+            let f: Field = s.struct_fields.get(j);
+            if !f.name.eq(field_name) { continue; }
+            let hit: FieldHit = FieldHit { owner: s.name, name: f.name, ty: f.ty, doc: f.doc };
+            return hit;
+        }
+    }
+    return miss;
 }
 
 // Search inside `impl Type { ... }` blocks for a method by name. The returned
@@ -360,7 +482,7 @@ fn find_method_in_impl(stmts: *Vector<Stmt>, type_name: string, method_name: str
         if s.impl_methods == null { continue; }
         for let j: int = 0; j < s.impl_methods.len(); j++ {
             let m: Stmt = s.impl_methods.get(j);
-            if m.kind == ST_FN && m.name.eq(method_name) {
+            if (m.kind == ST_FN || m.kind == ST_MACRO_DEF) && m.name.eq(method_name) {
                 let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
                 *p = m;
                 if (p.origin == null || p.origin.eq("")) && s.origin != null {
@@ -632,6 +754,9 @@ fn handle_hover(req: *JsonValue, state: *LspState) {
             if decl.let_ty != null { content = content.concat(": ").concat(type_to_string_pretty(decl.let_ty)); }
             content = content.concat("\n```");
         }
+        else if decl.kind == ST_MACRO_DEF {
+            content = "```glide\n".concat(macro_signature(decl)).concat("\n```");
+        }
         // Append the decl's doc comment (the contiguous `//` block above it).
         if !content.eq("") && decl.doc_comment != null && !decl.doc_comment.eq("") {
             content = content.concat("\n\n---\n\n").concat(decl.doc_comment);
@@ -661,6 +786,63 @@ fn handle_hover(req: *JsonValue, state: *LspState) {
                 }
             }
         }
+    }
+
+    // Impl method: hover on a method name in either the decl site or a call
+    // (`v.push(x)` or `Type::push(...)`). First match across all impl blocks.
+    if content.eq("") {
+        let mhit: ImplMethodHit = find_method_anywhere(doc.stmts, word);
+        if mhit.method != null {
+            let m: *Stmt = mhit.method;
+            let mut sig: string = fn_signature(m);
+            if !mhit.owner.eq("") {
+                sig = "impl ".concat(mhit.owner).concat("\n").concat(sig);
+            }
+            content = "```glide\n".concat(sig).concat("\n```");
+            if m.doc_comment != null && !m.doc_comment.eq("") {
+                content = content.concat("\n\n---\n\n").concat(m.doc_comment);
+            }
+        }
+    }
+
+    // Struct field: hover on a field name (decl site or `obj.field` access).
+    // Linear scan; first matching field wins. With named-collision across
+    // structs the user may need to point at the receiver instead.
+    if content.eq("") {
+        let fhit: FieldHit = find_field_anywhere(doc.stmts, word);
+        if !fhit.name.eq("") {
+            let mut sig: string = fhit.owner.concat(".").concat(fhit.name);
+            if fhit.ty != null {
+                sig = sig.concat(": ").concat(type_to_string_pretty(fhit.ty));
+            }
+            content = "```glide\n".concat(sig).concat("\n```");
+            if fhit.doc != null && !fhit.doc.eq("") {
+                content = content.concat("\n\n---\n\n").concat(fhit.doc);
+            }
+        }
+    }
+
+    // Type-attached macro: hover on a macro name in `impl T { macro foo!... }`
+    // decl or at a `v.foo!(...)` / `Type::foo!(...)` / `T::foo!()` call site.
+    if content.eq("") {
+        let mhit2: ImplMethodHit = find_macro_in_impl_anywhere(doc.stmts, word);
+        if mhit2.method != null {
+            let m: *Stmt = mhit2.method;
+            let mut sig: string = macro_signature(m);
+            if !mhit2.owner.eq("") {
+                sig = "impl ".concat(mhit2.owner).concat("\n").concat(sig);
+            }
+            content = "```glide\n".concat(sig).concat("\n```");
+            if m.doc_comment != null && !m.doc_comment.eq("") {
+                content = content.concat("\n\n---\n\n").concat(m.doc_comment);
+            }
+        }
+    }
+
+    // Builtin macros (`println`, `print`, `format`).
+    if content.eq("") {
+        let bd: string = builtin_macro_doc(word);
+        if !bd.eq("") { content = bd; }
     }
 
     if content.eq("") {
@@ -807,6 +989,14 @@ fn handle_definition(req: *JsonValue, state: *LspState) {
             }
         }
     }
+    // Chained inline ctor: `Vector::new().push_all` — derive the receiver type
+    // from the `Type::ctor()` paren-balanced lookback used by completion.
+    if decl == null {
+        let chain_ty: string = chained_ctor_qualifier_before(doc.text, line0, col0);
+        if !chain_ty.eq("") {
+            decl = find_method_in_impl(doc.stmts, chain_ty, word);
+        }
+    }
     if decl == null { decl = find_top_decl(doc.stmts, word); }
     if decl == null { lsp_send_response(id, json_null()); return; }
 
@@ -830,6 +1020,7 @@ fn ci_kind_for(s: *Stmt) -> int {
     if s.kind == ST_STRUCT { return 8; }
     if s.kind == ST_ENUM { return 13; }
     if s.kind == ST_CONST { return 21; }
+    if s.kind == ST_MACRO_DEF { return 2; }   // 2 = Method (closest LSP kind for macros)
     return 6;
 }
 
@@ -936,6 +1127,51 @@ fn member_qualifier_before(text: string, line0: int, col0: int) -> string {
     return text.substring(start, p - 1);
 }
 
+// Member completion fallback for `Type::ctor().` where the receiver is an
+// inline call expression. Walks back past a paren-balanced `(...)`, then
+// looks for `Type::ident` and returns `Type` so the caller can list its
+// instance methods. Returns "" if the pattern doesn't match.
+fn chained_ctor_qualifier_before(text: string, line0: int, col0: int) -> string {
+    let p: int = cursor_before_partial(text, line0, col0);
+    if p < 1 { return ""; }
+    if text.at(p - 1).to_int() != 46 { return ""; }
+    // Just before the dot we expect a `)`.
+    let mut i: int = p - 2;
+    if i < 0 { return ""; }
+    if text.at(i).to_int() != 41 { return ""; }
+    // Walk back to the matching `(`.
+    let mut depth: int = 1;
+    i = i - 1;
+    while i >= 0 && depth > 0 {
+        let c: int = text.at(i).to_int();
+        if c == 41 { depth = depth + 1; }
+        if c == 40 { depth = depth - 1; }
+        if depth == 0 { break; }
+        i = i - 1;
+    }
+    if i < 0 || depth != 0 { return ""; }
+    // i now sits at the matching `(`. The chars immediately before should
+    // form an identifier (the method name). Skip them.
+    let mut j: int = i - 1;
+    while j >= 0 {
+        let c: int = text.at(j).to_int();
+        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 {
+            j = j - 1;
+        } else { break; }
+    }
+    // Expect `::` immediately before the method name.
+    if j < 1 { return ""; }
+    if text.at(j).to_int() != 58 || text.at(j - 1).to_int() != 58 { return ""; }
+    let mut k: int = j - 2;
+    while k >= 0 {
+        let c: int = text.at(k).to_int();
+        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 {
+            k = k - 1;
+        } else { break; }
+    }
+    return text.substring(k + 1, j - 1);
+}
+
 // Best-effort lookup of the type a local was declared with. Walks the fn
 // containing the cursor, finds the matching let, and returns the underlying
 // generic / named type as a string we can match against impl targets.
@@ -1007,17 +1243,25 @@ fn list_methods_for_type(stmts: *Vector<Stmt>, type_name: string,
         if s.impl_methods == null { continue; }
         for let j: int = 0; j < s.impl_methods.len(); j++ {
             let m: Stmt = s.impl_methods.get(j);
-            if m.kind != ST_FN { continue; }
-            let mut has_self: bool = false;
-            if m.fn_params != null && m.fn_params.len() > 0 {
-                let p0: Param = m.fn_params.get(0);
-                if p0.name.eq("self") { has_self = true; }
+            if m.kind == ST_FN {
+                let mut has_self: bool = false;
+                if m.fn_params != null && m.fn_params.len() > 0 {
+                    let p0: Param = m.fn_params.get(0);
+                    if p0.name.eq("self") { has_self = true; }
+                }
+                if want_self && !has_self { continue; }
+                if !want_self && has_self { continue; }
+                if seen.contains(m.name) { continue; }
+                seen.insert(m.name, true);
+                json_arr_push(items, completion_item(m.name, 2, fn_signature(&m)));
+            } else if m.kind == ST_MACRO_DEF {
+                // Type-attached macros are callable both as `v.name!(...)` and
+                // `Type::name!(recv, ...)`. Surface them in both contexts.
+                let label: string = m.name.concat("!");
+                if seen.contains(label) { continue; }
+                seen.insert(label, true);
+                json_arr_push(items, completion_item(label, 2, macro_signature(&m)));
             }
-            if want_self && !has_self { continue; }
-            if !want_self && has_self { continue; }
-            if seen.contains(m.name) { continue; }
-            seen.insert(m.name, true);
-            json_arr_push(items, completion_item(m.name, 2, fn_signature(&m)));
         }
     }
 }
@@ -1061,6 +1305,18 @@ fn handle_completion(req: *JsonValue, state: *LspState) {
         return;
     }
 
+    // Chained inline ctor: `Vector::new().` — list instance methods on the
+    // type itself (we don't try to resolve T here; method names are the same
+    // for any monomorphization).
+    let chain_ty: string = chained_ctor_qualifier_before(doc.text, line0, col0);
+    if !chain_ty.eq("") {
+        list_fields_for_type(doc.stmts, chain_ty, items, seen);
+        list_methods_for_type(doc.stmts, chain_ty, items, seen, true);
+        seen.free();
+        lsp_send_response(id, items);
+        return;
+    }
+
     // 1. Locals in scope (params + lets above the cursor in the containing fn).
     let host: *Stmt = fn_containing(doc.stmts, line0);
     if host != null {
@@ -1086,13 +1342,17 @@ fn handle_completion(req: *JsonValue, state: *LspState) {
         }
     }
 
-    // 2. Top-level decls.
+    // 2. Top-level decls (incl. static macros).
     if doc.stmts != null {
         for let i: int = 0; i < doc.stmts.len(); i++ {
             let s: Stmt = doc.stmts.get(i);
-            if s.kind != ST_FN && s.kind != ST_STRUCT && s.kind != ST_ENUM && s.kind != ST_CONST { continue; }
-            if seen.contains(s.name) { continue; }
-            seen.insert(s.name, true);
+            if s.kind != ST_FN && s.kind != ST_STRUCT && s.kind != ST_ENUM
+               && s.kind != ST_CONST && s.kind != ST_MACRO_DEF { continue; }
+            // Static macros are inserted as `name!` to get the bang for free.
+            let mut label: string = s.name;
+            if s.kind == ST_MACRO_DEF { label = s.name.concat("!"); }
+            if seen.contains(label) { continue; }
+            seen.insert(label, true);
             let mut detail: string = "";
             if s.kind == ST_FN { detail = fn_signature(&s); }
             else if s.kind == ST_STRUCT { detail = "struct ".concat(s.name); }
@@ -1101,13 +1361,28 @@ fn handle_completion(req: *JsonValue, state: *LspState) {
                 detail = "const ".concat(s.name);
                 if s.let_ty != null { detail = detail.concat(": ").concat(type_to_string_pretty(s.let_ty)); }
             }
+            else if s.kind == ST_MACRO_DEF { detail = macro_signature(&s); }
             // Tag the source so users can tell stdlib symbols apart from
             // their own. The path is shown after the signature.
             if s.origin != null && !s.origin.eq("") {
                 detail = detail.concat("    [").concat(s.origin).concat("]");
             }
-            json_arr_push(items, completion_item(s.name, ci_kind_for(&s), detail));
+            json_arr_push(items, completion_item(label, ci_kind_for(&s), detail));
         }
+    }
+
+    // 2b. Builtin macros.
+    let builtins: *Vector<string> = Vector::new();
+    builtins.push("println!"); builtins.push("print!"); builtins.push("format!");
+    for let i: int = 0; i < builtins.len(); i++ {
+        let bn: string = builtins.get(i);
+        if seen.contains(bn) { continue; }
+        seen.insert(bn, true);
+        let mut bdetail: string = "builtin macro";
+        if bn.eq("println!") { bdetail = "println!(args...) — print + newline"; }
+        else if bn.eq("print!") { bdetail = "print!(args...) — print, no newline"; }
+        else if bn.eq("format!") { bdetail = "format!(\"fmt\", args...) — formatted string"; }
+        json_arr_push(items, completion_item(bn, 2, bdetail));
     }
 
     // 3. Glide keywords.
