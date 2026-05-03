@@ -1,0 +1,365 @@
+// Macro expander. Runs after parsing, before typer/codegen.
+//
+// v1 supports:
+//   - Top-level static macros: `macro name!($x:expr) { ... }`
+//   - Variadic with separator: `macro name!($($x:expr),*) { ... }`
+//   - In-body placeholder `$x` in expressions; repetition `$( body );*` at stmt
+//   - Macro calls only at statement position (`name!(args);`)
+//
+// Phase 3 adds type-attached macros declared inside `impl T { }` and call forms
+// `recv.name!(args)` and `Type::name!(args)`.
+
+pub struct MacroBinding {
+    name: string,
+    args: *Vector<Expr>,        // 1 elem for non-variadic; N for variadic
+    is_variadic: bool,
+}
+
+// Type-attached macro entry. Pulled out into its own struct so we can scan
+// linearly for `recv.name!()` lookups (where we don't have the owner type up
+// front), and indexed by "Owner::name" for `Type::name!()` lookups.
+pub struct TypeMacro {
+    owner: string,
+    name: string,
+    def: Stmt,
+}
+
+// Walk the program: collect macro defs into a registry keyed by name (and by
+// "Owner::name" for impl-scoped macros), then expand all macro calls in place
+// and strip the defs themselves so later passes never see them.
+pub fn expand_macros(program: *Vector<Stmt>) -> *Vector<Stmt> {
+    let static_macros: *HashMap<Stmt> = HashMap::new();
+    let type_macros: *Vector<TypeMacro> = Vector::new();
+    let cleaned: *Vector<Stmt> = Vector::new();
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_MACRO_DEF {
+            static_macros.insert(s.name, s);
+            continue;
+        }
+        if s.kind == ST_IMPL && s.impl_methods != null {
+            let kept: *Vector<Stmt> = Vector::new();
+            let owner: string = type_owner_name(s.impl_target);
+            for let j: int = 0; j < s.impl_methods.len(); j++ {
+                let m: Stmt = s.impl_methods.get(j);
+                if m.kind == ST_MACRO_DEF {
+                    let tm: TypeMacro = TypeMacro { owner: owner, name: m.name, def: m };
+                    type_macros.push(tm);
+                } else {
+                    kept.push(m);
+                }
+            }
+            s.impl_methods = kept;
+        }
+        cleaned.push(s);
+    }
+    expand_in_program(cleaned, static_macros, type_macros);
+    return cleaned;
+}
+
+fn type_owner_name(t: *Type) -> string {
+    if t == null { return ""; }
+    if t.kind == TY_NAMED { return t.name; }
+    if t.kind == TY_GENERIC { return t.name; }
+    return "";
+}
+
+// Walk every fn / impl-method body in the program and expand macros found at
+// statement position.
+fn expand_in_program(program: *Vector<Stmt>, sm: *HashMap<Stmt>, tm: *Vector<TypeMacro>) {
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN && s.fn_body != null {
+            s.fn_body = expand_in_block(s.fn_body, sm, tm);
+            program.set(i, s);
+        } else if s.kind == ST_IMPL && s.impl_methods != null {
+            for let j: int = 0; j < s.impl_methods.len(); j++ {
+                let m: Stmt = s.impl_methods.get(j);
+                if m.fn_body != null {
+                    m.fn_body = expand_in_block(m.fn_body, sm, tm);
+                    s.impl_methods.set(j, m);
+                }
+            }
+            program.set(i, s);
+        }
+    }
+}
+
+fn expand_in_block(stmts: *Vector<Stmt>, sm: *HashMap<Stmt>, tm: *Vector<TypeMacro>) -> *Vector<Stmt> {
+    let out: *Vector<Stmt> = Vector::new();
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        // Macro at statement position: `name!(args);` becomes ST_EXPR holding
+        // an EX_MACRO. Replace it with the expansion's stmts.
+        if s.kind == ST_EXPR && s.expr_value != null && s.expr_value.kind == EX_MACRO {
+            let expanded: *Vector<Stmt> = try_expand_call(s.expr_value, sm, tm);
+            if expanded != null {
+                for let k: int = 0; k < expanded.len(); k++ {
+                    let e: Stmt = expanded.get(k);
+                    out.push(e);
+                }
+                continue;
+            }
+        }
+        // Recurse into children that hold stmt blocks.
+        if s.then_body != null { s.then_body = expand_in_block(s.then_body, sm, tm); }
+        if s.else_body != null { s.else_body = expand_in_block(s.else_body, sm, tm); }
+        if s.fn_body != null { s.fn_body = expand_in_block(s.fn_body, sm, tm); }
+        if s.for_init != null && s.for_init.then_body != null {
+            s.for_init.then_body = expand_in_block(s.for_init.then_body, sm, tm);
+        }
+        out.push(s);
+    }
+    return out;
+}
+
+// Returns the expansion stmts on success, or null if `call` doesn't name a
+// known user macro (e.g. it's a builtin like `println!`).
+fn try_expand_call(call: *Expr, sm: *HashMap<Stmt>, tm: *Vector<TypeMacro>) -> *Vector<Stmt> {
+    if call == null || call.kind != EX_MACRO { return null; }
+    // `Type::name!(args)` — qualified type-attached. The first arg is the
+    // receiver; the rest match against the macro's matchers (so callers write
+    // `Vector::push_all!(v, 1, 2, 3)`).
+    if call.macro_owner != null && !call.macro_owner.eq("") {
+        for let i: int = 0; i < tm.len(); i++ {
+            let entry: TypeMacro = tm.get(i);
+            if entry.owner.eq(call.macro_owner) && entry.name.eq(call.str_val) {
+                if call.args == null || call.args.len() == 0 { return null; }
+                let recv_arg: Expr = call.args.get(0);
+                let recv_p: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+                *recv_p = recv_arg;
+                // Build a synthetic call whose args drop arg 0.
+                let rest: *Vector<Expr> = Vector::new();
+                for let k: int = 1; k < call.args.len(); k++ {
+                    let a: Expr = call.args.get(k);
+                    rest.push(a);
+                }
+                let synth: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+                *synth = *call;
+                synth.args = rest;
+                return expand_with_def_recv(synth, &entry.def, recv_p);
+            }
+        }
+        return null;
+    }
+    // `recv.name!(args)` — receiver-style. Match by macro name only; if there
+    // are multiple impls defining the same macro, the first wins. Users can
+    // disambiguate with `Type::name!(recv, args)`.
+    if call.macro_recv != null {
+        for let i: int = 0; i < tm.len(); i++ {
+            let entry: TypeMacro = tm.get(i);
+            if entry.name.eq(call.str_val) {
+                return expand_with_def_recv(call, &entry.def, call.macro_recv);
+            }
+        }
+        return null;
+    }
+    if !sm.contains(call.str_val) { return null; }
+    let def: Stmt = sm.get(call.str_val);
+    return expand_with_def_recv(call, &def, null);
+}
+
+fn expand_with_def(call: *Expr, def: *Stmt) -> *Vector<Stmt> {
+    return expand_with_def_recv(call, def, null);
+}
+
+// Encode the call's source location into the receiver-binding name so two
+// calls in the same scope don't collide. Two macro calls can't share the
+// exact same line+col (the parser advances).
+fn recv_name_for(call: *Expr) -> string {
+    let n: int = call.line * 1000 + call.column;
+    return "__glide_macro_recv_".concat(int_to_str(n));
+}
+
+fn expand_with_def_recv(call: *Expr, def: *Stmt, recv: *Expr) -> *Vector<Stmt> {
+    let bindings: *Vector<MacroBinding> = bind_args(call, def);
+    let mut self_name: string = "";
+    if recv != null {
+        self_name = recv_name_for(call);
+    }
+    let body: *Vector<Stmt> = Vector::new();
+    if def.then_body != null {
+        for let i: int = 0; i < def.then_body.len(); i++ {
+            let s: Stmt = def.then_body.get(i);
+            let expanded: *Vector<Stmt> = macro_subst_stmt(&s, bindings, -1, self_name);
+            for let j: int = 0; j < expanded.len(); j++ {
+                let es: Stmt = expanded.get(j);
+                body.push(es);
+            }
+        }
+    }
+    // Wrap the expansion in a block so any `let` introduced by the macro body
+    // gets its own scope. Without this, two calls to the same macro in the
+    // same fn collide on local names (no hygiene in v1).
+    let block_body: *Vector<Stmt> = Vector::new();
+    if recv != null {
+        // `let __glide_macro_recv_N = <recv expr>;` — bind once, no repeated
+        // evaluation. The expanded body refers to this via the renamed `self`.
+        let recv_clone: *Expr = macro_subst_expr(recv, bindings, -1, "");
+        let bind: *Stmt = stmt_let(self_name, null, recv_clone, false, call.line, call.column);
+        block_body.push(*bind);
+    }
+    for let i: int = 0; i < body.len(); i++ {
+        let bs: Stmt = body.get(i);
+        block_body.push(bs);
+    }
+    let block: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+    block.kind = ST_BLOCK;
+    block.line = call.line;
+    block.column = call.column;
+    block.then_body = block_body;
+    let out: *Vector<Stmt> = Vector::new();
+    out.push(*block);
+    return out;
+}
+
+// Match call.args against def.macro_params. For v1 the only supported shapes
+// are: any number of non-variadic `:expr` followed by at most one variadic
+// `$($x:expr),*` that swallows the rest.
+fn bind_args(call: *Expr, def: *Stmt) -> *Vector<MacroBinding> {
+    let out: *Vector<MacroBinding> = Vector::new();
+    if def.macro_params == null { return out; }
+    let mut idx: int = 0;
+    let mut total: int = 0;
+    if call.args != null { total = call.args.len(); }
+    for let p: int = 0; p < def.macro_params.len(); p++ {
+        let mp: MacroParam = def.macro_params.get(p);
+        let bound: *Vector<Expr> = Vector::new();
+        if mp.is_variadic {
+            while idx < total {
+                let a: Expr = call.args.get(idx);
+                bound.push(a);
+                idx = idx + 1;
+            }
+        } else {
+            if idx < total {
+                let a: Expr = call.args.get(idx);
+                bound.push(a);
+                idx = idx + 1;
+            }
+        }
+        let mb: MacroBinding = MacroBinding { name: mp.name, args: bound, is_variadic: mp.is_variadic };
+        out.push(mb);
+    }
+    return out;
+}
+
+// Substitute one stmt (returns the cloned-with-substitutions stmt, possibly a
+// list when ST_MACRO_REP unrolls). `rep_idx` is the current repetition index
+// for the enclosing `$(...);*` block (or -1 if none).
+fn macro_subst_stmt(s: *Stmt, bindings: *Vector<MacroBinding>, rep_idx: int, self_name: string) -> *Vector<Stmt> {
+    let out: *Vector<Stmt> = Vector::new();
+    if s == null { return out; }
+    if s.kind == ST_MACRO_REP {
+        // Find the variadic binding driving the repetition.
+        let n: int = variadic_len(bindings);
+        if n < 0 {
+            // No variadic in scope — emit zero copies to avoid runaway.
+            return out;
+        }
+        for let i: int = 0; i < n; i++ {
+            if s.then_body == null { continue; }
+            for let j: int = 0; j < s.then_body.len(); j++ {
+                let inner: Stmt = s.then_body.get(j);
+                let expanded: *Vector<Stmt> = macro_subst_stmt(&inner, bindings, i, self_name);
+                for let k: int = 0; k < expanded.len(); k++ {
+                    let e: Stmt = expanded.get(k);
+                    out.push(e);
+                }
+            }
+        }
+        return out;
+    }
+    // Default: shallow-copy then substitute children.
+    let cloned: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+    *cloned = *s;
+    if cloned.let_value != null { cloned.let_value = macro_subst_expr(cloned.let_value, bindings, rep_idx, self_name); }
+    if cloned.expr_value != null { cloned.expr_value = macro_subst_expr(cloned.expr_value, bindings, rep_idx, self_name); }
+    if cloned.cond != null { cloned.cond = macro_subst_expr(cloned.cond, bindings, rep_idx, self_name); }
+    if cloned.for_step != null { cloned.for_step = macro_subst_expr(cloned.for_step, bindings, rep_idx, self_name); }
+    if cloned.scrutinee != null { cloned.scrutinee = macro_subst_expr(cloned.scrutinee, bindings, rep_idx, self_name); }
+    if cloned.for_init != null {
+        let inits: *Vector<Stmt> = macro_subst_stmt(cloned.for_init, bindings, rep_idx, self_name);
+        if inits.len() > 0 {
+            let init0: Stmt = inits.get(0);
+            let copy: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+            *copy = init0;
+            cloned.for_init = copy;
+        }
+    }
+    if cloned.then_body != null { cloned.then_body = macro_subst_block(cloned.then_body, bindings, rep_idx, self_name); }
+    if cloned.else_body != null { cloned.else_body = macro_subst_block(cloned.else_body, bindings, rep_idx, self_name); }
+    if cloned.fn_body != null { cloned.fn_body = macro_subst_block(cloned.fn_body, bindings, rep_idx, self_name); }
+    out.push(*cloned);
+    return out;
+}
+
+fn macro_subst_block(stmts: *Vector<Stmt>, bindings: *Vector<MacroBinding>, rep_idx: int, self_name: string) -> *Vector<Stmt> {
+    let out: *Vector<Stmt> = Vector::new();
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        let expanded: *Vector<Stmt> = macro_subst_stmt(&s, bindings, rep_idx, self_name);
+        for let j: int = 0; j < expanded.len(); j++ {
+            let e: Stmt = expanded.get(j);
+            out.push(e);
+        }
+    }
+    return out;
+}
+
+fn macro_subst_expr(e: *Expr, bindings: *Vector<MacroBinding>, rep_idx: int, self_name: string) -> *Expr {
+    if e == null { return null; }
+    if e.kind == EX_MACRO_VAR {
+        let chosen: *Expr = lookup_var(e.str_val, bindings, rep_idx);
+        if chosen != null { return chosen; }
+        return e;
+    }
+    // `self` inside a type-attached macro body refers to the receiver. We bind
+    // it once via `let __glide_macro_recv_N = recv;` at expansion time and
+    // rewrite every `self` ident to that name.
+    if e.kind == EX_IDENT && !self_name.eq("") && e.str_val.eq("self") {
+        return expr_ident(self_name, e.line, e.column);
+    }
+    let cloned: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+    *cloned = *e;
+    if cloned.lhs != null { cloned.lhs = macro_subst_expr(cloned.lhs, bindings, rep_idx, self_name); }
+    if cloned.rhs != null { cloned.rhs = macro_subst_expr(cloned.rhs, bindings, rep_idx, self_name); }
+    if cloned.operand != null { cloned.operand = macro_subst_expr(cloned.operand, bindings, rep_idx, self_name); }
+    if cloned.macro_recv != null { cloned.macro_recv = macro_subst_expr(cloned.macro_recv, bindings, rep_idx, self_name); }
+    if cloned.args != null {
+        let new_args: *Vector<Expr> = Vector::new();
+        for let i: int = 0; i < cloned.args.len(); i++ {
+            let a: Expr = cloned.args.get(i);
+            let na: *Expr = macro_subst_expr(&a, bindings, rep_idx, self_name);
+            if na != null { new_args.push(*na); }
+        }
+        cloned.args = new_args;
+    }
+    return cloned;
+}
+
+fn lookup_var(name: string, bindings: *Vector<MacroBinding>, rep_idx: int) -> *Expr {
+    for let i: int = 0; i < bindings.len(); i++ {
+        let b: MacroBinding = bindings.get(i);
+        if !b.name.eq(name) { continue; }
+        if b.args.len() == 0 { return null; }
+        let mut idx: int = 0;
+        if b.is_variadic {
+            if rep_idx < 0 || rep_idx >= b.args.len() { return null; }
+            idx = rep_idx;
+        }
+        let chosen: Expr = b.args.get(idx);
+        let p: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+        *p = chosen;
+        return p;
+    }
+    return null;
+}
+
+fn variadic_len(bindings: *Vector<MacroBinding>) -> int {
+    for let i: int = 0; i < bindings.len(); i++ {
+        let b: MacroBinding = bindings.get(i);
+        if b.is_variadic { return b.args.len(); }
+    }
+    return -1;
+}

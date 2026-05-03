@@ -63,6 +63,7 @@ pub const EX_STRUCT_LIT: int = 18;  // Foo { fields }
 pub const EX_NEW: int = 19;         // new Foo { fields }
 pub const EX_SIZEOF: int = 20;      // sizeof(T) — cast_to holds the target type
 pub const EX_FNEXPR: int = 21;      // anonymous fn expression (no capture)
+pub const EX_MACRO_VAR: int = 22;   // `$x` placeholder inside a macro body (str_val = "x")
 
 // Binary op codes (subset; extend as needed)
 pub const OP_ADD: int = 1;
@@ -125,6 +126,12 @@ pub struct Expr {
     // For EX_FNEXPR: anonymous fn payload
     fn_expr_params: *Vector<Param>,
     fn_expr_body: *Vector<Stmt>,
+
+    // EX_MACRO: receiver-style invocation (`recv.name!(args)`) and qualified
+    // path (`Type::name!(args)`). Both are null for the plain `name!(args)`
+    // form. Plain str_val still holds the macro name regardless.
+    macro_recv: *Expr,
+    macro_owner: string,
 }
 
 // ---- Stmt kinds ----------------------------------------------------------
@@ -147,6 +154,8 @@ pub const ST_IMPORT: int = 14;
 pub const ST_ENUM: int = 15;
 pub const ST_MATCH: int = 16;
 pub const ST_SPAWN: int = 17;
+pub const ST_MACRO_DEF: int = 18;   // `macro name!(matchers) { body }` — user-defined macro
+pub const ST_MACRO_REP: int = 19;   // `$( body );*` repetition inside a macro body
 
 pub struct Param {
     name: string,
@@ -156,6 +165,7 @@ pub struct Param {
 pub struct Field {
     name: string,
     ty: *Type,
+    doc: string,        // contiguous `//` block above the field decl
 }
 
 pub struct EnumVariant {
@@ -167,6 +177,12 @@ pub struct MatchArm {
     variant: string,           // variant name; "_" = wildcard
     bindings: *Vector<string>, // names to bind for payload
     body: *Vector<Stmt>,
+}
+
+pub struct MacroParam {
+    name: string,           // matcher binder (`$x` -> "x")
+    is_variadic: bool,      // `$($x:expr),*` form
+    separator: string,      // separator for variadic ("," or ";"); empty otherwise
 }
 
 pub struct Stmt {
@@ -219,6 +235,12 @@ pub struct Stmt {
     // Match
     scrutinee: *Expr,
     arms: *Vector<MatchArm>,
+
+    // Macro def (ST_MACRO_DEF) — name lives in `name`, body in `then_body`,
+    // matchers in macro_params. For ST_MACRO_REP, body lives in `then_body`
+    // and macro_rep_sep holds the separator literal.
+    macro_params: *Vector<MacroParam>,
+    macro_rep_sep: string,
 }
 
 // ---- Constructors --------------------------------------------------------
@@ -533,6 +555,16 @@ pub fn expr_macro(name: string, args: *Vector<Expr>, line: int, col: int) -> *Ex
     e.column = col;
     e.str_val = name;
     e.args = args;
+    e.macro_owner = "";
+    return e;
+}
+
+pub fn expr_macro_var(name: string, line: int, col: int) -> *Expr {
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+    e.kind = EX_MACRO_VAR;
+    e.line = line;
+    e.column = col;
+    e.str_val = name;
     return e;
 }
 

@@ -4,6 +4,7 @@
 import "lexer.glide";
 import "ast.glide";
 import "parser.glide";
+import "expander.glide";
 import "typer.glide";
 import "codegen.glide";
 import "json.glide";
@@ -339,6 +340,12 @@ fn parse_program_into(stmts: *Vector<Stmt>, path: string) -> bool {
     load_into(stmts, v_path, loaded);
     load_into(stmts, h_path, loaded);
     load_into_str(stmts, src, path, loaded);
+    let expanded: *Vector<Stmt> = expand_macros(stmts);
+    stmts.clear();
+    for let i: int = 0; i < expanded.len(); i++ {
+        let s: Stmt = expanded.get(i);
+        stmts.push(s);
+    }
     return true;
 }
 

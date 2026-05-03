@@ -278,6 +278,7 @@ pub fn is_keyword(s: string) -> bool {
     if s.eq("c_link") { return true; }
     if s.eq("spawn") { return true; }
     if s.eq("chan") { return true; }
+    if s.eq("macro") { return true; }
     return false;
 }
 

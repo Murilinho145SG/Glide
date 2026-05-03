@@ -134,9 +134,80 @@ pub fn parse_top_stmt(p: *Parser) -> *Stmt {
     if p.at_kw("enum") { let s: *Stmt = parse_enum(p); if s != null { s.is_pub = is_pub; } return s; }
     if p.at_kw("impl") { return parse_impl(p); }
     if p.at_kw("import") { return parse_import(p); }
+    if p.at_kw("macro") {
+        let s: *Stmt = parse_macro_def(p);
+        if s != null { s.is_pub = is_pub; }
+        return s;
+    }
 
     p.err("unexpected token at top level");
     return null;
+}
+
+// `macro name!($x:expr, $($y:expr),*) { body }`
+fn parse_macro_def(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'macro'
+    let nline: int = p.current.line;
+    let ncol: int = p.current.column;
+    let nlen: int = p.current.lexeme.len();
+    let name: string = p.expect_ident();
+    p.expect_op("!");
+    p.expect_op("(");
+    let params: *Vector<MacroParam> = parse_macro_matchers(p);
+    p.expect_op(")");
+    let body: *Vector<Stmt> = parse_block(p);
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+    s.kind = ST_MACRO_DEF;
+    s.line = line;
+    s.column = col;
+    s.name = name;
+    s.name_line = nline;
+    s.name_col = ncol;
+    s.name_len = nlen;
+    s.macro_params = params;
+    s.then_body = body;
+    return s;
+}
+
+// Matcher list: `$x:expr`, `$($x:expr),*`, etc, comma-separated.
+fn parse_macro_matchers(p: *Parser) -> *Vector<MacroParam> {
+    let out: *Vector<MacroParam> = Vector::new();
+    while !p.at_op(")") && !p.at_eof() {
+        // Variadic: `$( $name:expr ) sep *` (sep = ',' or ';')
+        if p.at_op("$") && p.peek_op("(") {
+            p.advance(); // '$'
+            p.advance(); // '('
+            p.expect_op("$");
+            let bname: string = p.expect_ident();
+            p.expect_op(":");
+            let kind: string = p.expect_ident();
+            if !kind.eq("expr") { p.err("only `:expr` matchers supported in v1"); }
+            p.expect_op(")");
+            let mut sep: string = "";
+            if p.at_op(",") || p.at_op(";") {
+                sep = p.current.lexeme;
+                p.advance();
+            }
+            p.expect_op("*");
+            let mp: MacroParam = MacroParam { name: bname, is_variadic: true, separator: sep };
+            out.push(mp);
+        } else if p.at_op("$") {
+            p.advance(); // '$'
+            let bname: string = p.expect_ident();
+            p.expect_op(":");
+            let kind: string = p.expect_ident();
+            if !kind.eq("expr") { p.err("only `:expr` matchers supported in v1"); }
+            let mp: MacroParam = MacroParam { name: bname, is_variadic: false, separator: "" };
+            out.push(mp);
+        } else {
+            p.err("expected `$name:expr` or `$($name:expr),*` in macro matcher list");
+            p.advance();
+        }
+        if !p.eat_op(",") { break; }
+    }
+    return out;
 }
 
 fn parse_fn(p: *Parser) -> *Stmt {
@@ -212,10 +283,11 @@ fn parse_struct(p: *Parser) -> *Stmt {
     p.expect_op("{");
     let fields: *Vector<Field> = Vector::new();
     while !p.at_op("}") && !p.at_eof() {
+        let fdoc: string = p.current.doc;
         let fname: string = p.expect_ident();
         p.expect_op(":");
         let fty: *Type = parse_type(p);
-        let f: Field = Field { name: fname, ty: fty };
+        let f: Field = Field { name: fname, ty: fty, doc: fdoc };
         fields.push(f);
         if !p.eat_op(",") { break; }
     }
@@ -266,13 +338,28 @@ fn parse_impl(p: *Parser) -> *Stmt {
     p.expect_op("{");
     let methods: *Vector<Stmt> = Vector::new();
     while !p.at_op("}") && !p.at_eof() {
+        // Capture the contiguous `///` (or `//`) doc block above the method
+        // so hover can render it. The lexer attaches doc to the next non-doc
+        // token, which is `pub` (if present) or `fn`/`macro` otherwise.
+        let doc: string = p.current.doc;
         let mut is_pub: bool = false;
         if p.eat_kw("pub") { is_pub = true; }
         if p.at_kw("fn") {
             let m: *Stmt = parse_fn(p);
-            if m != null { m.is_pub = is_pub; methods.push(*m); }
+            if m != null {
+                m.is_pub = is_pub;
+                if doc != null && !doc.eq("") { m.doc_comment = doc; }
+                methods.push(*m);
+            }
+        } else if p.at_kw("macro") {
+            let m: *Stmt = parse_macro_def(p);
+            if m != null {
+                m.is_pub = is_pub;
+                if doc != null && !doc.eq("") { m.doc_comment = doc; }
+                methods.push(*m);
+            }
         } else {
-            p.err("expected fn inside impl"); p.advance();
+            p.err("expected fn or macro inside impl"); p.advance();
         }
     }
     p.expect_op("}");
@@ -319,6 +406,34 @@ fn parse_block(p: *Parser) -> *Vector<Stmt> {
 }
 
 fn parse_stmt(p: *Parser) -> *Stmt {
+    // Macro body repetition: `$( inner_stmts ) sep *` (sep = ';' or ',').
+    // Only meaningful inside a macro def's body — outside, the expander will
+    // surface an error if the rep escapes.
+    if p.at_op("$") && p.peek_op("(") {
+        let line: int = p.current.line;
+        let col: int = p.current.column;
+        p.advance(); // '$'
+        p.advance(); // '('
+        let inner: *Vector<Stmt> = Vector::new();
+        while !p.at_op(")") && !p.at_eof() {
+            let s2: *Stmt = parse_stmt(p);
+            if s2 != null { inner.push(*s2); }
+        }
+        p.expect_op(")");
+        let mut sep: string = "";
+        if p.at_op(",") || p.at_op(";") {
+            sep = p.current.lexeme;
+            p.advance();
+        }
+        p.expect_op("*");
+        let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+        s.kind = ST_MACRO_REP;
+        s.line = line;
+        s.column = col;
+        s.then_body = inner;
+        s.macro_rep_sep = sep;
+        return s;
+    }
     if p.at_kw("let") { return parse_let(p); }
     if p.at_kw("const") { return parse_const(p); }
     if p.at_kw("return") { return parse_return(p); }
@@ -668,11 +783,26 @@ fn parse_expr(p: *Parser, min_bp: int) -> *Expr {
             left = expr_index(left, idx);
             continue;
         }
-        // member .
+        // member .  (with macro-call form `.name!(args)`)
         if p.at_op(".") {
             p.advance();
-            let name: string = p.expect_ident();
-            left = expr_member(left, name);
+            let mname: string = p.expect_ident();
+            if p.at_op("!") && p.peek_op("(") {
+                p.advance(); // '!'
+                p.advance(); // '('
+                let margs: *Vector<Expr> = Vector::new();
+                while !p.at_op(")") && !p.at_eof() {
+                    let a: *Expr = parse_expr(p, 0);
+                    if a != null { margs.push(*a); }
+                    if !p.eat_op(",") { break; }
+                }
+                p.expect_op(")");
+                let me: *Expr = expr_macro(mname, margs, left.line, left.column);
+                me.macro_recv = left;
+                left = me;
+                continue;
+            }
+            left = expr_member(left, mname);
             continue;
         }
         // postfix ++ / --
@@ -732,6 +862,18 @@ fn parse_prefix(p: *Parser) -> *Expr {
     let tok: Token = p.current;
     let line: int = tok.line;
     let col: int = tok.column;
+
+    // Macro placeholder `$ident` — only meaningful inside a macro body. We
+    // parse it permissively at any expr position; the expander surfaces an
+    // error if a stray placeholder escapes.
+    if tok.kind == TOK_OP && tok.lexeme.eq("$") {
+        // Avoid stealing `$(` — that's a stmt-level repetition.
+        if !p.peek_op("(") {
+            p.advance();
+            let nm: string = p.expect_ident();
+            return expr_macro_var(nm, line, col);
+        }
+    }
 
     if tok.kind == TOK_INT {
         p.advance();
@@ -827,10 +969,24 @@ fn parse_prefix(p: *Parser) -> *Expr {
     }
     if tok.kind == TOK_IDENT {
         p.advance();
-        // `name::member`?
+        // `name::member`?  (also `name::macro!(args)` — type-attached macro)
         if p.at_op("::") {
             p.advance();
             let member: string = p.expect_ident();
+            if p.at_op("!") && p.peek_op("(") {
+                p.advance(); // '!'
+                p.advance(); // '('
+                let margs: *Vector<Expr> = Vector::new();
+                while !p.at_op(")") && !p.at_eof() {
+                    let a: *Expr = parse_expr(p, 0);
+                    if a != null { margs.push(*a); }
+                    if !p.eat_op(",") { break; }
+                }
+                p.expect_op(")");
+                let me: *Expr = expr_macro(member, margs, line, col);
+                me.macro_owner = tok.lexeme;
+                return me;
+            }
             return expr_path(tok.lexeme, member, line, col);
         }
         // `name!(...)` macro call?
