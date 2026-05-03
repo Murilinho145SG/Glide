@@ -1803,45 +1803,6 @@ pub fn emit_expr(g: *CG, e: *Expr) {
         // ---- chan builtins: make_chan / send / recv / close ----
         if e.lhs != null && e.lhs.kind == EX_IDENT && e.args != null {
             let cname: string = e.lhs.str_val;
-            if cname.eq("send") && e.args.len() == 2 {
-                let c0: Expr = e.args.get(0);
-                let ct: *Type = infer_for_codegen(g, &c0);
-                if ct != null && ct.kind == TY_GENERIC && ct.name.eq("chan") && ct.args != null && ct.args.len() > 0 {
-                    let inner: Type = ct.args.get(0);
-                    let m: string = mangle_type(&inner);
-                    print!("__glide_send_".concat(m).concat("("));
-                    emit_expr(g, &c0);
-                    print!(", ");
-                    let v: Expr = e.args.get(1);
-                    emit_expr(g, &v);
-                    print!(")");
-                    return;
-                }
-            }
-            if cname.eq("recv") && e.args.len() == 1 {
-                let c0: Expr = e.args.get(0);
-                let ct: *Type = infer_for_codegen(g, &c0);
-                if ct != null && ct.kind == TY_GENERIC && ct.name.eq("chan") && ct.args != null && ct.args.len() > 0 {
-                    let inner: Type = ct.args.get(0);
-                    let m: string = mangle_type(&inner);
-                    print!("__glide_recv_".concat(m).concat("("));
-                    emit_expr(g, &c0);
-                    print!(")");
-                    return;
-                }
-            }
-            if cname.eq("close") && e.args.len() == 1 {
-                let c0: Expr = e.args.get(0);
-                let ct: *Type = infer_for_codegen(g, &c0);
-                if ct != null && ct.kind == TY_GENERIC && ct.name.eq("chan") && ct.args != null && ct.args.len() > 0 {
-                    let inner: Type = ct.args.get(0);
-                    let m: string = mangle_type(&inner);
-                    print!("__glide_close_".concat(m).concat("("));
-                    emit_expr(g, &c0);
-                    print!(")");
-                    return;
-                }
-            }
             if cname.eq("unwrap") && e.args.len() == 1 {
                 let r0: Expr = e.args.get(0);
                 let rt: *Type = infer_for_codegen(g, &r0);
