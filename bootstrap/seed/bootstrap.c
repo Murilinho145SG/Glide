@@ -9141,6 +9141,7 @@ void   check_unused_in_body (Typer*   t, Vector__Stmt*   body) {
                 }
             }
             if ((!used)) {
+                ((t-> current_origin )  =  (s. origin ));
                 Typer_warn(t, (s. line ), (s. column ), "unused-var", __glide_string_concat(__glide_string_concat("unused local `", name), "` (prefix with `_` to silence)"));
             }
         }
@@ -9236,6 +9237,7 @@ void   check_arena_in_body (Typer*   t, Vector__Stmt*   body) {
             Expr*   v = (s. let_value );
             if (((((((v  !=  NULL)  &&  ((v-> kind )  ==  EX_CALL))  &&  ((v-> lhs )  !=  NULL))  &&  (((v-> lhs )-> kind )  ==  EX_PATH))  &&  __glide_string_eq(((v-> lhs )-> str_val ), "Arena"))  &&  __glide_string_eq(((v-> lhs )-> field ), "new"))) {
                 if ((!arena_is_freed_in_body((s. name ), body, (i  +  1)))) {
+                    ((t-> current_origin )  =  (s. origin ));
                     Typer_warn(t, (s. line ), (s. column ), "arena-not-freed", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("arena `", (s. name )), "` is never freed (use `let "), (s. name )), "* = Arena::new(...)` or add `defer "), (s. name )), ".free()`)"));
                 }
             }
@@ -9345,6 +9347,7 @@ void   check_addr_temp_body (Typer*   t, Vector__Stmt*   body) {
         if ((((s. kind )  ==  ST_RETURN)  &&  ((s. expr_value )  !=  NULL))) {
             Expr*   e = (s. expr_value );
             if ((((((e-> kind )  ==  EX_UNARY)  &&  (((e-> op_code )  ==  UN_ADDR)  ||  ((e-> op_code )  ==  UN_ADDR_MUT)))  &&  ((e-> operand )  !=  NULL))  &&  ((((e-> operand )-> kind )  ==  EX_STRUCT_LIT)  ||  (((e-> operand )-> kind )  ==  EX_NEW)))) {
+                ((t-> current_origin )  =  (s. origin ));
                 Typer_err_code(t, (s. line ), (s. column ), "addr-of-temporary", "cannot return address of a temporary value (would dangle); use `new T { ... }` to heap-allocate or return by value");
             }
         }
@@ -9380,6 +9383,7 @@ void   check_dead_code_body (Typer*   t, Vector__Stmt*   body) {
     for (int   i = 0; (i  <  n); i++) {
         Stmt   s = Vector_get__Stmt(body, i);
         if (terminated) {
+            ((t-> current_origin )  =  (s. origin ));
             Typer_warn(t, (s. line ), (s. column ), "dead-code", "unreachable code after return / break / continue");
             return;
         }
@@ -9431,6 +9435,7 @@ void   analysis_unused_fn (Typer*   t, Vector__Stmt*   program) {
         if (HashMap_contains__bool(called, (s. name ))) {
             continue;
         }
+        ((t-> current_origin )  =  (s. origin ));
         Typer_warn(t, (s. line ), (s. column ), "unused-fn", __glide_string_concat(__glide_string_concat("function `", (s. name )), "` is never called"));
     }
     HashMap_free__bool(called);
@@ -9540,6 +9545,7 @@ void   check_mut_body (Typer*   t, Vector__Stmt*   body) {
                 }
             }
             if ((!reassigned)) {
+                ((t-> current_origin )  =  (s. origin ));
                 Typer_warn(t, (s. line ), (s. column ), "unnecessary-mut", __glide_string_concat(__glide_string_concat("`mut` on `", (s. name )), "` is unnecessary; binding is never reassigned"));
             }
         }
@@ -9630,6 +9636,7 @@ void   analysis_missing_return (Typer*   t, Vector__Stmt*   program) {
             continue;
         }
         if ((!body_always_returns((s. fn_body )))) {
+            ((t-> current_origin )  =  (s. origin ));
             Typer_warn(t, (s. line ), (s. column ), "missing-return", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("function `", (s. name )), "` declared `-> "), type_to_string((s. fn_ret_ty ))), "` may exit without returning a value"));
         }
     }
@@ -9729,6 +9736,7 @@ void   check_unused_params_fn (Typer*   t, Stmt*   fnstmt) {
             }
         }
         if ((!used)) {
+            ((t-> current_origin )  =  (fnstmt-> origin ));
             Typer_warn(t, (fnstmt-> line ), (fnstmt-> column ), "unused-param", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("parameter `", (p. name )), "` of `"), (fnstmt-> name )), "` is never used (prefix with `_` to silence)"));
         }
     }
@@ -9814,6 +9822,7 @@ void   analysis_large_return (Typer*   t, Vector__Stmt*   program) {
         }
         int   sz = type_size_bytes(ret, structs);
         if ((sz  >=  threshold)) {
+            ((t-> current_origin )  =  (s. origin ));
             Typer_push_diag(t, (s. line ), (s. column ), 3, "large-return", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("fn `", (s. name )), "` returns "), int_to_str(sz)), " bytes by value ("), type_to_string(ret)), "); for hot paths consider an out-param `out: *"), type_to_string(ret)), "` or returning `*"), type_to_string(ret)), "`"));
         }
     }

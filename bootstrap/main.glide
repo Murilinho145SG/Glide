@@ -111,7 +111,7 @@ fn load_into_str(stmts: *Vector<Stmt>, src: string, origin: string, loaded: *Has
     // Determine the directory of `origin` so relative imports resolve.
     let dir: string = parent_dir(origin);
     for let i: int = 0; i < parsed.len(); i++ {
-        let mut s: Stmt = parsed.get(i);
+        let s: Stmt = parsed.get(i);
         if s.kind == ST_IMPORT {
             let unq: string = strip_quotes(s.import_path);
             let resolved: string = resolve_import(dir, unq);

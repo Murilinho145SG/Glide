@@ -873,6 +873,7 @@ fn check_unused_in_body(t: *Typer, body: *Vector<Stmt>) {
                 if stmt_uses_name(&s2, name) { used = true; break; }
             }
             if !used {
+                t.current_origin = s.origin;
                 t.warn(s.line, s.column, "unused-var",
                     "unused local `".concat(name).concat("` (prefix with `_` to silence)"));
             }
@@ -943,6 +944,7 @@ fn check_arena_in_body(t: *Typer, body: *Vector<Stmt>) {
                && v.lhs.kind == EX_PATH && v.lhs.str_val.eq("Arena")
                && v.lhs.field.eq("new") {
                 if !arena_is_freed_in_body(s.name, body, i + 1) {
+                    t.current_origin = s.origin;
                     t.warn(s.line, s.column, "arena-not-freed",
                         "arena `".concat(s.name)
                         .concat("` is never freed (use `let ").concat(s.name)
@@ -1032,6 +1034,7 @@ fn check_addr_temp_body(t: *Typer, body: *Vector<Stmt>) {
             if e.kind == EX_UNARY && (e.op_code == UN_ADDR || e.op_code == UN_ADDR_MUT)
                && e.operand != null
                && (e.operand.kind == EX_STRUCT_LIT || e.operand.kind == EX_NEW) {
+                t.current_origin = s.origin;
                 t.err_code(s.line, s.column, "addr-of-temporary",
                     "cannot return address of a temporary value (would dangle); use `new T { ... }` to heap-allocate or return by value");
             }
@@ -1062,6 +1065,7 @@ fn check_dead_code_body(t: *Typer, body: *Vector<Stmt>) {
     for let i: int = 0; i < n; i++ {
         let s: Stmt = body.get(i);
         if terminated {
+            t.current_origin = s.origin;
             t.warn(s.line, s.column, "dead-code",
                 "unreachable code after return / break / continue");
             return;     // flag only the first dead stmt per block
@@ -1097,6 +1101,7 @@ pub fn analysis_unused_fn(t: *Typer, program: *Vector<Stmt>) {
         if s.name.eq("main") { continue; }
         if s.type_params != null && s.type_params.len() > 0 { continue; }   // generic, may be referenced indirectly
         if called.contains(s.name) { continue; }
+        t.current_origin = s.origin;
         t.warn(s.line, s.column, "unused-fn",
             "function `".concat(s.name).concat("` is never called"));
     }
@@ -1177,6 +1182,7 @@ fn check_mut_body(t: *Typer, body: *Vector<Stmt>) {
                 if stmt_reassigns(&s2, s.name) { reassigned = true; break; }
             }
             if !reassigned {
+                t.current_origin = s.origin;
                 t.warn(s.line, s.column, "unnecessary-mut",
                     "`mut` on `".concat(s.name).concat("` is unnecessary; binding is never reassigned"));
             }
@@ -1240,6 +1246,7 @@ pub fn analysis_missing_return(t: *Typer, program: *Vector<Stmt>) {
         if s.fn_ret_ty == null { continue; }                 // void -> ok
         // Bool ret is okay-ish but still must return; same logic.
         if !body_always_returns(s.fn_body) {
+            t.current_origin = s.origin;
             t.warn(s.line, s.column, "missing-return",
                 "function `".concat(s.name)
                 .concat("` declared `-> ").concat(type_to_string(s.fn_ret_ty))
@@ -1312,6 +1319,7 @@ fn check_unused_params_fn(t: *Typer, fnstmt: *Stmt) {
             if stmt_uses_name(&b, p.name) { used = true; break; }
         }
         if !used {
+            t.current_origin = fnstmt.origin;
             t.warn(fnstmt.line, fnstmt.column, "unused-param",
                 "parameter `".concat(p.name).concat("` of `")
                 .concat(fnstmt.name).concat("` is never used (prefix with `_` to silence)"));
@@ -1376,6 +1384,7 @@ fn analysis_large_return(t: *Typer, program: *Vector<Stmt>) {
            || ret.kind == TY_BORROW_MUT || ret.kind == TY_FNPTR { continue; }
         let sz: int = type_size_bytes(ret, structs);
         if sz >= threshold {
+            t.current_origin = s.origin;
             t.push_diag(s.line, s.column, 3, "large-return",
                 "fn `".concat(s.name).concat("` returns ")
                 .concat(int_to_str(sz)).concat(" bytes by value (")
