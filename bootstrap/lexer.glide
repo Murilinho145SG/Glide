@@ -91,7 +91,13 @@ impl Lexer {
                     // line earlier, start a fresh chain. Otherwise append.
                     if !had_doc { self.pending_doc = ""; }
                     self.advance(); self.advance();
-                    // Skip a single leading space after `//`.
+                    // Strip any extra leading `/` so `///` and `////` yield
+                    // the same content as `//` (no leading slash leak into
+                    // hover markdown).
+                    while self.pos < self.src_len && self.peek().to_int() == 47 {
+                        self.advance();
+                    }
+                    // Skip a single leading space after the slash run.
                     if self.pos < self.src_len && self.peek().to_int() == 32 { self.advance(); }
                     let line_start: int = self.pos;
                     while self.pos < self.src_len {
