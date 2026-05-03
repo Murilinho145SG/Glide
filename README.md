@@ -85,21 +85,31 @@ m.insert("answer", 42);
 
 ## install
 
-Glide ships as a single archive that contains the compiler and a bundled C toolchain (Zig). No system gcc, clang, or Rust required.
+Glide ships as a single archive that contains the compiler, a bundled C toolchain (Zig), and the stdlib. No system gcc, clang, or Rust required.
 
 **Linux / macOS:**
 
 ```bash
-curl -sSf https://github.com/.../releases/latest/download/install.sh | bash
+curl -fsSL https://github.com/Murilinho145SG/Glide/releases/latest/download/install.sh | bash
 ```
 
 **Windows (PowerShell):**
 
 ```powershell
-irm https://github.com/.../releases/latest/download/install.ps1 | iex
+iwr https://github.com/Murilinho145SG/Glide/releases/latest/download/install.ps1 -UseB | iex
 ```
 
-Or download the archive for your platform from releases and run `tools/install.{sh,ps1} --archive <path>`.
+Both install into a per-user directory (`~/.local/share/glide` on Linux/macOS, `%LOCALAPPDATA%\Programs\Glide` on Windows) and add a `glide` command to your PATH. No admin / sudo needed. Open a new terminal after install.
+
+If you'd rather install from a downloaded archive, grab the right `.zip` / `.tar.gz` from the [releases page](https://github.com/Murilinho145SG/Glide/releases) and run:
+
+```bash
+bash tools/install.sh --archive ./glide-linux-x86_64-0.1.0.tar.gz
+```
+
+```powershell
+.\tools\install.ps1 -Archive .\glide-windows-x86_64-0.1.0.zip
+```
 
 ## use
 

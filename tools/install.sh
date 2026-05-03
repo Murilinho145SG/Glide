@@ -17,7 +17,7 @@ VERSION="${VERSION:-0.1.0}"
 ARCHIVE=""
 INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/share/glide}"
 BIN_DIR="${BIN_DIR:-$HOME/.local/bin}"
-DOWNLOAD_URL_BASE="${DOWNLOAD_URL_BASE:-}"
+DOWNLOAD_URL_BASE="${DOWNLOAD_URL_BASE:-https://github.com/Murilinho145SG/Glide/releases/download/v${VERSION}}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -49,10 +49,6 @@ if [ -n "$ARCHIVE" ] && [ -f "$ARCHIVE" ]; then
     echo ">> Using local archive: $ARCHIVE"
     cp "$ARCHIVE" "$TMP/glide.tar.gz"
 else
-    if [ -z "$DOWNLOAD_URL_BASE" ]; then
-        echo "no --archive provided and no --url-base set; aborting" >&2
-        exit 1
-    fi
     URL="${DOWNLOAD_URL_BASE}/${NAME}.tar.gz"
     echo ">> Downloading $URL"
     if command -v curl >/dev/null 2>&1; then

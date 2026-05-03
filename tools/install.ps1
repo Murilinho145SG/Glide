@@ -17,6 +17,10 @@ param(
     [string]$DownloadUrlBase = ""
 )
 
+if (-not $DownloadUrlBase) {
+    $DownloadUrlBase = "https://github.com/Murilinho145SG/Glide/releases/download/v$Version"
+}
+
 $ErrorActionPreference = "Stop"
 
 if ($env:PROCESSOR_ARCHITECTURE -eq "ARM64") { $Arch = "aarch64" } else { $Arch = "x86_64" }
@@ -29,10 +33,6 @@ try {
         Write-Host ">> Using local archive: $Archive"
         Copy-Item $Archive (Join-Path $Tmp "glide.zip")
     } else {
-        if (-not $DownloadUrlBase) {
-            Write-Host "no -Archive provided and no -DownloadUrlBase set; aborting" -ForegroundColor Red
-            exit 1
-        }
         $Url = "$DownloadUrlBase/$Name.zip"
         Write-Host ">> Downloading $Url"
         Invoke-WebRequest -Uri $Url -OutFile (Join-Path $Tmp "glide.zip")
