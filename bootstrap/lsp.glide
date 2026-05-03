@@ -167,6 +167,13 @@ fn diag_to_json(d: *DiagEntry) -> *JsonValue {
     if !d.code.eq("") { json_obj_set(dj, "code", json_string(d.code)); }
     json_obj_set(dj, "source", json_string("glide"));
     json_obj_set(dj, "message", json_string(d.message));
+    if d.tag != 0 {
+        // LSP DiagnosticTag: 1 = Unnecessary (rendered faded by editors),
+        //                    2 = Deprecated (struck-through).
+        let tags: *JsonValue = json_array();
+        json_arr_push(tags, json_int(d.tag));
+        json_obj_set(dj, "tags", tags);
+    }
     return dj;
 }
 
@@ -221,7 +228,7 @@ fn run_analysis_and_publish(uri: string, text: string, state: *LspState) {
     // Save the parsed stmts on the doc so hover / document symbol / goto can
     // query them without re-parsing.
     if state.docs.contains(uri) {
-        let mut d: LspDoc = state.docs.get(uri);
+        let d: LspDoc = state.docs.get(uri);
         d.stmts = stmts;
         state.docs.insert(uri, d);
     }
@@ -385,6 +392,10 @@ fn handle_hover(req: *JsonValue, state: *LspState) {
             content = "```glide\nconst ".concat(decl.name);
             if decl.let_ty != null { content = content.concat(": ").concat(type_to_string_pretty(decl.let_ty)); }
             content = content.concat("\n```");
+        }
+        // Append the decl's doc comment (the contiguous `//` block above it).
+        if !content.eq("") && decl.doc_comment != null && !decl.doc_comment.eq("") {
+            content = content.concat("\n\n---\n\n").concat(decl.doc_comment);
         }
     }
 
@@ -562,7 +573,7 @@ fn handle_completion(req: *JsonValue, state: *LspState) {
     if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
     let doc: LspDoc = state.docs.get(uri);
     let items: *JsonValue = json_array();
-    let mut seen: *HashMap<bool> = HashMap::new();
+    let seen: *HashMap<bool> = HashMap::new();
 
     // 1. Locals in scope (params + lets above the cursor in the containing fn).
     let host: *Stmt = fn_containing(doc.stmts, line0);
@@ -883,7 +894,7 @@ fn check_unused_in_body(t: *Typer, body: *Vector<Stmt>) {
                 if stmt_uses_name(&s2, name) { used = true; break; }
             }
             if !used {
-                t.warn(s.line, s.column, "unused-var",
+                t.warn_unused(s.line, s.column, "unused-var",
                     "unused local `".concat(name).concat("` (prefix with `_` to silence)"));
             }
         }
@@ -1079,7 +1090,7 @@ fn check_dead_code_body(t: *Typer, body: *Vector<Stmt>) {
     for let i: int = 0; i < n; i++ {
         let s: Stmt = body.get(i);
         if terminated {
-            t.warn(s.line, s.column, "dead-code",
+            t.warn_unused(s.line, s.column, "dead-code",
                 "unreachable code after return / break / continue");
             return;     // flag only the first dead stmt per block
         }
@@ -1115,7 +1126,7 @@ pub fn analysis_unused_fn(t: *Typer, program: *Vector<Stmt>) {
         if s.type_params != null && s.type_params.len() > 0 { continue; }   // generic, may be referenced indirectly
         if called.contains(s.name) { continue; }
         t.current_origin = s.origin;
-        t.warn(s.line, s.column, "unused-fn",
+        t.warn_unused(s.line, s.column, "unused-fn",
             "function `".concat(s.name).concat("` is never called"));
     }
     called.free();
@@ -1336,7 +1347,7 @@ fn check_unused_params_fn(t: *Typer, fnstmt: *Stmt) {
         }
         if !used {
             t.current_origin = fnstmt.origin;
-            t.warn(fnstmt.line, fnstmt.column, "unused-param",
+            t.warn_unused(fnstmt.line, fnstmt.column, "unused-param",
                 "parameter `".concat(p.name).concat("` of `")
                 .concat(fnstmt.name).concat("` is never used (prefix with `_` to silence)"));
         }

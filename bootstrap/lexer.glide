@@ -15,6 +15,7 @@ pub struct Token {
     lexeme: string,
     line: int,
     column: int,
+    doc: string,        // contiguous `//` block above this token (LSP hover)
 }
 
 pub struct Lexer {
@@ -23,6 +24,9 @@ pub struct Lexer {
     pos: int,
     line: int,
     column: int,
+    // Doc comment buffer: contiguous run of `//` comments immediately above
+    // the next token. Reset by a blank line. Block comments don't touch it.
+    pending_doc: string,
 }
 
 impl Lexer {
@@ -33,6 +37,7 @@ impl Lexer {
         l.pos = 0;
         l.line = 1;
         l.column = 1;
+        l.pending_doc = "";
         return l;
     }
 
@@ -63,21 +68,45 @@ impl Lexer {
     }
 
     fn skip_trivia(self: *Lexer) {
+        let mut newlines_in_row: int = 0;
+        let mut had_doc: bool = false;
         while self.pos < self.src_len {
             let c: char = self.peek();
             let ci: int = c.to_int();
-            if ci == 32 || ci == 9 || ci == 13 || ci == 10 {
+            if ci == 10 {
+                // Newline: a blank line (>= 2 consecutive) breaks the doc
+                // comment chain — discard whatever was being built up.
+                self.advance();
+                newlines_in_row = newlines_in_row + 1;
+                if newlines_in_row >= 2 && had_doc {
+                    self.pending_doc = "";
+                    had_doc = false;
+                }
+            } else if ci == 32 || ci == 9 || ci == 13 {
                 self.advance();
             } else if ci == 47 {
-                // '/'
                 let n: char = self.peek_at(1);
                 if n.to_int() == 47 {
+                    // `//` line comment. If the chain was broken by a blank
+                    // line earlier, start a fresh chain. Otherwise append.
+                    if !had_doc { self.pending_doc = ""; }
+                    self.advance(); self.advance();
+                    // Skip a single leading space after `//`.
+                    if self.pos < self.src_len && self.peek().to_int() == 32 { self.advance(); }
+                    let line_start: int = self.pos;
                     while self.pos < self.src_len {
                         let cc: char = self.peek();
                         if cc.to_int() == 10 { break; }
                         self.advance();
                     }
+                    let line_text: string = self.src.substring(line_start, self.pos);
+                    if had_doc { self.pending_doc = self.pending_doc.concat("\n").concat(line_text); }
+                    else        { self.pending_doc = line_text; }
+                    had_doc = true;
+                    newlines_in_row = 0;
                 } else if n.to_int() == 42 {
+                    // `/* */` block comment. Skip but don't touch the doc
+                    // buffer; doc comments are line-style only.
                     self.advance(); self.advance();
                     while self.pos < self.src_len {
                         let cc: char = self.peek();
@@ -88,6 +117,7 @@ impl Lexer {
                         }
                         self.advance();
                     }
+                    newlines_in_row = 0;
                 } else {
                     return;
                 }
@@ -99,13 +129,19 @@ impl Lexer {
 
     pub fn next_token(self: *Lexer) -> Token {
         self.skip_trivia();
+        // Capture the doc-comment chain that just preceded this token, so it
+        // travels alongside the token itself (Parser uses LL(2), so we can't
+        // rely on lex.pending_doc still being valid by the time the parser
+        // looks at `current`).
+        let doc: string = self.pending_doc;
+        self.pending_doc = "";
 
         let start_line: int = self.line;
         let start_col: int = self.column;
         let start_pos: int = self.pos;
 
         if self.pos >= self.src_len {
-            return Token { kind: TOK_EOF, lexeme: "", line: start_line, column: start_col };
+            return Token { kind: TOK_EOF, lexeme: "", line: start_line, column: start_col, doc: doc };
         }
 
         let c: char = self.peek();
@@ -124,7 +160,7 @@ impl Lexer {
             let lex: string = self.src.substring(start_pos, self.pos);
             let mut kind: int = TOK_IDENT;
             if is_keyword(lex) { kind = TOK_KEYWORD; }
-            return Token { kind: kind, lexeme: lex, line: start_line, column: start_col };
+            return Token { kind: kind, lexeme: lex, line: start_line, column: start_col, doc: doc };
         }
 
         // number
@@ -153,7 +189,7 @@ impl Lexer {
             let lex: string = self.src.substring(start_pos, self.pos);
             let mut kind: int = TOK_INT;
             if is_float { kind = TOK_FLOAT; }
-            return Token { kind: kind, lexeme: lex, line: start_line, column: start_col };
+            return Token { kind: kind, lexeme: lex, line: start_line, column: start_col, doc: doc };
         }
 
         // string literal
@@ -166,7 +202,7 @@ impl Lexer {
                 self.advance();
             }
             let lex: string = self.src.substring(start_pos, self.pos);
-            return Token { kind: TOK_STRING, lexeme: lex, line: start_line, column: start_col };
+            return Token { kind: TOK_STRING, lexeme: lex, line: start_line, column: start_col, doc: doc };
         }
 
         // char literal
@@ -180,32 +216,32 @@ impl Lexer {
             }
             if self.peek().to_int() == 39 { self.advance(); }
             let lex: string = self.src.substring(start_pos, self.pos);
-            return Token { kind: TOK_CHAR, lexeme: lex, line: start_line, column: start_col };
+            return Token { kind: TOK_CHAR, lexeme: lex, line: start_line, column: start_col, doc: doc };
         }
 
         // multi-char operators we need to recognize as a unit
-        if ci == 61 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "==", line: start_line, column: start_col }; }
-        if ci == 33 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "!=", line: start_line, column: start_col }; }
-        if ci == 60 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "<=", line: start_line, column: start_col }; }
-        if ci == 62 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: ">=", line: start_line, column: start_col }; }
-        if ci == 38 && self.peek_at(1).to_int() == 38 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "&&", line: start_line, column: start_col }; }
-        if ci == 124 && self.peek_at(1).to_int() == 124 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "||", line: start_line, column: start_col }; }
-        if ci == 60 && self.peek_at(1).to_int() == 60 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "<<", line: start_line, column: start_col }; }
-        if ci == 62 && self.peek_at(1).to_int() == 62 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: ">>", line: start_line, column: start_col }; }
-        if ci == 43 && self.peek_at(1).to_int() == 43 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "++", line: start_line, column: start_col }; }
-        if ci == 45 && self.peek_at(1).to_int() == 45 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "--", line: start_line, column: start_col }; }
-        if ci == 45 && self.peek_at(1).to_int() == 62 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "->", line: start_line, column: start_col }; }
-        if ci == 61 && self.peek_at(1).to_int() == 62 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "=>", line: start_line, column: start_col }; }
-        if ci == 58 && self.peek_at(1).to_int() == 58 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "::", line: start_line, column: start_col }; }
-        if ci == 43 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "+=", line: start_line, column: start_col }; }
-        if ci == 45 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "-=", line: start_line, column: start_col }; }
-        if ci == 42 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "*=", line: start_line, column: start_col }; }
-        if ci == 47 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "/=", line: start_line, column: start_col }; }
+        if ci == 61 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "==", line: start_line, column: start_col, doc: doc }; }
+        if ci == 33 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "!=", line: start_line, column: start_col, doc: doc }; }
+        if ci == 60 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "<=", line: start_line, column: start_col, doc: doc }; }
+        if ci == 62 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: ">=", line: start_line, column: start_col, doc: doc }; }
+        if ci == 38 && self.peek_at(1).to_int() == 38 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "&&", line: start_line, column: start_col, doc: doc }; }
+        if ci == 124 && self.peek_at(1).to_int() == 124 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "||", line: start_line, column: start_col, doc: doc }; }
+        if ci == 60 && self.peek_at(1).to_int() == 60 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "<<", line: start_line, column: start_col, doc: doc }; }
+        if ci == 62 && self.peek_at(1).to_int() == 62 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: ">>", line: start_line, column: start_col, doc: doc }; }
+        if ci == 43 && self.peek_at(1).to_int() == 43 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "++", line: start_line, column: start_col, doc: doc }; }
+        if ci == 45 && self.peek_at(1).to_int() == 45 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "--", line: start_line, column: start_col, doc: doc }; }
+        if ci == 45 && self.peek_at(1).to_int() == 62 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "->", line: start_line, column: start_col, doc: doc }; }
+        if ci == 61 && self.peek_at(1).to_int() == 62 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "=>", line: start_line, column: start_col, doc: doc }; }
+        if ci == 58 && self.peek_at(1).to_int() == 58 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "::", line: start_line, column: start_col, doc: doc }; }
+        if ci == 43 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "+=", line: start_line, column: start_col, doc: doc }; }
+        if ci == 45 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "-=", line: start_line, column: start_col, doc: doc }; }
+        if ci == 42 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "*=", line: start_line, column: start_col, doc: doc }; }
+        if ci == 47 && self.peek_at(1).to_int() == 61 { self.advance(); self.advance(); return Token { kind: TOK_OP, lexeme: "/=", line: start_line, column: start_col, doc: doc }; }
 
         // operator (single char fallback)
         self.advance();
         let lex: string = self.src.substring(start_pos, self.pos);
-        return Token { kind: TOK_OP, lexeme: lex, line: start_line, column: start_col };
+        return Token { kind: TOK_OP, lexeme: lex, line: start_line, column: start_col, doc: doc };
     }
 }
 

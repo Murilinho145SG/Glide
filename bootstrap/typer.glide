@@ -107,6 +107,7 @@ pub struct DiagEntry {
     code: string,        // stable identifier (e.g. "unused-var", "type-mismatch")
     message: string,
     origin: string,      // source file path (set from t.current_origin)
+    tag: int,            // 0 = none, 1 = Unnecessary (faded), 2 = Deprecated (struck-through)
 }
 
 pub struct Typer {
@@ -156,10 +157,7 @@ impl Typer {
         free(self as *void);
     }
 
-    fn push_diag(self: *Typer, line: int, col: int, severity: int, code: string, msg: string) {
-        // current_origin can be null when an analysis sets it from an inner
-        // stmt's `s.origin` (only top-level stmts get stamped at parse time).
-        // Normalize to empty so downstream `.eq()` calls don't deref NULL.
+    fn push_diag_tag(self: *Typer, line: int, col: int, severity: int, code: string, msg: string, tag: int) {
         let mut origin: string = self.current_origin;
         if origin == null { origin = ""; }
         let e: DiagEntry = DiagEntry {
@@ -167,8 +165,17 @@ impl Typer {
             end_line: line, end_col: col + 1,
             severity: severity, code: code, message: msg,
             origin: origin,
+            tag: tag,
         };
         self.diagnostics.push(e);
+    }
+
+    fn push_diag(self: *Typer, line: int, col: int, severity: int, code: string, msg: string) {
+        self.push_diag_tag(line, col, severity, code, msg, 0);
+    }
+
+    fn warn_unused(self: *Typer, line: int, col: int, code: string, msg: string) {
+        self.push_diag_tag(line, col, 2, code, msg, 1);  // tag 1 = Unnecessary
     }
 
     fn err(self: *Typer, line: int, col: int, msg: string) {

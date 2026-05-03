@@ -175,6 +175,7 @@ pub struct Stmt {
     column: int,
     is_pub: bool,
     origin: string,            // file path; set by load_into_str on top-level stmts
+    doc_comment: string,       // contiguous `//` block above the decl (LSP hover)
 
     // Let / Const
     name: string,

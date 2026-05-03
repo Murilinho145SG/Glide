@@ -105,7 +105,7 @@ fn load_into(stmts: *Vector<Stmt>, path: string, loaded: *HashMap<bool>) {
 
 // Parse a source string, recurse on imports, append non-import stmts.
 fn load_into_str(stmts: *Vector<Stmt>, src: string, origin: string, loaded: *HashMap<bool>) {
-    let mut lex: *Lexer = Lexer::new(src);
+    let lex: *Lexer = Lexer::new(src);
     let p: *Parser = Parser::new(lex);
     let parsed: *Vector<Stmt> = parse_program(p);
     // Determine the directory of `origin` so relative imports resolve.

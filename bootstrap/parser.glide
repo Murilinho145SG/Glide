@@ -80,8 +80,13 @@ impl Parser {
 pub fn parse_program(p: *Parser) -> *Vector<Stmt> {
     let stmts: *Vector<Stmt> = Vector::new();
     while !p.at_eof() {
+        // Doc comment travels on the token (the lexer LL(2) pre-load means
+        // `lex.pending_doc` belongs to `peek`, not `current`, by the time
+        // the parser looks at it).
+        let doc: string = p.current.doc;
         let s: *Stmt = parse_top_stmt(p);
         if s == null { p.advance(); continue; }
+        s.doc_comment = doc;
         stmts.push(*s);
     }
     return stmts;

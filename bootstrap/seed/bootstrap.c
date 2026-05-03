@@ -370,6 +370,7 @@ typedef struct  Token  {
      const char*   lexeme;
      int   line;
      int   column;
+     const char*   doc;
 }  Token ;
 
 typedef struct  Lexer  {
@@ -378,6 +379,7 @@ typedef struct  Lexer  {
      int   pos;
      int   line;
      int   column;
+     const char*   pending_doc;
 }  Lexer ;
 
 typedef struct  Type  {
@@ -434,6 +436,7 @@ typedef struct  Stmt  {
      int   column;
      bool   is_pub;
      const char*   origin;
+     const char*   doc_comment;
      const char*   name;
      Type*   let_ty;
      Expr*   let_value;
@@ -491,6 +494,7 @@ typedef struct  DiagEntry  {
      const char*   code;
      const char*   message;
      const char*   origin;
+     int   tag;
 }  DiagEntry ;
 
 typedef struct  Typer  {
@@ -1071,6 +1075,7 @@ Lexer*   Lexer_new (const char*   src) {
     ((l-> pos )  =  0);
     ((l-> line )  =  1);
     ((l-> column )  =  1);
+    ((l-> pending_doc )  =  "");
     return l;
 }
 
@@ -1105,42 +1110,71 @@ void   Lexer_advance (Lexer*   self) {
 }
 
 void   Lexer_skip_trivia (Lexer*   self) {
+    int   newlines_in_row = 0;
+    bool   had_doc = false;
     while (((self-> pos )  <  (self-> src_len ))) {
         char   c = Lexer_peek(self);
         int   ci = __glide_char_to_int(c);
-        if (((((ci  ==  32)  ||  (ci  ==  9))  ||  (ci  ==  13))  ||  (ci  ==  10))) {
+        if ((ci  ==  10)) {
             Lexer_advance(self);
+            (newlines_in_row  =  (newlines_in_row  +  1));
+            if (((newlines_in_row  >=  2)  &&  had_doc)) {
+                ((self-> pending_doc )  =  "");
+                (had_doc  =  false);
+            }
         } else {
-            if ((ci  ==  47)) {
-                char   n = Lexer_peek_at(self, 1);
-                if ((__glide_char_to_int(n)  ==  47)) {
-                    while (((self-> pos )  <  (self-> src_len ))) {
-                        char   cc = Lexer_peek(self);
-                        if ((__glide_char_to_int(cc)  ==  10)) {
-                            break;
+            if ((((ci  ==  32)  ||  (ci  ==  9))  ||  (ci  ==  13))) {
+                Lexer_advance(self);
+            } else {
+                if ((ci  ==  47)) {
+                    char   n = Lexer_peek_at(self, 1);
+                    if ((__glide_char_to_int(n)  ==  47)) {
+                        if ((!had_doc)) {
+                            ((self-> pending_doc )  =  "");
                         }
                         Lexer_advance(self);
-                    }
-                } else {
-                    if ((__glide_char_to_int(n)  ==  42)) {
                         Lexer_advance(self);
-                        Lexer_advance(self);
+                        if ((((self-> pos )  <  (self-> src_len ))  &&  (__glide_char_to_int(Lexer_peek(self))  ==  32))) {
+                            Lexer_advance(self);
+                        }
+                        int   line_start = (self-> pos );
                         while (((self-> pos )  <  (self-> src_len ))) {
                             char   cc = Lexer_peek(self);
-                            char   nn = Lexer_peek_at(self, 1);
-                            if (((__glide_char_to_int(cc)  ==  42)  &&  (__glide_char_to_int(nn)  ==  47))) {
-                                Lexer_advance(self);
-                                Lexer_advance(self);
+                            if ((__glide_char_to_int(cc)  ==  10)) {
                                 break;
                             }
                             Lexer_advance(self);
                         }
+                        const char*   line_text = __glide_string_substring((self-> src ), line_start, (self-> pos ));
+                        if (had_doc) {
+                            ((self-> pending_doc )  =  __glide_string_concat(__glide_string_concat((self-> pending_doc ), "\n"), line_text));
+                        } else {
+                            ((self-> pending_doc )  =  line_text);
+                        }
+                        (had_doc  =  true);
+                        (newlines_in_row  =  0);
                     } else {
-                        return;
+                        if ((__glide_char_to_int(n)  ==  42)) {
+                            Lexer_advance(self);
+                            Lexer_advance(self);
+                            while (((self-> pos )  <  (self-> src_len ))) {
+                                char   cc = Lexer_peek(self);
+                                char   nn = Lexer_peek_at(self, 1);
+                                if (((__glide_char_to_int(cc)  ==  42)  &&  (__glide_char_to_int(nn)  ==  47))) {
+                                    Lexer_advance(self);
+                                    Lexer_advance(self);
+                                    break;
+                                }
+                                Lexer_advance(self);
+                            }
+                            (newlines_in_row  =  0);
+                        } else {
+                            return;
+                        }
                     }
+                } else {
+                    return;
                 }
-            } else {
-                return;
             }
         }
     }
@@ -1148,11 +1182,13 @@ void   Lexer_skip_trivia (Lexer*   self) {
 
 Token   Lexer_next_token (Lexer*   self) {
     Lexer_skip_trivia(self);
+    const char*   doc = (self-> pending_doc );
+    ((self-> pending_doc )  =  "");
     int   start_line = (self-> line );
     int   start_col = (self-> column );
     int   start_pos = (self-> pos );
     if (((self-> pos )  >=  (self-> src_len ))) {
-        return (( Token ){. kind  = TOK_EOF, . lexeme  = "", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_EOF, . lexeme  = "", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     char   c = Lexer_peek(self);
     int   ci = __glide_char_to_int(c);
@@ -1170,7 +1206,7 @@ Token   Lexer_next_token (Lexer*   self) {
         if (is_keyword(lex)) {
             (kind  =  TOK_KEYWORD);
         }
-        return (( Token ){. kind  = kind, . lexeme  = lex, . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = kind, . lexeme  = lex, . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (__glide_char_is_digit(c)) {
         bool   is_float = false;
@@ -1199,7 +1235,7 @@ Token   Lexer_next_token (Lexer*   self) {
         if (is_float) {
             (kind  =  TOK_FLOAT);
         }
-        return (( Token ){. kind  = kind, . lexeme  = lex, . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = kind, . lexeme  = lex, . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if ((ci  ==  34)) {
         Lexer_advance(self);
@@ -1215,7 +1251,7 @@ Token   Lexer_next_token (Lexer*   self) {
             Lexer_advance(self);
         }
         const char*   lex = __glide_string_substring((self-> src ), start_pos, (self-> pos ));
-        return (( Token ){. kind  = TOK_STRING, . lexeme  = lex, . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_STRING, . lexeme  = lex, . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if ((ci  ==  39)) {
         Lexer_advance(self);
@@ -1229,96 +1265,96 @@ Token   Lexer_next_token (Lexer*   self) {
             Lexer_advance(self);
         }
         const char*   lex = __glide_string_substring((self-> src ), start_pos, (self-> pos ));
-        return (( Token ){. kind  = TOK_CHAR, . lexeme  = lex, . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_CHAR, . lexeme  = lex, . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  61)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  61))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "==", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "==", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  33)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  61))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "!=", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "!=", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  60)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  61))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "<=", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "<=", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  62)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  61))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = ">=", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = ">=", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  38)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  38))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "&&", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "&&", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  124)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  124))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "||", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "||", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  60)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  60))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "<<", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "<<", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  62)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  62))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = ">>", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = ">>", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  43)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  43))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "++", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "++", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  45)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  45))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "--", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "--", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  45)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  62))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "->", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "->", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  61)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  62))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "=>", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "=>", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  58)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  58))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "::", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "::", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  43)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  61))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "+=", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "+=", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  45)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  61))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "-=", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "-=", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  42)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  61))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "*=", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "*=", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     if (((ci  ==  47)  &&  (__glide_char_to_int(Lexer_peek_at(self, 1))  ==  61))) {
         Lexer_advance(self);
         Lexer_advance(self);
-        return (( Token ){. kind  = TOK_OP, . lexeme  = "/=", . line  = start_line, . column  = start_col});
+        return (( Token ){. kind  = TOK_OP, . lexeme  = "/=", . line  = start_line, . column  = start_col, . doc  = doc});
     }
     Lexer_advance(self);
     const char*   lex = __glide_string_substring((self-> src ), start_pos, (self-> pos ));
-    return (( Token ){. kind  = TOK_OP, . lexeme  = lex, . line  = start_line, . column  = start_col});
+    return (( Token ){. kind  = TOK_OP, . lexeme  = lex, . line  = start_line, . column  = start_col, . doc  = doc});
 }
 
 bool   is_keyword (const char*   s) {
@@ -1924,11 +1960,13 @@ const char*   Parser_expect_ident (Parser*   self) {
 Vector__Stmt*   parse_program (Parser*   p) {
     Vector__Stmt*   stmts = Vector_new__Stmt();
     while ((!Parser_at_eof(p))) {
+        const char*   doc = ((p-> current ). doc );
         Stmt*   s = parse_top_stmt(p);
         if ((s  ==  NULL)) {
             Parser_advance(p);
             continue;
         }
+        ((s-> doc_comment )  =  doc);
         Vector_push__Stmt(stmts, (*s));
     }
     return stmts;
@@ -3127,13 +3165,21 @@ void   Typer_free (Typer*   self) {
     free((( void* )self));
 }
 
-void   Typer_push_diag (Typer*   self, int   line, int   col, int   severity, const char*   code, const char*   msg) {
+void   Typer_push_diag_tag (Typer*   self, int   line, int   col, int   severity, const char*   code, const char*   msg, int   tag) {
     const char*   origin = (self-> current_origin );
     if ((origin  ==  NULL)) {
         (origin  =  "");
     }
-    DiagEntry   e = (( DiagEntry ){. line  = line, . col  = col, . end_line  = line, . end_col  = (col  +  1), . severity  = severity, . code  = code, . message  = msg, . origin  = origin});
+    DiagEntry   e = (( DiagEntry ){. line  = line, . col  = col, . end_line  = line, . end_col  = (col  +  1), . severity  = severity, . code  = code, . message  = msg, . origin  = origin, . tag  = tag});
     Vector_push__DiagEntry((self-> diagnostics ), e);
+}
+
+void   Typer_push_diag (Typer*   self, int   line, int   col, int   severity, const char*   code, const char*   msg) {
+    Typer_push_diag_tag(self, line, col, severity, code, msg, 0);
+}
+
+void   Typer_warn_unused (Typer*   self, int   line, int   col, const char*   code, const char*   msg) {
+    Typer_push_diag_tag(self, line, col, 2, code, msg, 1);
 }
 
 void   Typer_err (Typer*   self, int   line, int   col, const char*   msg) {
@@ -8332,6 +8378,11 @@ JsonValue*   diag_to_json (DiagEntry*   d) {
     }
     json_obj_set(dj, "source", json_string("glide"));
     json_obj_set(dj, "message", json_string((d-> message )));
+    if (((d-> tag )  !=  0)) {
+        JsonValue*   tags = json_array();
+        json_arr_push(tags, json_int((d-> tag )));
+        json_obj_set(dj, "tags", tags);
+    }
     return dj;
 }
 
@@ -8546,6 +8597,9 @@ void   handle_hover (JsonValue*   req, LspState*   state) {
                     }
                 }
             }
+        }
+        if ((((!__glide_string_eq(content, ""))  &&  ((decl-> doc_comment )  !=  NULL))  &&  (!__glide_string_eq((decl-> doc_comment ), "")))) {
+            (content  =  __glide_string_concat(__glide_string_concat(content, "\n\n---\n\n"), (decl-> doc_comment )));
         }
     }
     if (__glide_string_eq(content, "")) {
@@ -9162,7 +9216,7 @@ void   check_unused_in_body (Typer*   t, Vector__Stmt*   body) {
                 }
             }
             if ((!used)) {
-                Typer_warn(t, (s. line ), (s. column ), "unused-var", __glide_string_concat(__glide_string_concat("unused local `", name), "` (prefix with `_` to silence)"));
+                Typer_warn_unused(t, (s. line ), (s. column ), "unused-var", __glide_string_concat(__glide_string_concat("unused local `", name), "` (prefix with `_` to silence)"));
             }
         }
         if (((s. then_body )  !=  NULL)) {
@@ -9406,7 +9460,7 @@ void   check_dead_code_body (Typer*   t, Vector__Stmt*   body) {
     for (int   i = 0; (i  <  n); i++) {
         Stmt   s = Vector_get__Stmt(body, i);
         if (terminated) {
-            Typer_warn(t, (s. line ), (s. column ), "dead-code", "unreachable code after return / break / continue");
+            Typer_warn_unused(t, (s. line ), (s. column ), "dead-code", "unreachable code after return / break / continue");
             return;
         }
         if (((((s. kind )  ==  ST_RETURN)  ||  ((s. kind )  ==  ST_BREAK))  ||  ((s. kind )  ==  ST_CONTINUE))) {
@@ -9458,7 +9512,7 @@ void   analysis_unused_fn (Typer*   t, Vector__Stmt*   program) {
             continue;
         }
         ((t-> current_origin )  =  (s. origin ));
-        Typer_warn(t, (s. line ), (s. column ), "unused-fn", __glide_string_concat(__glide_string_concat("function `", (s. name )), "` is never called"));
+        Typer_warn_unused(t, (s. line ), (s. column ), "unused-fn", __glide_string_concat(__glide_string_concat("function `", (s. name )), "` is never called"));
     }
     HashMap_free__bool(called);
 }
@@ -9760,7 +9814,7 @@ void   check_unused_params_fn (Typer*   t, Stmt*   fnstmt) {
         }
         if ((!used)) {
             ((t-> current_origin )  =  (fnstmt-> origin ));
-            Typer_warn(t, (fnstmt-> line ), (fnstmt-> column ), "unused-param", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("parameter `", (p. name )), "` of `"), (fnstmt-> name )), "` is never used (prefix with `_` to silence)"));
+            Typer_warn_unused(t, (fnstmt-> line ), (fnstmt-> column ), "unused-param", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("parameter `", (p. name )), "` of `"), (fnstmt-> name )), "` is never used (prefix with `_` to silence)"));
         }
     }
 }
