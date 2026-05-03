@@ -270,6 +270,19 @@ fn parse_stmt(p: *Parser) -> *Stmt {
     if p.at_kw("while") { return parse_while(p); }
     if p.at_kw("for") { return parse_for(p); }
     if p.at_kw("match") { return parse_match(p); }
+    if p.at_kw("defer") {
+        let line: int = p.current.line;
+        let col: int = p.current.column;
+        p.advance();
+        let e: *Expr = parse_expr(p, 0);
+        p.expect_op(";");
+        let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+        s.kind = ST_DEFER;
+        s.line = line;
+        s.column = col;
+        s.expr_value = e;
+        return s;
+    }
     if p.at_kw("break") {
         let line: int = p.current.line;
         let col: int = p.current.column;

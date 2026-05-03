@@ -118,6 +118,24 @@ fn emit_stdlib_runtime() {
     println!("    size_t wrote = fwrite(content, 1, n, f); fclose(f);");
     println!("    return wrote == n;");
     println!("}");
+    // Arena allocator runtime
+    println!("typedef struct Arena { unsigned char* head; int cap; int used; } Arena;");
+    println!("static Arena* Arena_new(int cap) {");
+    println!("    Arena* a = (Arena*)malloc(sizeof(Arena));");
+    println!("    a->head = (unsigned char*)malloc((size_t)cap);");
+    println!("    a->cap = cap; a->used = 0;");
+    println!("    return a;");
+    println!("}");
+    println!("static void* Arena_alloc(Arena* a, int size) {");
+    println!("    int aligned = (size + 7) & ~7;");
+    println!("    if (a->used + aligned > a->cap) { fprintf(stderr, \"arena oom\\n\"); exit(1); }");
+    println!("    void* p = (void*)(a->head + a->used);");
+    println!("    a->used += aligned;");
+    println!("    return p;");
+    println!("}");
+    println!("static void Arena_free(Arena* a) { free(a->head); free(a); }");
+    println!("static int Arena_used(Arena* a) { return a->used; }");
+    println!("static void Arena_reset(Arena* a) { a->used = 0; }");
     println!("");
 }
 
@@ -139,6 +157,8 @@ pub struct CG {
     fns: *HashMap<Stmt>,
     emitted_monos: *HashMap<bool>,
     fn_mono_queue: *Vector<FnMonoEntry>,
+    // Deferred expressions for the current fn (LIFO at fn end / before return).
+    defer_stack: *Vector<Expr>,
 }
 
 impl CG {
@@ -152,6 +172,8 @@ impl CG {
         let fnm: *HashMap<Stmt> = HashMap::new();
         let em: *HashMap<bool> = HashMap::new();
         let q: *Vector<FnMonoEntry> = Vector::new();
+        let ds: *Vector<Expr> = Vector::new();
+        g.defer_stack = ds;
         g.scope = s;
         g.generic_structs = gs;
         g.generic_fns = gf;
@@ -161,6 +183,16 @@ impl CG {
         g.emitted_monos = em;
         g.fn_mono_queue = q;
         return g;
+    }
+
+    fn emit_deferred_reverse(self: *CG, depth: int) {
+        let n: int = self.defer_stack.len();
+        for let i: int = n - 1; i >= 0; i = i - 1 {
+            ind(depth);
+            let ex: Expr = self.defer_stack.get(i);
+            emit_expr(self, &ex);
+            println!(";");
+        }
     }
 
     pub fn free(self: *CG) {
@@ -1052,6 +1084,23 @@ pub fn emit_expr(g: *CG, e: *Expr) {
 pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
     if s == null { return; }
     if s.kind == ST_LET || s.kind == ST_CONST {
+        // Auto-drop pattern: `let p: *T = T { ... };` → push free(p) onto defer.
+        let mut auto_owned: bool = false;
+        if s.kind == ST_LET && s.let_ty != null && s.let_ty.kind == TY_POINTER
+           && s.let_value != null && s.let_value.kind == EX_STRUCT_LIT {
+            // Match annot inner name with struct lit name.
+            let inner_name: string = "";
+            if s.let_ty.inner != null && s.let_ty.inner.kind == TY_NAMED {
+                if s.let_ty.inner.name.eq(s.let_value.str_val) {
+                    auto_owned = true;
+                }
+            }
+            if auto_owned {
+                // Rewrite `T { ... }` to malloc + assign.
+                // Emit: T* p = malloc(sizeof(T)); *p = (T){...};
+                // Then defer free(p).
+            }
+        }
         // ---- pre-pass: detect generic fn call BEFORE we emit anything,
         //      since we may need to print a forward decl on its own line.
 
@@ -1076,6 +1125,35 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
         } else {
             print!("/* infer */ int ", s.name);
         }
+        if auto_owned {
+            // T* p = malloc(sizeof(T)); *p = (T){...};
+            print!(" = (");
+            print!(type_to_c(s.let_ty));
+            print!(")malloc(sizeof(");
+            print!(type_to_c(s.let_ty.inner));
+            print!("));");
+            println!("");
+            ind(depth);
+            print!("*");
+            print!(s.name);
+            print!(" = ");
+            emit_expr(g, s.let_value);
+            println!(";");
+            // Push free(p) onto defer stack.
+            let free_call: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+            free_call.kind = EX_CALL;
+            free_call.line = s.line;
+            free_call.column = s.column;
+            let callee: *Expr = expr_ident("free", s.line, s.column);
+            free_call.lhs = callee;
+            let args: *Vector<Expr> = Vector::new();
+            let cast_arg: *Expr = expr_cast(expr_ident(s.name, s.line, s.column),
+                                             ty_pointer(ty_named("void")));
+            args.push(*cast_arg);
+            free_call.args = args;
+            g.defer_stack.push(*free_call);
+            return;
+        }
         if s.let_value != null {
             print!(" = ");
             emit_expr(g, s.let_value);
@@ -1084,10 +1162,28 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
         return;
     }
     if s.kind == ST_RETURN {
-        ind(depth);
-        print!("return");
-        if s.expr_value != null { print!(" "); emit_expr(g, s.expr_value); }
-        println!(";");
+        // If there's a value, capture it in a temp first so deferred exprs
+        // can run before the return without affecting the value.
+        if s.expr_value != null && g.defer_stack.len() > 0 {
+            ind(depth);
+            print!("__typeof__(");
+            emit_expr(g, s.expr_value);
+            print!(") __glide_ret = ");
+            emit_expr(g, s.expr_value);
+            println!(";");
+            g.emit_deferred_reverse(depth);
+            ind(depth); println!("return __glide_ret;");
+        } else {
+            g.emit_deferred_reverse(depth);
+            ind(depth);
+            print!("return");
+            if s.expr_value != null { print!(" "); emit_expr(g, s.expr_value); }
+            println!(";");
+        }
+        return;
+    }
+    if s.kind == ST_DEFER {
+        if s.expr_value != null { g.defer_stack.push(*s.expr_value); }
         return;
     }
     if s.kind == ST_EXPR {
@@ -1265,6 +1361,10 @@ fn emit_fn(g: *CG, s: *Stmt) {
         println!("    __glide_args_init(__glide_main_argc, __glide_main_argv);");
     }
     g.scope.clear();
+    // Reset defer stack for this fn (we'll pop at return / fn end).
+    let saved_defer: *Vector<Expr> = g.defer_stack;
+    let new_defer: *Vector<Expr> = Vector::new();
+    g.defer_stack = new_defer;
     if s.fn_params != null {
         for let i: int = 0; i < s.fn_params.len(); i++ {
             let p: Param = s.fn_params.get(i);
@@ -1277,6 +1377,9 @@ fn emit_fn(g: *CG, s: *Stmt) {
             emit_stmt(g, &b, 1);
         }
     }
+    // Flush any deferred exprs that didn't hit a return (e.g. fall-through fn end).
+    g.emit_deferred_reverse(1);
+    g.defer_stack = saved_defer;
     println!("}");
 }
 
@@ -1305,6 +1408,9 @@ fn emit_impl(g: *CG, s: *Stmt) {
         }
         println!(") {");
         g.scope.clear();
+        let saved_defer: *Vector<Expr> = g.defer_stack;
+        let nd: *Vector<Expr> = Vector::new();
+        g.defer_stack = nd;
         if m.fn_params != null {
             for let j: int = 0; j < m.fn_params.len(); j++ {
                 let p: Param = m.fn_params.get(j);
@@ -1317,6 +1423,8 @@ fn emit_impl(g: *CG, s: *Stmt) {
                 emit_stmt(g, &b, 1);
             }
         }
+        g.emit_deferred_reverse(1);
+        g.defer_stack = saved_defer;
         println!("}");
         println!("");
     }
@@ -1623,6 +1731,9 @@ pub fn emit_program(program: *Vector<Stmt>) {
         }
         println!(") {");
         g.scope.clear();
+        let saved_d: *Vector<Expr> = g.defer_stack;
+        let nd_q: *Vector<Expr> = Vector::new();
+        g.defer_stack = nd_q;
         for let j: int = 0; j < new_params_v.len(); j++ {
             let p: Param = new_params_v.get(j);
             g.declare(p.name, p.ty);
@@ -1631,6 +1742,8 @@ pub fn emit_program(program: *Vector<Stmt>) {
             let b: Stmt = new_body.get(j);
             emit_stmt(g, &b, 1);
         }
+        g.emit_deferred_reverse(1);
+        g.defer_stack = saved_d;
         println!("}");
         println!("");
     }
