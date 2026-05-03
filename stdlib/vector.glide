@@ -60,6 +60,60 @@ impl<T> Vector<T> {
         return self.len;
     }
 
+    fn is_empty(self: *Vector<T>) -> bool {
+        return self.len == 0;
+    }
+
+    fn first(self: *Vector<T>) -> T {
+        return self.data[0];
+    }
+
+    fn last(self: *Vector<T>) -> T {
+        return self.data[self.len - 1];
+    }
+
+    fn swap(self: *Vector<T>, i: int, j: int) {
+        let tmp: T = self.data[i];
+        self.data[i] = self.data[j];
+        self.data[j] = tmp;
+    }
+
+    // Remove and return element at index `i` in O(1) by swapping it with the
+    // last element. Order-changing — use `remove(i)` if order matters.
+    fn swap_remove(self: *Vector<T>, i: int) -> T {
+        let out: T = self.data[i];
+        self.len = self.len - 1;
+        if i != self.len {
+            self.data[i] = self.data[self.len];
+        }
+        return out;
+    }
+
+    fn reverse(self: *Vector<T>) {
+        let mut lo: int = 0;
+        let mut hi: int = self.len - 1;
+        while lo < hi {
+            let tmp: T = self.data[lo];
+            self.data[lo] = self.data[hi];
+            self.data[hi] = tmp;
+            lo = lo + 1;
+            hi = hi - 1;
+        }
+    }
+
+    // Shorten the vector to at most `n` elements. No-op if already shorter.
+    fn truncate(self: *Vector<T>, n: int) {
+        if n < 0 { return; }
+        if n < self.len { self.len = n; }
+    }
+
+    // Append every element of `other` to `self`. `other` is left intact.
+    fn extend(self: *Vector<T>, other: *Vector<T>) {
+        for let i: int = 0; i < other.len; i++ {
+            self.push(other.data[i]);
+        }
+    }
+
     fn clear(self: *Vector<T>) {
         self.len = 0;
     }
@@ -67,5 +121,14 @@ impl<T> Vector<T> {
     fn free(self: *Vector<T>) {
         if self.cap > 0 { free(self.data as *void); }
         free(self as *void);
+    }
+
+    // Push every passed element. Variadic over expressions of type T.
+    //
+    //     v.push_all!(1, 2, 3);
+    //     Vector::push_all!(v, 4, 5);
+    //     Vector::new().push_all!(7, 8, 9);
+    macro push_all!($($x:expr),*) {
+        $( self.push($x); )*
     }
 }
