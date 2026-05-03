@@ -170,10 +170,49 @@ fn diag_to_json(d: *DiagEntry) -> *JsonValue {
     return dj;
 }
 
+// Convert `file:///C:/path` (Windows) or `file:///path` (POSIX) into a plain
+// filesystem path the rest of the loader can use. URL-decoding is intentionally
+// not done — Glide identifiers and most paths are ASCII.
+fn uri_to_path(uri: string) -> string {
+    let n: int = uri.len();
+    if n < 7 { return uri; }
+    if !uri.substring(0, 7).eq("file://") { return uri; }
+    let rest: string = uri.substring(7, n);
+    let rn: int = rest.len();
+    // Windows: file:///C:/... -> "/C:/..." -> drop leading '/'
+    if rn > 2 && rest.at(0).to_int() == 47 && rest.at(2).to_int() == 58 {
+        return rest.substring(1, rn);
+    }
+    return rest;
+}
+
+// Find stdlib/vector.glide. Try cwd first, then alongside the running glide
+// executable. Returns the directory prefix (with no trailing slash) where
+// stdlib lives, or "" if not found.
+fn find_stdlib_root() -> string {
+    if !read_file("stdlib/vector.glide").eq("") { return ""; }
+    let exe_dir: string = __glide_exe_dir();
+    if !exe_dir.eq("") {
+        let probe: string = exe_dir.concat("/stdlib/vector.glide");
+        if !read_file(probe).eq("") { return exe_dir.concat("/"); }
+    }
+    return "";
+}
+
 fn run_analysis_and_publish(uri: string, text: string, state: *LspState) {
-    let lex: *Lexer = Lexer::new(text);
-    let p: *Parser = Parser::new(lex);
-    let stmts: *Vector<Stmt> = parse_program(p);
+    let path: string = uri_to_path(uri);
+    let stmts: *Vector<Stmt> = Vector::new();
+    let loaded: *HashMap<bool> = HashMap::new();
+
+    // Auto-prepend stdlib so Vector<T> and HashMap<V> methods resolve.
+    let prefix: string = find_stdlib_root();
+    load_into(stmts, prefix.concat("stdlib/vector.glide"), loaded);
+    load_into(stmts, prefix.concat("stdlib/hashmap.glide"), loaded);
+
+    // Parse the user's text and follow its `import "..."` directives so that
+    // cross-file symbols (Stmt, Expr, Lexer, etc. when editing the bootstrap
+    // codebase) resolve. Imports are resolved relative to the user file's dir.
+    load_into_str(stmts, text, path, loaded);
 
     let t: *Typer = Typer::new();
     check_program(t, stmts);
@@ -187,10 +226,15 @@ fn run_analysis_and_publish(uri: string, text: string, state: *LspState) {
         state.docs.insert(uri, d);
     }
 
+    // Only publish diagnostics whose origin matches the user's file path.
+    // Errors from imported files (stdlib, ast.glide, etc.) are dropped here
+    // — they'd appear at the wrong line/file in the editor.
     let arr: *JsonValue = json_array();
     for let i: int = 0; i < t.diagnostics.len(); i++ {
         let de: DiagEntry = t.diagnostics.get(i);
-        json_arr_push(arr, diag_to_json(&de));
+        if de.origin.eq(path) || de.origin.eq("") {
+            json_arr_push(arr, diag_to_json(&de));
+        }
     }
 
     let params: *JsonValue = json_object();

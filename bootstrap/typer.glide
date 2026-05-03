@@ -90,6 +90,7 @@ pub struct DiagEntry {
     severity: int,
     code: string,        // stable identifier (e.g. "unused-var", "type-mismatch")
     message: string,
+    origin: string,      // source file path (set from t.current_origin)
 }
 
 pub struct Typer {
@@ -99,6 +100,7 @@ pub struct Typer {
     owned_locals: *HashMap<bool>,   // names that must not escape (auto-drop)
     borrows: *Vector<BorrowEvent>,  // active let-bound borrows; save/restore per block
     current_ret: *Type,
+    current_origin: string,    // file the typer is currently checking
     error_count: int,
     diagnostics: *Vector<DiagEntry>,
 }
@@ -119,6 +121,7 @@ impl Typer {
         t.borrows = bw;
         t.diagnostics = dg;
         t.current_ret = null;
+        t.current_origin = "";
         t.error_count = 0;
         return t;
     }
@@ -138,6 +141,7 @@ impl Typer {
             line: line, col: col,
             end_line: line, end_col: col + 1,
             severity: severity, code: code, message: msg,
+            origin: self.current_origin,
         };
         self.diagnostics.push(e);
     }
@@ -265,6 +269,7 @@ pub fn check_program(t: *Typer, program: *Vector<Stmt>) {
     pre_register(t, program);
     for let i: int = 0; i < program.len(); i++ {
         let s: Stmt = program.get(i);
+        t.current_origin = s.origin;
         check_top(t, &s);
     }
 }

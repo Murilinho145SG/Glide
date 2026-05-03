@@ -433,6 +433,7 @@ typedef struct  Stmt  {
      int   line;
      int   column;
      bool   is_pub;
+     const char*   origin;
      const char*   name;
      Type*   let_ty;
      Expr*   let_value;
@@ -489,6 +490,7 @@ typedef struct  DiagEntry  {
      int   severity;
      const char*   code;
      const char*   message;
+     const char*   origin;
 }  DiagEntry ;
 
 typedef struct  Typer  {
@@ -498,6 +500,7 @@ typedef struct  Typer  {
      HashMap__bool*   owned_locals;
      Vector__BorrowEvent*   borrows;
      Type*   current_ret;
+     const char*   current_origin;
      int   error_count;
      Vector__DiagEntry*   diagnostics;
 }  Typer ;
@@ -869,6 +872,8 @@ void   lsp_send_notification (const char*   method, JsonValue*   params);
 void   handle_initialize (JsonValue*   req);
 void   handle_shutdown (JsonValue*   req, LspState*   state);
 JsonValue*   diag_to_json (DiagEntry*   d);
+const char*   uri_to_path (const char*   uri);
+const char*   find_stdlib_root (void);
 void   run_analysis_and_publish (const char*   uri, const char*   text, LspState*   state);
 void   handle_did_open (JsonValue*   req, LspState*   state);
 void   handle_did_change (JsonValue*   req, LspState*   state);
@@ -3089,6 +3094,7 @@ Typer*   Typer_new (void) {
     ((t-> borrows )  =  bw);
     ((t-> diagnostics )  =  dg);
     ((t-> current_ret )  =  NULL);
+    ((t-> current_origin )  =  "");
     ((t-> error_count )  =  0);
     return t;
 }
@@ -3104,7 +3110,7 @@ void   Typer_free (Typer*   self) {
 }
 
 void   Typer_push_diag (Typer*   self, int   line, int   col, int   severity, const char*   code, const char*   msg) {
-    DiagEntry   e = (( DiagEntry ){. line  = line, . col  = col, . end_line  = line, . end_col  = (col  +  1), . severity  = severity, . code  = code, . message  = msg});
+    DiagEntry   e = (( DiagEntry ){. line  = line, . col  = col, . end_line  = line, . end_col  = (col  +  1), . severity  = severity, . code  = code, . message  = msg, . origin  = (self-> current_origin )});
     Vector_push__DiagEntry((self-> diagnostics ), e);
 }
 
@@ -3212,6 +3218,7 @@ void   check_program (Typer*   t, Vector__Stmt*   program) {
     pre_register(t, program);
     for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
         Stmt   s = Vector_get__Stmt(program, i);
+        ((t-> current_origin )  =  (s. origin ));
         check_top(t, (&s));
     }
 }
@@ -8273,10 +8280,44 @@ JsonValue*   diag_to_json (DiagEntry*   d) {
     return dj;
 }
 
+const char*   uri_to_path (const char*   uri) {
+    int   n = __glide_string_len(uri);
+    if ((n  <  7)) {
+        return uri;
+    }
+    if ((!__glide_string_eq(__glide_string_substring(uri, 0, 7), "file://"))) {
+        return uri;
+    }
+    const char*   rest = __glide_string_substring(uri, 7, n);
+    int   rn = __glide_string_len(rest);
+    if ((((rn  >  2)  &&  (__glide_char_to_int(__glide_string_at(rest, 0))  ==  47))  &&  (__glide_char_to_int(__glide_string_at(rest, 2))  ==  58))) {
+        return __glide_string_substring(rest, 1, rn);
+    }
+    return rest;
+}
+
+const char*   find_stdlib_root (void) {
+    if ((!__glide_string_eq(read_file("stdlib/vector.glide"), ""))) {
+        return "";
+    }
+    const char*   exe_dir = __glide_exe_dir();
+    if ((!__glide_string_eq(exe_dir, ""))) {
+        const char*   probe = __glide_string_concat(exe_dir, "/stdlib/vector.glide");
+        if ((!__glide_string_eq(read_file(probe), ""))) {
+            return __glide_string_concat(exe_dir, "/");
+        }
+    }
+    return "";
+}
+
 void   run_analysis_and_publish (const char*   uri, const char*   text, LspState*   state) {
-    Lexer*   lex = Lexer_new(text);
-    Parser*   p = Parser_new(lex);
-    Vector__Stmt*   stmts = parse_program(p);
+    const char*   path = uri_to_path(uri);
+    Vector__Stmt*   stmts = Vector_new__Stmt();
+    HashMap__bool*   loaded = HashMap_new__bool();
+    const char*   prefix = find_stdlib_root();
+    load_into(stmts, __glide_string_concat(prefix, "stdlib/vector.glide"), loaded);
+    load_into(stmts, __glide_string_concat(prefix, "stdlib/hashmap.glide"), loaded);
+    load_into_str(stmts, text, path, loaded);
     Typer*   t = Typer_new();
     check_program(t, stmts);
     run_extra_analyses(t, stmts);
@@ -8288,7 +8329,9 @@ void   run_analysis_and_publish (const char*   uri, const char*   text, LspState
     JsonValue*   arr = json_array();
     for (int   i = 0; (i  <  Vector_len__DiagEntry((t-> diagnostics ))); i++) {
         DiagEntry   de = Vector_get__DiagEntry((t-> diagnostics ), i);
-        json_arr_push(arr, diag_to_json((&de)));
+        if ((__glide_string_eq((de. origin ), path)  ||  __glide_string_eq((de. origin ), ""))) {
+            json_arr_push(arr, diag_to_json((&de)));
+        }
     }
     JsonValue*   params = json_object();
     json_obj_set(params, "uri", json_string(uri));
@@ -9970,6 +10013,7 @@ void   load_into_str (Vector__Stmt*   stmts, const char*   src, const char*   or
             const char*   resolved = resolve_import(dir, unq);
             load_into(stmts, resolved, loaded);
         } else {
+            ((s. origin )  =  origin);
             Vector_push__Stmt(stmts, s);
         }
     }
