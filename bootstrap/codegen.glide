@@ -2008,6 +2008,215 @@ fn emit_fn_signature(s: *Stmt) {
     print!(")");
 }
 
+// Walk an expr looking for `var.method(args)`. If found, try to resolve
+// the impl-generic type params from the args. Returns the inferred
+// concrete generic type (e.g. *Vector<int>) on success.
+fn try_constrain_from_expr(g: *CG, e: *Expr, var: string, gen_name: string, tparams: *Vector<string>) -> *Type {
+    if e == null { return null; }
+    if e.kind == EX_CALL && e.lhs != null && e.lhs.kind == EX_MEMBER
+       && e.lhs.lhs != null && e.lhs.lhs.kind == EX_IDENT
+       && e.lhs.lhs.str_val.eq(var) {
+        let method: string = e.lhs.field;
+        let mname: string = gen_name.concat("_").concat(method);
+        if g.generic_fns.contains(mname) {
+            let mtmpl: Stmt = g.generic_fns.get(mname);
+            // For each tparam, find a method param (skipping self at index 0)
+            // whose ty == Named(tparam). The corresponding user arg has the
+            // concrete type. User args are e.args; method params after self
+            // align 1:1 with them.
+            if mtmpl.fn_params != null && e.args != null {
+                let resolved: *Vector<Type> = Vector::new();
+                let mut all: bool = true;
+                for let pi: int = 0; pi < tparams.len(); pi++ {
+                    let tp: string = tparams.get(pi);
+                    let mut found: *Type = null;
+                    for let j: int = 1; j < mtmpl.fn_params.len(); j++ {
+                        let mp: Param = mtmpl.fn_params.get(j);
+                        if mp.ty != null && mp.ty.kind == TY_NAMED && mp.ty.name.eq(tp) {
+                            let arg_idx: int = j - 1;
+                            if arg_idx < e.args.len() {
+                                let a: Expr = e.args.get(arg_idx);
+                                let at: *Type = infer_for_codegen(g, &a);
+                                if at != null { found = at; break; }
+                            }
+                        }
+                    }
+                    if found == null { all = false; break; }
+                    resolved.push(*found);
+                }
+                if all && resolved.len() > 0 {
+                    return ty_pointer(ty_generic(gen_name, resolved));
+                }
+            }
+        }
+    }
+    // Recurse into children.
+    if e.lhs != null {
+        let r: *Type = try_constrain_from_expr(g, e.lhs, var, gen_name, tparams);
+        if r != null { return r; }
+    }
+    if e.rhs != null {
+        let r: *Type = try_constrain_from_expr(g, e.rhs, var, gen_name, tparams);
+        if r != null { return r; }
+    }
+    if e.operand != null {
+        let r: *Type = try_constrain_from_expr(g, e.operand, var, gen_name, tparams);
+        if r != null { return r; }
+    }
+    if e.args != null {
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            let r: *Type = try_constrain_from_expr(g, &a, var, gen_name, tparams);
+            if r != null { return r; }
+        }
+    }
+    return null;
+}
+
+fn try_constrain_from_stmt(g: *CG, s: *Stmt, var: string, gen_name: string, tparams: *Vector<string>) -> *Type {
+    if s == null { return null; }
+    if s.let_value != null {
+        let r: *Type = try_constrain_from_expr(g, s.let_value, var, gen_name, tparams);
+        if r != null { return r; }
+    }
+    if s.expr_value != null {
+        let r: *Type = try_constrain_from_expr(g, s.expr_value, var, gen_name, tparams);
+        if r != null { return r; }
+    }
+    if s.cond != null {
+        let r: *Type = try_constrain_from_expr(g, s.cond, var, gen_name, tparams);
+        if r != null { return r; }
+    }
+    if s.for_step != null {
+        let r: *Type = try_constrain_from_expr(g, s.for_step, var, gen_name, tparams);
+        if r != null { return r; }
+    }
+    if s.then_body != null {
+        for let i: int = 0; i < s.then_body.len(); i++ {
+            let b: Stmt = s.then_body.get(i);
+            let r: *Type = try_constrain_from_stmt(g, &b, var, gen_name, tparams);
+            if r != null { return r; }
+        }
+    }
+    if s.else_body != null {
+        for let i: int = 0; i < s.else_body.len(); i++ {
+            let b: Stmt = s.else_body.get(i);
+            let r: *Type = try_constrain_from_stmt(g, &b, var, gen_name, tparams);
+            if r != null { return r; }
+        }
+    }
+    return null;
+}
+
+// Walk a stmt populating g.scope from any ST_LET it contains (recursively).
+// Used so the type-inference pre-pass can resolve identifier references in
+// nested blocks (e.g. `for let i: int = 0; ...; i++ { v.push(i * 10); }`).
+fn populate_scope_from_stmt(g: *CG, s: *Stmt) {
+    if s == null { return; }
+    if (s.kind == ST_LET || s.kind == ST_CONST) && s.let_ty != null {
+        g.declare(s.name, s.let_ty);
+    }
+    if s.for_init != null { populate_scope_from_stmt(g, s.for_init); }
+    if s.then_body != null {
+        for let i: int = 0; i < s.then_body.len(); i++ {
+            let b: Stmt = s.then_body.get(i);
+            populate_scope_from_stmt(g, &b);
+        }
+    }
+    if s.else_body != null {
+        for let i: int = 0; i < s.else_body.len(); i++ {
+            let b: Stmt = s.else_body.get(i);
+            populate_scope_from_stmt(g, &b);
+        }
+    }
+}
+
+// Pre-pass: for each `let v = Generic::new()` (no annot) in the fn body,
+// find the first subsequent use of v that constrains the generic's type
+// params, and backfill s.let_ty so the rest of codegen mono'izes correctly.
+fn infer_let_types(g: *CG, body: *Vector<Stmt>) {
+    if body == null { return; }
+    // Pre-populate scope with all annotated lets (recursing into bodies) so
+    // identifier inference works inside nested blocks.
+    for let k: int = 0; k < body.len(); k++ {
+        let sk: Stmt = body.get(k);
+        populate_scope_from_stmt(g, &sk);
+    }
+    let n: int = body.len();
+    for let i: int = 0; i < n; i++ {
+        let s: Stmt = body.get(i);
+        if s.kind != ST_LET { continue; }
+        if s.let_ty != null { continue; }
+        if s.let_value == null || s.let_value.kind != EX_CALL { continue; }
+        let callee: *Expr = s.let_value.lhs;
+        if callee == null { continue; }
+        let mut gname: string = "";
+        if callee.kind == EX_IDENT { gname = callee.str_val; }
+        if callee.kind == EX_PATH { gname = callee.str_val.concat("_").concat(callee.field); }
+        if gname.len() == 0 { continue; }
+        if !g.generic_fns.contains(gname) { continue; }
+        let template: Stmt = g.generic_fns.get(gname);
+        if template.type_params == null || template.type_params.len() == 0 { continue; }
+        if template.fn_ret_ty == null { continue; }
+        // Strip outer pointer(s) to get the generic base name.
+        let mut inner: *Type = template.fn_ret_ty;
+        while inner != null && inner.kind == TY_POINTER {
+            inner = inner.inner;
+        }
+        if inner == null || inner.kind != TY_GENERIC { continue; }
+        let gen_base: string = inner.name;
+        // Search later stmts.
+        let mut resolved: *Type = null;
+        for let j: int = i + 1; j < n; j++ {
+            let s2: Stmt = body.get(j);
+            resolved = try_constrain_from_stmt(g, &s2, s.name, gen_base, template.type_params);
+            if resolved != null { break; }
+        }
+        if resolved != null {
+            s.let_ty = resolved;
+            body.set(i, s);
+            // Declare this let now too, in case a later let references it.
+            g.declare(s.name, resolved);
+        }
+    }
+}
+
+fn infer_let_types_in_program(g: *CG, program: *Vector<Stmt>) {
+    let n: int = program.len();
+    for let i: int = 0; i < n; i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN && s.fn_body != null {
+            // Set up a fresh scope with this fn's params so identifier
+            // inference works during the pre-pass.
+            g.scope.clear();
+            if s.fn_params != null {
+                for let k: int = 0; k < s.fn_params.len(); k++ {
+                    let p: Param = s.fn_params.get(k);
+                    g.declare(p.name, p.ty);
+                }
+            }
+            infer_let_types(g, s.fn_body);
+        }
+        if s.kind == ST_IMPL && s.impl_methods != null {
+            for let j: int = 0; j < s.impl_methods.len(); j++ {
+                let m: Stmt = s.impl_methods.get(j);
+                if m.fn_body != null {
+                    g.scope.clear();
+                    if m.fn_params != null {
+                        for let k: int = 0; k < m.fn_params.len(); k++ {
+                            let p: Param = m.fn_params.get(k);
+                            g.declare(p.name, p.ty);
+                        }
+                    }
+                    infer_let_types(g, m.fn_body);
+                }
+            }
+        }
+    }
+    // Restore empty scope for the regular emit pipeline.
+    g.scope.clear();
+}
+
 fn emit_fn(g: *CG, s: *Stmt) {
     emit_fn_signature(s);
     println!(" {");
@@ -2244,6 +2453,11 @@ pub fn emit_program(program: *Vector<Stmt>) {
             }
         }
     }
+
+    // Pre-pass: backfill `let v = Generic::new()` (no annot) by inferring T
+    // from the first subsequent use of v. Must run AFTER generic fn registry
+    // is populated and BEFORE the generic-uses collection below.
+    infer_let_types_in_program(g, program);
 
     // Walk the program collecting Type::Generic uses, emit specialized structs.
     let monos: *Vector<Type> = Vector::new();
