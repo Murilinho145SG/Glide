@@ -64,6 +64,50 @@ fn type_owner_name(t: *Type) -> string {
     return "";
 }
 
+// A type-attached macro is "static" when its body never references `self`
+// (no implicit receiver) and "instance" when it does. Static-in-impl macros
+// can be called as `Type::name!(args)` with no receiver and all args going
+// straight to matchers. Instance macros keep the existing semantics:
+// `v.name!(args)` and `Type::name!(v, args)`.
+fn body_references_self(stmts: *Vector<Stmt>) -> bool {
+    if stmts == null { return false; }
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if stmt_references_self(&s) { return true; }
+    }
+    return false;
+}
+
+fn stmt_references_self(s: *Stmt) -> bool {
+    if s == null { return false; }
+    if s.let_value != null && expr_references_self(s.let_value) { return true; }
+    if s.expr_value != null && expr_references_self(s.expr_value) { return true; }
+    if s.cond != null && expr_references_self(s.cond) { return true; }
+    if s.for_step != null && expr_references_self(s.for_step) { return true; }
+    if s.scrutinee != null && expr_references_self(s.scrutinee) { return true; }
+    if s.then_body != null && body_references_self(s.then_body) { return true; }
+    if s.else_body != null && body_references_self(s.else_body) { return true; }
+    if s.fn_body != null && body_references_self(s.fn_body) { return true; }
+    if s.for_init != null && stmt_references_self(s.for_init) { return true; }
+    return false;
+}
+
+fn expr_references_self(e: *Expr) -> bool {
+    if e == null { return false; }
+    if e.kind == EX_IDENT && e.str_val.eq("self") { return true; }
+    if e.lhs != null && expr_references_self(e.lhs) { return true; }
+    if e.rhs != null && expr_references_self(e.rhs) { return true; }
+    if e.operand != null && expr_references_self(e.operand) { return true; }
+    if e.macro_recv != null && expr_references_self(e.macro_recv) { return true; }
+    if e.args != null {
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            if expr_references_self(&a) { return true; }
+        }
+    }
+    return false;
+}
+
 // Walk every fn / impl-method body in the program and expand macros found at
 // statement position.
 fn expand_in_program(program: *Vector<Stmt>, sm: *HashMap<Stmt>, tm: *Vector<TypeMacro>) {
@@ -117,18 +161,24 @@ fn expand_in_block(stmts: *Vector<Stmt>, sm: *HashMap<Stmt>, tm: *Vector<TypeMac
 // known user macro (e.g. it's a builtin like `println!`).
 fn try_expand_call(call: *Expr, sm: *HashMap<Stmt>, tm: *Vector<TypeMacro>) -> *Vector<Stmt> {
     if call == null || call.kind != EX_MACRO { return null; }
-    // `Type::name!(args)` — qualified type-attached. The first arg is the
-    // receiver; the rest match against the macro's matchers (so callers write
-    // `Vector::push_all!(v, 1, 2, 3)`).
+    // `Type::name!(args)` — qualified type-attached.
+    //   * Instance form (body uses `self`): the first arg is the receiver,
+    //     the rest match against the macro's matchers
+    //     (`Vector::push_all!(v, 1, 2, 3)`).
+    //   * Static form (body doesn't reference `self`): no receiver, all args
+    //     go straight to matchers (`Helper::log!("hi")`).
     if call.macro_owner != null && !call.macro_owner.eq("") {
         for let i: int = 0; i < tm.len(); i++ {
             let entry: TypeMacro = tm.get(i);
             if entry.owner.eq(call.macro_owner) && entry.name.eq(call.str_val) {
+                let uses_self: bool = body_references_self(entry.def.then_body);
+                if !uses_self {
+                    return expand_with_def_recv(call, &entry.def, null);
+                }
                 if call.args == null || call.args.len() == 0 { return null; }
                 let recv_arg: Expr = call.args.get(0);
                 let recv_p: *Expr = calloc(1, sizeof(Expr)) as *Expr;
                 *recv_p = recv_arg;
-                // Build a synthetic call whose args drop arg 0.
                 let rest: *Vector<Expr> = Vector::new();
                 for let k: int = 1; k < call.args.len(); k++ {
                     let a: Expr = call.args.get(k);
@@ -142,14 +192,18 @@ fn try_expand_call(call: *Expr, sm: *HashMap<Stmt>, tm: *Vector<TypeMacro>) -> *
         }
         return null;
     }
-    // `recv.name!(args)` — receiver-style. Match by macro name only; if there
-    // are multiple impls defining the same macro, the first wins. Users can
-    // disambiguate with `Type::name!(recv, args)`.
+    // `recv.name!(args)` — receiver-style. Match by macro name only; if
+    // there are multiple impls defining the same macro, the first wins.
+    // For static-in-impl macros (no `self` in body) the receiver is silently
+    // discarded so `Type::new().some_static!(args)` still works.
     if call.macro_recv != null {
         for let i: int = 0; i < tm.len(); i++ {
             let entry: TypeMacro = tm.get(i);
             if entry.name.eq(call.str_val) {
-                return expand_with_def_recv(call, &entry.def, call.macro_recv);
+                let uses_self: bool = body_references_self(entry.def.then_body);
+                let mut recv_for: *Expr = null;
+                if uses_self { recv_for = call.macro_recv; }
+                return expand_with_def_recv(call, &entry.def, recv_for);
             }
         }
         return null;
