@@ -912,7 +912,8 @@ const char*   word_at (const char*   text, int   line0, int   col0);
 void   handle_hover (JsonValue*   req, LspState*   state);
 int   symbol_kind_for (Stmt*   s);
 JsonValue*   position_to_json (int   line1, int   col1);
-JsonValue*   range_for_stmt (Stmt*   s);
+JsonValue*   range_for_decl_name (Stmt*   s);
+const char*   path_to_uri (const char*   path);
 void   handle_document_symbol (JsonValue*   req, LspState*   state);
 void   handle_definition (JsonValue*   req, LspState*   state);
 int   ci_kind_for (Stmt*   s);
@@ -8789,11 +8790,32 @@ JsonValue*   position_to_json (int   line1, int   col1) {
     return p;
 }
 
-JsonValue*   range_for_stmt (Stmt*   s) {
+JsonValue*   range_for_decl_name (Stmt*   s) {
+    int   nl = (s-> name_line );
+    int   nc = (s-> name_col );
+    int   nlen = (s-> name_len );
+    if ((nl  ==  0)) {
+        (nl  =  (s-> line ));
+        (nc  =  (s-> column ));
+        (nlen  =  1);
+    }
+    if ((nlen  <  1)) {
+        (nlen  =  1);
+    }
     JsonValue*   r = json_object();
-    json_obj_set(r, "start", position_to_json((s-> line ), (s-> column )));
-    json_obj_set(r, "end", position_to_json((s-> line ), ((s-> column )  +  1)));
+    json_obj_set(r, "start", position_to_json(nl, nc));
+    json_obj_set(r, "end", position_to_json(nl, (nc  +  nlen)));
     return r;
+}
+
+const char*   path_to_uri (const char*   path) {
+    if (((path  ==  NULL)  ||  (__glide_string_len(path)  ==  0))) {
+        return "";
+    }
+    if ((__glide_char_to_int(__glide_string_at(path, 0))  ==  47)) {
+        return __glide_string_concat("file://", path);
+    }
+    return __glide_string_concat("file:///", path);
 }
 
 void   handle_document_symbol (JsonValue*   req, LspState*   state) {
@@ -8825,8 +8847,8 @@ void   handle_document_symbol (JsonValue*   req, LspState*   state) {
             }
             json_obj_set(sym, "detail", json_string(detail));
             json_obj_set(sym, "kind", json_int(symbol_kind_for((&s))));
-            json_obj_set(sym, "range", range_for_stmt((&s)));
-            json_obj_set(sym, "selectionRange", range_for_stmt((&s)));
+            json_obj_set(sym, "range", range_for_decl_name((&s)));
+            json_obj_set(sym, "selectionRange", range_for_decl_name((&s)));
             json_arr_push(arr, sym);
         }
     }
@@ -8856,9 +8878,13 @@ void   handle_definition (JsonValue*   req, LspState*   state) {
         lsp_send_response(id, json_null());
         return;
     }
+    const char*   target_uri = uri;
+    if ((((decl-> origin )  !=  NULL)  &&  (!__glide_string_eq((decl-> origin ), "")))) {
+        (target_uri  =  path_to_uri((decl-> origin )));
+    }
     JsonValue*   loc = json_object();
-    json_obj_set(loc, "uri", json_string(uri));
-    json_obj_set(loc, "range", range_for_stmt(decl));
+    json_obj_set(loc, "uri", json_string(target_uri));
+    json_obj_set(loc, "range", range_for_decl_name(decl));
     lsp_send_response(id, loc);
 }
 
@@ -9289,11 +9315,23 @@ void   collect_uses_in_stmt (Stmt*   s, const char*   name, Vector__UseSite*   o
         return;
     }
     if (((((((s-> kind )  ==  ST_FN)  ||  ((s-> kind )  ==  ST_STRUCT))  ||  ((s-> kind )  ==  ST_ENUM))  ||  ((s-> kind )  ==  ST_CONST))  &&  __glide_string_eq((s-> name ), name))) {
-        UseSite   u = (( UseSite ){. line  = (s-> line ), . col  = (s-> column )});
+        int   nl = (s-> name_line );
+        int   nc = (s-> name_col );
+        if ((nl  ==  0)) {
+            (nl  =  (s-> line ));
+            (nc  =  (s-> column ));
+        }
+        UseSite   u = (( UseSite ){. line  = nl, . col  = nc});
         Vector_push__UseSite(out, u);
     }
     if ((((s-> kind )  ==  ST_LET)  &&  __glide_string_eq((s-> name ), name))) {
-        UseSite   u = (( UseSite ){. line  = (s-> line ), . col  = (s-> column )});
+        int   nl = (s-> name_line );
+        int   nc = (s-> name_col );
+        if ((nl  ==  0)) {
+            (nl  =  (s-> line ));
+            (nc  =  (s-> column ));
+        }
+        UseSite   u = (( UseSite ){. line  = nl, . col  = nc});
         Vector_push__UseSite(out, u);
     }
     if (((s-> let_value )  !=  NULL)) {

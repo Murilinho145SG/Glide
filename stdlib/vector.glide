@@ -1,5 +1,5 @@
 // Vector<T>: growable owning array. Calls libc malloc/free directly.
-
+// Use `Vector::new()` to construct, `v.push(x)` / `v.pop()` to mutate.
 struct Vector<T> {
     data: *T,
     len: int,

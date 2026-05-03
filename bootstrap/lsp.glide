@@ -440,12 +440,27 @@ fn position_to_json(line1: int, col1: int) -> *JsonValue {
     return p;
 }
 
-fn range_for_stmt(s: *Stmt) -> *JsonValue {
+// Range covering the declaration's name (the bit a user actually wants to
+// jump to / highlight). Falls back to the whole stmt's start if the parser
+// didn't capture a name position.
+fn range_for_decl_name(s: *Stmt) -> *JsonValue {
+    let mut nl: int = s.name_line;
+    let mut nc: int = s.name_col;
+    let mut nlen: int = s.name_len;
+    if nl == 0 { nl = s.line; nc = s.column; nlen = 1; }
+    if nlen < 1 { nlen = 1; }
     let r: *JsonValue = json_object();
-    json_obj_set(r, "start", position_to_json(s.line, s.column));
-    // End is approximate — use a reasonable cursor position.
-    json_obj_set(r, "end", position_to_json(s.line, s.column + 1));
+    json_obj_set(r, "start", position_to_json(nl, nc));
+    json_obj_set(r, "end",   position_to_json(nl, nc + nlen));
     return r;
+}
+
+// Convert an absolute filesystem path to a `file://` URI. Handles both
+// POSIX (`/path/to/x`) and Windows (`c:/path/to/x`).
+fn path_to_uri(path: string) -> string {
+    if path == null || path.len() == 0 { return ""; }
+    if path.at(0).to_int() == 47 { return "file://".concat(path); }
+    return "file:///".concat(path);
 }
 
 fn handle_document_symbol(req: *JsonValue, state: *LspState) {
@@ -471,8 +486,8 @@ fn handle_document_symbol(req: *JsonValue, state: *LspState) {
             if s.kind == ST_FN { detail = fn_signature(&s); }
             json_obj_set(sym, "detail", json_string(detail));
             json_obj_set(sym, "kind", json_int(symbol_kind_for(&s)));
-            json_obj_set(sym, "range", range_for_stmt(&s));
-            json_obj_set(sym, "selectionRange", range_for_stmt(&s));
+            json_obj_set(sym, "range", range_for_decl_name(&s));
+            json_obj_set(sym, "selectionRange", range_for_decl_name(&s));
             json_arr_push(arr, sym);
         }
     }
@@ -495,9 +510,15 @@ fn handle_definition(req: *JsonValue, state: *LspState) {
     let decl: *Stmt = find_top_decl(doc.stmts, word);
     if decl == null { lsp_send_response(id, json_null()); return; }
 
+    // Build the URI from the decl's origin so jumps to stdlib (Vector,
+    // HashMap, ...) actually open the right file.
+    let mut target_uri: string = uri;
+    if decl.origin != null && !decl.origin.eq("") {
+        target_uri = path_to_uri(decl.origin);
+    }
     let loc: *JsonValue = json_object();
-    json_obj_set(loc, "uri", json_string(uri));
-    json_obj_set(loc, "range", range_for_stmt(decl));
+    json_obj_set(loc, "uri", json_string(target_uri));
+    json_obj_set(loc, "range", range_for_decl_name(decl));
     lsp_send_response(id, loc);
 }
 
@@ -825,14 +846,20 @@ fn collect_uses_in_expr(e: *Expr, name: string, out: *Vector<UseSite>) {
 
 fn collect_uses_in_stmt(s: *Stmt, name: string, out: *Vector<UseSite>) {
     if s == null { return; }
-    // Declaration site of fn / struct / enum / const itself with this name.
+    // Declaration site of fn / struct / enum / const / let — anchor at the
+    // name position so highlight / find-refs land on the identifier itself,
+    // not the leading `let` / `fn` / `struct` keyword.
     if (s.kind == ST_FN || s.kind == ST_STRUCT || s.kind == ST_ENUM || s.kind == ST_CONST)
        && s.name.eq(name) {
-        let u: UseSite = UseSite { line: s.line, col: s.column };
+        let mut nl: int = s.name_line; let mut nc: int = s.name_col;
+        if nl == 0 { nl = s.line; nc = s.column; }
+        let u: UseSite = UseSite { line: nl, col: nc };
         out.push(u);
     }
     if s.kind == ST_LET && s.name.eq(name) {
-        let u: UseSite = UseSite { line: s.line, col: s.column };
+        let mut nl: int = s.name_line; let mut nc: int = s.name_col;
+        if nl == 0 { nl = s.line; nc = s.column; }
+        let u: UseSite = UseSite { line: nl, col: nc };
         out.push(u);
     }
     if s.let_value != null { collect_uses_in_expr(s.let_value, name, out); }

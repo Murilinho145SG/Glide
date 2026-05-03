@@ -1,6 +1,5 @@
 // HashMap<V>: open-addressing hash map with string keys.
 // Linear probing, ~75% load factor, power-of-two capacities.
-
 struct HashMap<V> {
     keys: *string,
     values: *V,
