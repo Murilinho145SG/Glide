@@ -83,14 +83,49 @@ let m: *HashMap<int> = HashMap::new();
 m.insert("answer", 42);
 ```
 
-## get started
+## install
+
+Glide ships as a single archive that contains the compiler and a bundled C toolchain (Zig). No system gcc, clang, or Rust required.
+
+**Linux / macOS:**
 
 ```bash
-cargo install --path .
-glide run hello.glide
+curl -sSf https://github.com/.../releases/latest/download/install.sh | bash
 ```
 
-Examples in `examples/`. Editor support in `zed-extension/`.
+**Windows (PowerShell):**
+
+```powershell
+irm https://github.com/.../releases/latest/download/install.ps1 | iex
+```
+
+Or download the archive for your platform from releases and run `tools/install.{sh,ps1} --archive <path>`.
+
+## use
+
+```bash
+glide run hello.glide
+glide build hello.glide -o hello
+glide build hello.glide --target=x86_64-linux-gnu     # cross-compile
+glide check hello.glide
+glide emit hello.glide                                 # show generated C
+```
+
+Cross-compile targets are anything Zig supports: `x86_64-linux-{gnu,musl}`, `aarch64-linux-{gnu,musl}`, `x86_64-windows-{gnu,msvc}`, `aarch64-macos`, `x86_64-macos`, `riscv64-linux-musl`, etc.
+
+## build from source
+
+The compiler is written in Glide. To build it from scratch you only need a C compiler:
+
+```bash
+git clone <repo> && cd glide
+cc bootstrap/seed/bootstrap.c -o glide_seed -O2 -lpthread -lm     # 1. seed
+bash tools/install_zig.sh                                          # 2. fetch Zig
+./glide_seed build bootstrap/main.glide -o glide                   # 3. self-host
+bash tools/build_release.sh                                        # 4. (optional) make a release archive
+```
+
+Examples live in `examples/`. Editor support (Zed grammar) in `zed-extension/`.
 
 ## license
 

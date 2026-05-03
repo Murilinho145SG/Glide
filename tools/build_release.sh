@@ -12,7 +12,7 @@
 # Assumes:
 #   - tools/install_zig.sh has already been run (runtime/zig/ exists)
 #   - A working `glide` binary exists at ./glide(.exe), built via the
-#     bootstrap or via cargo as a fallback.
+#     bootstrap from bootstrap/seed/bootstrap.c.
 
 set -e
 
@@ -43,9 +43,8 @@ STAGE="dist/${NAME}"
 
 if [ ! -x "$BIN" ]; then
     echo "no $BIN found in repo root. Build it first:" >&2
-    echo "  cargo build --release && cp target/release/$BIN ." >&2
-    echo "or, if bootstrap-built:" >&2
-    echo "  ./glide.exe build bootstrap/main.glide -o glide.exe" >&2
+    echo "  cc bootstrap/seed/bootstrap.c -o glide_seed -O2 -lpthread -lm" >&2
+    echo "  ./glide_seed build bootstrap/main.glide -o $BIN" >&2
     exit 1
 fi
 if [ ! -d runtime/zig ]; then

@@ -1392,7 +1392,11 @@ pub fn emit_expr(g: *CG, e: *Expr) {
     if e.kind == EX_INT { print!(e.int_val); return; }
     if e.kind == EX_FLOAT { print!(e.int_val); return; }   // float not modelled in payload yet
     if e.kind == EX_STRING { print!("\""); print!(e.str_val); print!("\""); return; }
-    if e.kind == EX_CHAR { print!("'\\x"); print!(e.int_val); print!("'"); return; }
+    if e.kind == EX_CHAR {
+        // Emit as `(char)NNN` decimal — C interprets `'\xNN'` as hex digits,
+        // not decimal, so a decimal int_val would silently re-encode.
+        print!("(char)"); print!(e.int_val); return;
+    }
     if e.kind == EX_BOOL { if e.bool_val { print!("true"); } else { print!("false"); } return; }
     if e.kind == EX_NULL { print!("NULL"); return; }
     if e.kind == EX_IDENT { print!(e.str_val); return; }
