@@ -8613,11 +8613,15 @@ void   handle_document_symbol (JsonValue*   req, LspState*   state) {
         return;
     }
     LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    const char*   path = uri_to_path(uri);
     JsonValue*   arr = json_array();
     if (((doc. stmts )  !=  NULL)) {
         for (int   i = 0; (i  <  Vector_len__Stmt((doc. stmts ))); i++) {
             Stmt   s = Vector_get__Stmt((doc. stmts ), i);
             if ((((((s. kind )  !=  ST_FN)  &&  ((s. kind )  !=  ST_STRUCT))  &&  ((s. kind )  !=  ST_ENUM))  &&  ((s. kind )  !=  ST_CONST))) {
+                continue;
+            }
+            if (((!__glide_string_eq((s. origin ), ""))  &&  (!__glide_string_eq((s. origin ), path)))) {
                 continue;
             }
             JsonValue*   sym = json_object();
@@ -8974,6 +8978,7 @@ void   handle_references (JsonValue*   req, LspState*   state) {
         return;
     }
     LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    const char*   path = uri_to_path(uri);
     const char*   word = word_at((doc. text ), line0, col0);
     if (__glide_string_eq(word, "")) {
         lsp_send_response(id, json_array());
@@ -8983,6 +8988,9 @@ void   handle_references (JsonValue*   req, LspState*   state) {
     if (((doc. stmts )  !=  NULL)) {
         for (int   i = 0; (i  <  Vector_len__Stmt((doc. stmts ))); i++) {
             Stmt   s = Vector_get__Stmt((doc. stmts ), i);
+            if (((!__glide_string_eq((s. origin ), ""))  &&  (!__glide_string_eq((s. origin ), path)))) {
+                continue;
+            }
             collect_uses_in_stmt((&s), word, uses);
         }
     }
@@ -9010,6 +9018,7 @@ void   handle_document_highlight (JsonValue*   req, LspState*   state) {
         return;
     }
     LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    const char*   path = uri_to_path(uri);
     const char*   word = word_at((doc. text ), line0, col0);
     if (__glide_string_eq(word, "")) {
         lsp_send_response(id, json_array());
@@ -9019,6 +9028,9 @@ void   handle_document_highlight (JsonValue*   req, LspState*   state) {
     if (((doc. stmts )  !=  NULL)) {
         for (int   i = 0; (i  <  Vector_len__Stmt((doc. stmts ))); i++) {
             Stmt   s = Vector_get__Stmt((doc. stmts ), i);
+            if (((!__glide_string_eq((s. origin ), ""))  &&  (!__glide_string_eq((s. origin ), path)))) {
+                continue;
+            }
             collect_uses_in_stmt((&s), word, uses);
         }
     }
@@ -9047,6 +9059,7 @@ void   handle_rename (JsonValue*   req, LspState*   state) {
         return;
     }
     LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    const char*   path = uri_to_path(uri);
     const char*   word = word_at((doc. text ), line0, col0);
     if (__glide_string_eq(word, "")) {
         lsp_send_response(id, json_null());
@@ -9056,6 +9069,9 @@ void   handle_rename (JsonValue*   req, LspState*   state) {
     if (((doc. stmts )  !=  NULL)) {
         for (int   i = 0; (i  <  Vector_len__Stmt((doc. stmts ))); i++) {
             Stmt   s = Vector_get__Stmt((doc. stmts ), i);
+            if (((!__glide_string_eq((s. origin ), ""))  &&  (!__glide_string_eq((s. origin ), path)))) {
+                continue;
+            }
             collect_uses_in_stmt((&s), word, uses);
         }
     }

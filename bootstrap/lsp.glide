@@ -444,6 +444,7 @@ fn handle_document_symbol(req: *JsonValue, state: *LspState) {
     let uri: string = json_as_string(json_get(td, "uri"));
     if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
     let doc: LspDoc = state.docs.get(uri);
+    let path: string = uri_to_path(uri);
     let arr: *JsonValue = json_array();
     if doc.stmts != null {
         for let i: int = 0; i < doc.stmts.len(); i++ {
@@ -451,6 +452,8 @@ fn handle_document_symbol(req: *JsonValue, state: *LspState) {
             if s.kind != ST_FN && s.kind != ST_STRUCT && s.kind != ST_ENUM && s.kind != ST_CONST {
                 continue;
             }
+            // Skip stmts from other files (stdlib + imports).
+            if !s.origin.eq("") && !s.origin.eq(path) { continue; }
             let sym: *JsonValue = json_object();
             json_obj_set(sym, "name", json_string(s.name));
             let mut detail: string = "";
@@ -719,12 +722,14 @@ fn handle_references(req: *JsonValue, state: *LspState) {
     let col0: int = json_as_int(json_get(pos, "character"));
     if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
     let doc: LspDoc = state.docs.get(uri);
+    let path: string = uri_to_path(uri);
     let word: string = word_at(doc.text, line0, col0);
     if word.eq("") { lsp_send_response(id, json_array()); return; }
     let uses: *Vector<UseSite> = Vector::new();
     if doc.stmts != null {
         for let i: int = 0; i < doc.stmts.len(); i++ {
             let s: Stmt = doc.stmts.get(i);
+            if !s.origin.eq("") && !s.origin.eq(path) { continue; }
             collect_uses_in_stmt(&s, word, uses);
         }
     }
@@ -749,12 +754,14 @@ fn handle_document_highlight(req: *JsonValue, state: *LspState) {
     let col0: int = json_as_int(json_get(pos, "character"));
     if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
     let doc: LspDoc = state.docs.get(uri);
+    let path: string = uri_to_path(uri);
     let word: string = word_at(doc.text, line0, col0);
     if word.eq("") { lsp_send_response(id, json_array()); return; }
     let uses: *Vector<UseSite> = Vector::new();
     if doc.stmts != null {
         for let i: int = 0; i < doc.stmts.len(); i++ {
             let s: Stmt = doc.stmts.get(i);
+            if !s.origin.eq("") && !s.origin.eq(path) { continue; }
             collect_uses_in_stmt(&s, word, uses);
         }
     }
@@ -782,12 +789,14 @@ fn handle_rename(req: *JsonValue, state: *LspState) {
         lsp_send_response(id, json_null()); return;
     }
     let doc: LspDoc = state.docs.get(uri);
+    let path: string = uri_to_path(uri);
     let word: string = word_at(doc.text, line0, col0);
     if word.eq("") { lsp_send_response(id, json_null()); return; }
     let uses: *Vector<UseSite> = Vector::new();
     if doc.stmts != null {
         for let i: int = 0; i < doc.stmts.len(); i++ {
             let s: Stmt = doc.stmts.get(i);
+            if !s.origin.eq("") && !s.origin.eq(path) { continue; }
             collect_uses_in_stmt(&s, word, uses);
         }
     }
