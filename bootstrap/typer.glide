@@ -125,6 +125,49 @@ pub fn pre_register(t: *Typer, program: *Vector<Stmt>) {
         }
         if s.kind == ST_STRUCT {
             t.structs.insert(s.name, true);
+            // Borrow rule: reject `&T` / `&mut T` in struct fields. They would
+            // require lifetimes to be sound; Glide's design picks `*T` instead.
+            if s.struct_fields != null {
+                for let j: int = 0; j < s.struct_fields.len(); j++ {
+                    let f: Field = s.struct_fields.get(j);
+                    if f.ty != null && (f.ty.kind == TY_BORROW || f.ty.kind == TY_BORROW_MUT) {
+                        t.err(s.line, s.column,
+                            "borrow `".concat(type_to_string(f.ty))
+                            .concat("` not allowed in struct field `").concat(f.name)
+                            .concat("` (use `*T` instead)"));
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Walk a call's args. Each arg of form `&x` or `&mut x` records (x, is_mut).
+// Then check pairs: two &mut x or & + &mut on the same source is forbidden.
+fn check_call_aliasing(t: *Typer, call: *Expr) {
+    if call == null || call.kind != EX_CALL || call.args == null { return; }
+    let names: *Vector<string> = Vector::new();
+    let muts: *Vector<bool> = Vector::new();
+    for let i: int = 0; i < call.args.len(); i++ {
+        let a: Expr = call.args.get(i);
+        if a.kind == EX_UNARY && (a.op_code == UN_ADDR || a.op_code == UN_ADDR_MUT)
+            && a.operand != null && a.operand.kind == EX_IDENT {
+            names.push(a.operand.str_val);
+            muts.push(a.op_code == UN_ADDR_MUT);
+        }
+    }
+    let n: int = names.len();
+    for let i: int = 0; i < n; i++ {
+        for let j: int = i + 1; j < n; j++ {
+            if names.get(i).eq(names.get(j)) {
+                let im: bool = muts.get(i);
+                let jm: bool = muts.get(j);
+                if im || jm {
+                    t.err(call.line, call.column,
+                        "cannot pass `".concat(names.get(i))
+                        .concat("` aliased through both shared and mutable borrow in same call"));
+                }
+            }
         }
     }
 }
@@ -366,6 +409,9 @@ pub fn infer_expr(t: *Typer, e: *Expr) -> *Type {
     }
 
     if e.kind == EX_CALL {
+        // Borrow check: forbid aliased borrows of the same source within
+        // a single call (`&x + &mut x`, `&mut x + &mut x`).
+        check_call_aliasing(t, e);
         // Resolve callee. If ident, look up in fn registry.
         if e.lhs != null && e.lhs.kind == EX_IDENT {
             let name: string = e.lhs.str_val;

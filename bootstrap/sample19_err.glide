@@ -1,0 +1,15 @@
+fn parse_pos(n: int) -> !int {
+    if n < 0 { return err("negative"); }
+    return ok(n);
+}
+
+fn use_it(n: int) -> !int {
+    let v: int = parse_pos(n)?;
+    return ok(v + 100);
+}
+
+fn main() -> int {
+    let r: !int = use_it(-1);
+    if r.ok { return 99; }
+    return 7;
+}

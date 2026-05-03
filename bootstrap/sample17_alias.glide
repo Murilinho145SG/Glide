@@ -1,0 +1,9 @@
+// Should fail: &x + &mut x in same call.
+fn touch(a: &int, b: &mut int) -> int {
+    return *a + *b;
+}
+
+fn main() -> int {
+    let mut x: int = 5;
+    return touch(&x, &mut x);
+}

@@ -283,6 +283,14 @@ fn parse_stmt(p: *Parser) -> *Stmt {
         s.expr_value = e;
         return s;
     }
+    if p.at_kw("spawn") {
+        let line: int = p.current.line;
+        let col: int = p.current.column;
+        p.advance();
+        let e: *Expr = parse_expr(p, 0);
+        p.expect_op(";");
+        return stmt_spawn(e, line, col);
+    }
     if p.at_kw("break") {
         let line: int = p.current.line;
         let col: int = p.current.column;
@@ -494,6 +502,10 @@ fn parse_for(p: *Parser) -> *Stmt {
 // ---- types ---------------------------------------------------------------
 
 fn parse_type(p: *Parser) -> *Type {
+    if p.eat_op("!") {
+        let inner: *Type = parse_type(p);
+        return ty_result(inner);
+    }
     if p.eat_op("*") {
         let inner: *Type = parse_type(p);
         return ty_pointer(inner);
@@ -519,6 +531,23 @@ fn parse_type(p: *Parser) -> *Type {
         t.kind = TY_SLICE;
         t.inner = inner;
         return t;
+    }
+    if p.at_kw("fn") {
+        p.advance();
+        p.expect_op("(");
+        let params: *Vector<Type> = Vector::new();
+        while !p.at_op(")") && !p.at_eof() {
+            if p.current.kind == TOK_IDENT && p.peek_op(":") {
+                p.advance(); p.advance();
+            }
+            let t: *Type = parse_type(p);
+            if t != null { params.push(*t); }
+            if !p.eat_op(",") { break; }
+        }
+        p.expect_op(")");
+        let mut ret: *Type = null;
+        if p.eat_op("->") { ret = parse_type(p); }
+        return ty_fnptr(params, ret);
     }
     if p.current.kind == TOK_IDENT || p.current.kind == TOK_KEYWORD {
         let name: string = p.current.lexeme;
@@ -579,6 +608,8 @@ fn parse_expr(p: *Parser, min_bp: int) -> *Expr {
         // postfix ++ / --
         if p.at_op("++") { p.advance(); left = expr_postinc(left); continue; }
         if p.at_op("--") { p.advance(); left = expr_postdec(left); continue; }
+        // postfix ?  (Result error propagation)
+        if p.at_op("?") { p.advance(); left = expr_unary(UN_TRY, left, left.line, left.column); continue; }
         // cast: as Type
         if p.at_kw("as") {
             p.advance();
@@ -655,6 +686,45 @@ fn parse_prefix(p: *Parser) -> *Expr {
         if tok.lexeme.eq("true") { p.advance(); return expr_bool(true, line, col); }
         if tok.lexeme.eq("false") { p.advance(); return expr_bool(false, line, col); }
         if tok.lexeme.eq("null") { p.advance(); return expr_null(line, col); }
+        if tok.lexeme.eq("fn") {
+            p.advance();
+            p.expect_op("(");
+            let params: *Vector<Param> = Vector::new();
+            while !p.at_op(")") && !p.at_eof() {
+                let pname: string = p.expect_ident();
+                p.expect_op(":");
+                let pty: *Type = parse_type(p);
+                params.push(Param { name: pname, ty: pty });
+                if !p.eat_op(",") { break; }
+            }
+            p.expect_op(")");
+            let mut ret: *Type = null;
+            if p.eat_op("->") { ret = parse_type(p); }
+            let body: *Vector<Stmt> = parse_block(p);
+            return expr_fnexpr(params, ret, body, line, col);
+        }
+        if tok.lexeme.eq("move") {
+            // move fn(...) — same as fn for our minimal closure (no captures yet).
+            p.advance();
+            // Continue into the fn case directly.
+            if p.at_kw("fn") {
+                p.advance();
+                p.expect_op("(");
+                let params: *Vector<Param> = Vector::new();
+                while !p.at_op(")") && !p.at_eof() {
+                    let pname: string = p.expect_ident();
+                    p.expect_op(":");
+                    let pty: *Type = parse_type(p);
+                    params.push(Param { name: pname, ty: pty });
+                    if !p.eat_op(",") { break; }
+                }
+                p.expect_op(")");
+                let mut ret: *Type = null;
+                if p.eat_op("->") { ret = parse_type(p); }
+                let body: *Vector<Stmt> = parse_block(p);
+                return expr_fnexpr(params, ret, body, line, col);
+            }
+        }
         if tok.lexeme.eq("sizeof") {
             p.advance();
             p.expect_op("(");

@@ -1,0 +1,8 @@
+// Should fail: &T in struct field.
+struct Bad {
+    r: &int,
+}
+
+fn main() -> int {
+    return 0;
+}

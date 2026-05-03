@@ -1,0 +1,14 @@
+fn parse_pos(n: int) -> !int {
+    if n < 0 { return err("negative"); }
+    return ok(n * 2);
+}
+
+fn double_then(n: int) -> !int {
+    let v: int = parse_pos(n)?;
+    return ok(v + 1);
+}
+
+fn main() -> int {
+    let r: !int = double_then(5);
+    return unwrap(r);
+}

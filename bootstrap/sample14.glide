@@ -1,0 +1,9 @@
+fn apply(f: fn(int) -> int, x: int) -> int {
+    return f(x);
+}
+
+fn main() -> int {
+    let inc = fn(n: int) -> int { return n + 1; };
+    let sq = fn(n: int) -> int { return n * n; };
+    return apply(inc, 5) + apply(sq, 6);
+}
