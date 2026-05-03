@@ -75,11 +75,17 @@ pub struct FnSig {
 
 // ---- typer state ---------------------------------------------------------
 
+pub struct BorrowEvent {
+    source: string,
+    is_mut: bool,
+}
+
 pub struct Typer {
     fns: *HashMap<FnSig>,
     structs: *HashMap<bool>,        // just registry of names for now
     scope: *HashMap<Type>,          // current scope: name -> Type (heap-alloc'd)
     owned_locals: *HashMap<bool>,   // names that must not escape (auto-drop)
+    borrows: *Vector<BorrowEvent>,  // active let-bound borrows; save/restore per block
     current_ret: *Type,
     error_count: int,
 }
@@ -91,10 +97,12 @@ impl Typer {
         let structs: *HashMap<bool> = HashMap::new();
         let scope: *HashMap<Type> = HashMap::new();
         let owned: *HashMap<bool> = HashMap::new();
+        let bw: *Vector<BorrowEvent> = Vector::new();
         t.fns = fns;
         t.structs = structs;
         t.scope = scope;
         t.owned_locals = owned;
+        t.borrows = bw;
         t.current_ret = null;
         t.error_count = 0;
         return t;
@@ -105,6 +113,7 @@ impl Typer {
         self.structs.free();
         self.scope.free();
         self.owned_locals.free();
+        self.borrows.free();
         free(self as *void);
     }
 
@@ -143,6 +152,46 @@ pub fn pre_register(t: *Typer, program: *Vector<Stmt>) {
                 }
             }
         }
+    }
+}
+
+// ---- borrow tracking helpers --------------------------------------------
+
+fn count_borrows(t: *Typer, name: string, want_mut: bool) -> int {
+    let n: int = t.borrows.len();
+    let mut c: int = 0;
+    for let i: int = 0; i < n; i++ {
+        let ev: BorrowEvent = t.borrows.get(i);
+        if ev.source.eq(name) && ev.is_mut == want_mut { c = c + 1; }
+    }
+    return c;
+}
+
+fn record_borrow(t: *Typer, source: string, is_mut: bool, line: int, col: int) {
+    let n_shared: int = count_borrows(t, source, false);
+    let n_mut: int = count_borrows(t, source, true);
+    if is_mut {
+        if n_mut > 0 || n_shared > 0 {
+            t.err(line, col,
+                "cannot borrow `".concat(source)
+                .concat("` as mutable: already borrowed (across statements)"));
+        }
+    } else {
+        if n_mut > 0 {
+            t.err(line, col,
+                "cannot borrow `".concat(source)
+                .concat("` as immutable: already mutably borrowed"));
+        }
+    }
+    let ev: BorrowEvent = BorrowEvent { source: source, is_mut: is_mut };
+    t.borrows.push(ev);
+}
+
+fn enter_borrow_scope(t: *Typer) -> int { return t.borrows.len(); }
+
+fn exit_borrow_scope(t: *Typer, saved: int) {
+    while t.borrows.len() > saved {
+        let _ev: BorrowEvent = t.borrows.pop();
     }
 }
 
@@ -208,11 +257,14 @@ fn check_top(t: *Typer, s: *Stmt) {
 fn check_fn(t: *Typer, s: *Stmt) {
     let saved_scope: *HashMap<Type> = t.scope;
     let saved_owned: *HashMap<bool> = t.owned_locals;
+    let saved_borrows: *Vector<BorrowEvent> = t.borrows;
     let saved_ret: *Type = t.current_ret;
     let new_scope: *HashMap<Type> = HashMap::new();
     let new_owned: *HashMap<bool> = HashMap::new();
+    let new_borrows: *Vector<BorrowEvent> = Vector::new();
     t.scope = new_scope;
     t.owned_locals = new_owned;
+    t.borrows = new_borrows;
     t.current_ret = s.fn_ret_ty;
 
     if s.fn_params != null {
@@ -233,8 +285,10 @@ fn check_fn(t: *Typer, s: *Stmt) {
 
     t.scope.free();
     t.owned_locals.free();
+    t.borrows.free();
     t.scope = saved_scope;
     t.owned_locals = saved_owned;
+    t.borrows = saved_borrows;
     t.current_ret = saved_ret;
 }
 
@@ -259,16 +313,20 @@ fn check_stmt(t: *Typer, s: *Stmt) {
             }
         }
         if s.then_body != null {
+            let saved: int = enter_borrow_scope(t);
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
                 check_stmt(t, &b);
             }
+            exit_borrow_scope(t, saved);
         }
         if s.else_body != null {
+            let saved: int = enter_borrow_scope(t);
             for let i: int = 0; i < s.else_body.len(); i++ {
                 let b: Stmt = s.else_body.get(i);
                 check_stmt(t, &b);
             }
+            exit_borrow_scope(t, saved);
         }
         return;
     }
@@ -280,14 +338,17 @@ fn check_stmt(t: *Typer, s: *Stmt) {
             }
         }
         if s.then_body != null {
+            let saved: int = enter_borrow_scope(t);
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
                 check_stmt(t, &b);
             }
+            exit_borrow_scope(t, saved);
         }
         return;
     }
     if s.kind == ST_FOR {
+        let saved: int = enter_borrow_scope(t);
         if s.for_init != null { check_stmt(t, s.for_init); }
         if s.cond != null { let _u0: *Type = infer_expr(t, s.cond); }
         if s.for_step != null { let _u1: *Type = infer_expr(t, s.for_step); }
@@ -297,14 +358,17 @@ fn check_stmt(t: *Typer, s: *Stmt) {
                 check_stmt(t, &b);
             }
         }
+        exit_borrow_scope(t, saved);
         return;
     }
     if s.kind == ST_BLOCK {
         if s.then_body != null {
+            let saved: int = enter_borrow_scope(t);
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
                 check_stmt(t, &b);
             }
+            exit_borrow_scope(t, saved);
         }
         return;
     }
@@ -351,6 +415,17 @@ fn check_let_or_const(t: *Typer, s: *Stmt) {
     if final_ty != null {
         t.scope.insert(s.name, *final_ty);
         if is_auto_owned { t.owned_locals.insert(s.name, true); }
+    }
+
+    // Borrow rule R7: track let-bound `let r = &n` / `let r = &mut n` for
+    // overlapping-borrow detection across statements. Scope is per-block
+    // (see enter/exit_borrow_scope around if/while/for/block bodies).
+    if s.kind == ST_LET && s.let_value != null && s.let_value.kind == EX_UNARY
+        && (s.let_value.op_code == UN_ADDR || s.let_value.op_code == UN_ADDR_MUT)
+        && s.let_value.operand != null && s.let_value.operand.kind == EX_IDENT {
+        let src: string = s.let_value.operand.str_val;
+        let is_mut: bool = s.let_value.op_code == UN_ADDR_MUT;
+        record_borrow(t, src, is_mut, s.line, s.column);
     }
 }
 

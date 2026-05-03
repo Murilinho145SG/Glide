@@ -1,0 +1,14 @@
+// Should pass: borrows in different branches don't overlap.
+fn ok(c: bool) -> int {
+    let mut x: int = 1;
+    if c {
+        let r: &mut int = &mut x;
+        *r = 7;
+    } else {
+        let r2: &mut int = &mut x;
+        *r2 = 9;
+    }
+    return x;
+}
+
+fn main() -> int { return ok(true); }

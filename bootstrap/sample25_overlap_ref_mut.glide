@@ -1,0 +1,9 @@
+// Should fail: &x and &mut x in the same scope.
+fn bad() -> int {
+    let mut x: int = 5;
+    let r1: &int = &x;
+    let r2: &mut int = &mut x;
+    return *r1 + *r2;
+}
+
+fn main() -> int { return 0; }

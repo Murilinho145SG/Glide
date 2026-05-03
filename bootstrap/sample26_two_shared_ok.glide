@@ -1,0 +1,9 @@
+// Should pass: multiple shared borrows are fine.
+fn ok() -> int {
+    let x: int = 5;
+    let r1: &int = &x;
+    let r2: &int = &x;
+    return *r1 + *r2;
+}
+
+fn main() -> int { return ok(); }
