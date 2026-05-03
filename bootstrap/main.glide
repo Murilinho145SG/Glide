@@ -142,59 +142,184 @@ fn resolve_import(base: string, ipath: string) -> string {
     return base.concat("/").concat(ipath);
 }
 
-fn main() -> int {
-    let argc: int = args_count();
-    if argc < 2 {
-        println!("usage: glide_boot <file> [--emit]");
-        return 1;
-    }
-    let path: string = args_at(argc - 1);
+// FFI to libc + driver helpers (defined in the runtime emit).
+extern fn __glide_redirect_to(path: string) -> int;
+extern fn __glide_restore_stdout(saved: int);
+extern fn __glide_shell(cmd: string) -> int;
+extern fn __glide_exe_path() -> string;
+extern fn __glide_exe_dir() -> string;
+extern fn __glide_getenv(name: string) -> string;
+extern fn __glide_is_windows() -> int;
+
+const MODE_EMIT: int = 0;
+const MODE_BUILD: int = 1;
+const MODE_RUN: int = 2;
+const MODE_CHECK: int = 3;
+
+fn print_usage() {
+    println!("Glide compiler");
+    println!("usage:");
+    println!("  glide build <file> [-o <out>] [--target=<triple>]");
+    println!("  glide run <file>");
+    println!("  glide emit <file>          (print generated C to stdout)");
+    println!("  glide check <file>         (parse + type-check, no codegen)");
+}
+
+fn parse_program_into(stmts: *Vector<Stmt>, path: string) -> bool {
     let src: string = read_file(path);
     if src.eq("") {
         println!("could not read or empty file:", path);
+        return false;
+    }
+    let loaded: *HashMap<bool> = HashMap::new();
+    // Stdlib auto-prepend. Try cwd first, then the dir next to the glide exe.
+    let v_path: string = "stdlib/vector.glide";
+    let h_path: string = "stdlib/hashmap.glide";
+    if read_file(v_path).eq("") {
+        let exe_dir: string = __glide_exe_dir();
+        if !exe_dir.eq("") {
+            v_path = exe_dir.concat("/stdlib/vector.glide");
+            h_path = exe_dir.concat("/stdlib/hashmap.glide");
+        }
+    }
+    load_into(stmts, v_path, loaded);
+    load_into(stmts, h_path, loaded);
+    load_into_str(stmts, src, path, loaded);
+    return true;
+}
+
+// Pick a C compiler. Prefers the bundled Zig CC inside the install dir;
+// falls back to whatever `cc` is on PATH.
+fn pick_cc() -> string {
+    let exe_dir: string = __glide_exe_dir();
+    if !exe_dir.eq("") {
+        let candidate: string = exe_dir.concat("/runtime/zig/zig");
+        // Best-effort existence check via read_file (returns "" on missing).
+        let probe: string = read_file(candidate);
+        if !probe.eq("") { return candidate.concat(" cc"); }
+    }
+    let env: string = __glide_getenv("CC");
+    if !env.eq("") { return env; }
+    return "cc";
+}
+
+fn run_build(src_path: string, out_path: string, target: string, then_run: bool) -> int {
+    // 1. Parse
+    let stmts: *Vector<Stmt> = Vector::new();
+    if !parse_program_into(stmts, src_path) { return 1; }
+
+    // 2. Emit C to a temp file by saving stdout, redirecting, then restoring.
+    let tmp_c: string = out_path.concat(".__glide.c");
+    let saved: int = __glide_redirect_to(tmp_c);
+    if saved < 0 {
+        println!("could not open temp file:", tmp_c);
         return 1;
     }
+    emit_program(stmts);
+    __glide_restore_stdout(saved);
 
-    // --emit flag: skip AST dump, go straight to C codegen.
-    let mut emit_mode: bool = false;
-    for let i: int = 0; i < argc; i++ {
-        if args_at(i).eq("--emit") { emit_mode = true; }
+    // 3. Build the cc command.
+    let cc: string = pick_cc();
+    let mut cmd: string = cc;
+    cmd = cmd.concat(" \"").concat(tmp_c).concat("\"");
+    cmd = cmd.concat(" -o \"").concat(out_path).concat("\"");
+    cmd = cmd.concat(" -O2 -lpthread -lm");
+    if !target.eq("") {
+        cmd = cmd.concat(" --target=").concat(target);
     }
 
-    // Tracked already-loaded files to avoid import cycles.
-    let loaded: *HashMap<bool> = HashMap::new();
-    let stmts: *Vector<Stmt> = Vector::new();
+    let rc: int = __glide_shell(cmd);
+    if rc != 0 {
+        println!("compilation failed (cc exit", rc, ")");
+        println!("preserved C source at:", tmp_c);
+        return rc;
+    }
 
-    // Auto-prepend stdlib. Read from canonical `stdlib/` at repo root.
-    load_into(stmts, "stdlib/vector.glide", loaded);
-    load_into(stmts, "stdlib/hashmap.glide", loaded);
+    if then_run {
+        let mut prefix: string = "./";
+        if __glide_is_windows() != 0 { prefix = ".\\"; }
+        let run_cmd: string = "\"".concat(prefix).concat(out_path).concat("\"");
+        return __glide_shell(run_cmd);
+    }
+    return 0;
+}
 
-    // Load the user file (which may import others).
-    load_into_str(stmts, src, path, loaded);
+fn main() -> int {
+    let argc: int = args_count();
+    if argc < 2 {
+        print_usage();
+        return 1;
+    }
+    let cmd: string = args_at(1);
 
-    if !emit_mode {
-        println!("=== AST (", stmts.len(), " top-level stmts) ===");
-        for let i: int = 0; i < stmts.len(); i++ {
-            let s: Stmt = stmts.get(i);
-            print_stmt(&s, 0);
+    let mut mode: int = MODE_EMIT;
+    let mut src_arg_idx: int = 2;
+    if cmd.eq("build") { mode = MODE_BUILD; }
+    else if cmd.eq("run") { mode = MODE_RUN; }
+    else if cmd.eq("emit") { mode = MODE_EMIT; }
+    else if cmd.eq("check") { mode = MODE_CHECK; }
+    else {
+        // Backward-compat: `glide [--emit] file.glide` (old positional form).
+        src_arg_idx = 1;
+        for let i: int = 0; i < argc; i++ {
+            if args_at(i).eq("--emit") { mode = MODE_EMIT; src_arg_idx = i + 1; }
         }
-
-        println!("=== Type checking ===");
     }
-    if !emit_mode {
+
+    if src_arg_idx >= argc {
+        print_usage();
+        return 1;
+    }
+    let src_path: string = args_at(src_arg_idx);
+
+    // Parse remaining flags: -o <out>, --target=<triple>
+    let mut out_path: string = "";
+    let mut target: string = "";
+    for let i: int = src_arg_idx + 1; i < argc; i++ {
+        let a: string = args_at(i);
+        if a.eq("-o") && (i + 1) < argc {
+            out_path = args_at(i + 1);
+        }
+        // --target=triple
+        if a.len() > 9 {
+            let prefix: string = a.substring(0, 9);
+            if prefix.eq("--target=") {
+                target = a.substring(9, a.len());
+            }
+        }
+    }
+
+    if mode == MODE_BUILD {
+        if out_path.eq("") {
+            if __glide_is_windows() != 0 { out_path = "a.exe"; } else { out_path = "a.out"; }
+        }
+        return run_build(src_path, out_path, target, false);
+    }
+    if mode == MODE_RUN {
+        if out_path.eq("") {
+            if __glide_is_windows() != 0 { out_path = "__glide_run_tmp.exe"; } else { out_path = "__glide_run_tmp"; }
+        }
+        return run_build(src_path, out_path, target, true);
+    }
+
+    // emit / check / fallback
+    let stmts: *Vector<Stmt> = Vector::new();
+    if !parse_program_into(stmts, src_path) { return 1; }
+
+    if mode == MODE_CHECK {
         let t: *Typer = Typer::new();
         check_program(t, stmts);
         if t.error_count > 0 {
             println!(t.error_count, "type error(s)");
-        } else {
-            println!("ok — no type errors");
+            t.free();
+            return 1;
         }
+        println!("ok");
         t.free();
+        return 0;
     }
 
-    if emit_mode {
-        emit_program(stmts);
-    }
-
+    // MODE_EMIT
+    emit_program(stmts);
     return 0;
 }

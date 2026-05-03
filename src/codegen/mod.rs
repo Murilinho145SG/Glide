@@ -1794,6 +1794,88 @@ static bool file_exists(const char* path) {
     return true;
 }
 
+#ifdef _WIN32
+#include <io.h>
+#include <windows.h>
+#define __glide_dup _dup
+#define __glide_dup2 _dup2
+#define __glide_close _close
+#define __glide_fileno _fileno
+#else
+#include <unistd.h>
+#define __glide_dup dup
+#define __glide_dup2 dup2
+#define __glide_close close
+#define __glide_fileno fileno
+#endif
+
+static int __glide_redirect_to(const char* path) {
+    fflush(stdout);
+    int saved = __glide_dup(1);
+    if (saved < 0) return -1;
+    FILE* f = fopen(path, "w");
+    if (!f) { __glide_close(saved); return -1; }
+    __glide_dup2(__glide_fileno(f), 1);
+    fclose(f);
+    return saved;
+}
+
+static void __glide_restore_stdout(int saved) {
+    fflush(stdout);
+    if (saved >= 0) { __glide_dup2(saved, 1); __glide_close(saved); }
+}
+
+static int __glide_shell(const char* cmd) { return system(cmd); }
+
+static const char* __glide_getenv(const char* name) {
+    const char* v = getenv(name);
+    return v ? v : "";
+}
+
+static int __glide_is_windows(void) {
+#ifdef _WIN32
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+#ifdef _WIN32
+static const char* __glide_exe_path(void) {
+    static char buf[1024];
+    DWORD n = GetModuleFileNameA(NULL, buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) buf[0] = 0;
+    return buf;
+}
+static const char* __glide_exe_dir(void) {
+    static char buf[1024];
+    DWORD n = GetModuleFileNameA(NULL, buf, sizeof(buf));
+    if (n == 0 || n >= sizeof(buf)) { buf[0] = 0; return buf; }
+    for (DWORD i = n; i > 0; i--) {
+        if (buf[i-1] == '\\' || buf[i-1] == '/') { buf[i-1] = 0; return buf; }
+    }
+    return "";
+}
+#else
+static const char* __glide_exe_path(void) {
+    static char buf[1024];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) { buf[0] = 0; return buf; }
+    buf[n] = 0;
+    return buf;
+}
+static const char* __glide_exe_dir(void) {
+    static char buf[1024];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) { buf[0] = 0; return buf; }
+    buf[n] = 0;
+    for (ssize_t i = n; i > 0; i--) {
+        if (buf[i-1] == '/') { buf[i-1] = 0; return buf; }
+    }
+    return "";
+}
+#endif
+
 typedef struct Arena {
     unsigned char* head;
     int            cap;

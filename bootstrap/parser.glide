@@ -91,6 +91,22 @@ pub fn parse_top_stmt(p: *Parser) -> *Stmt {
     let mut is_pub: bool = false;
     if p.eat_kw("pub") { is_pub = true; }
 
+    // `extern fn name(args) -> ret;` — declares a foreign C function. We
+    // parse the signature like a regular fn but expect `;` instead of a body
+    // and mark fn_body as null. Codegen skips emitting these (the runtime
+    // / linked C provides the body).
+    if p.eat_kw("extern") {
+        if p.at_kw("fn") {
+            let s: *Stmt = parse_fn(p);
+            if s != null { s.is_pub = is_pub; s.fn_body = null; }
+            return s;
+        }
+        // `extern type Foo;` etc — for now, skip the line.
+        while !p.at_op(";") && !p.at_eof() { p.advance(); }
+        p.eat_op(";");
+        return null;
+    }
+
     if p.at_kw("fn") {
         let s: *Stmt = parse_fn(p);
         if s != null { s.is_pub = is_pub; }
@@ -131,6 +147,13 @@ fn parse_fn(p: *Parser) -> *Stmt {
 
     let mut ret_ty: *Type = null;
     if p.eat_op("->") { ret_ty = parse_type(p); }
+
+    // Bodyless form: `fn name(args) -> ret;` (used after `extern`).
+    if p.eat_op(";") {
+        let s: *Stmt = stmt_fn(name, params, ret_ty, null, line, col);
+        if s != null { s.type_params = tps; }
+        return s;
+    }
 
     let body: *Vector<Stmt> = parse_block(p);
     let s: *Stmt = stmt_fn(name, params, ret_ty, body, line, col);

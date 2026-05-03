@@ -534,6 +534,77 @@ fn emit_stdlib_runtime() {
     println!("    size_t wrote = fwrite(content, 1, n, f); fclose(f);");
     println!("    return wrote == n;");
     println!("}");
+    // Driver helpers for `glide build/run`: capture stdout to a file via
+    // dup/dup2 (so we can restore it before invoking the C compiler), run
+    // shell commands, and locate the running executable.
+    println!("#ifdef _WIN32");
+    println!("#include <io.h>");
+    println!("#include <windows.h>");
+    println!("#define __glide_dup _dup");
+    println!("#define __glide_dup2 _dup2");
+    println!("#define __glide_close _close");
+    println!("#define __glide_fileno _fileno");
+    println!("#else");
+    println!("#include <unistd.h>");
+    println!("#define __glide_dup dup");
+    println!("#define __glide_dup2 dup2");
+    println!("#define __glide_close close");
+    println!("#define __glide_fileno fileno");
+    println!("#endif");
+    println!("static int __glide_redirect_to(const char* path) {");
+    println!("    fflush(stdout);");
+    println!("    int saved = __glide_dup(1);");
+    println!("    if (saved < 0) return -1;");
+    println!("    FILE* f = fopen(path, \"w\");");
+    println!("    if (!f) { __glide_close(saved); return -1; }");
+    println!("    __glide_dup2(__glide_fileno(f), 1);");
+    println!("    fclose(f);");
+    println!("    return saved;");
+    println!("}");
+    println!("static void __glide_restore_stdout(int saved) {");
+    println!("    fflush(stdout);");
+    println!("    if (saved >= 0) { __glide_dup2(saved, 1); __glide_close(saved); }");
+    println!("}");
+    println!("static int __glide_shell(const char* cmd) { return system(cmd); }");
+    println!("static const char* __glide_getenv(const char* name) { const char* v = getenv(name); return v ? v : \"\"; }");
+    println!("static int __glide_is_windows(void) {");
+    println!("#ifdef _WIN32");
+    println!("    return 1;");
+    println!("#else");
+    println!("    return 0;");
+    println!("#endif");
+    println!("}");
+    println!("#ifdef _WIN32");
+    println!("static const char* __glide_exe_path(void) {");
+    println!("    static char buf[1024];");
+    println!("    DWORD n = GetModuleFileNameA(NULL, buf, sizeof(buf));");
+    println!("    if (n == 0 || n >= sizeof(buf)) buf[0] = 0;");
+    println!("    return buf;");
+    println!("}");
+    println!("static const char* __glide_exe_dir(void) {");
+    println!("    static char buf[1024];");
+    println!("    DWORD n = GetModuleFileNameA(NULL, buf, sizeof(buf));");
+    println!("    if (n == 0 || n >= sizeof(buf)) { buf[0] = 0; return buf; }");
+    println!("    for (DWORD i = n; i > 0; i--) { if (buf[i-1] == '\\\\' || buf[i-1] == '/') { buf[i-1] = 0; return buf; } }");
+    println!("    return \"\";");
+    println!("}");
+    println!("#else");
+    println!("static const char* __glide_exe_path(void) {");
+    println!("    static char buf[1024];");
+    println!("    ssize_t n = readlink(\"/proc/self/exe\", buf, sizeof(buf) - 1);");
+    println!("    if (n <= 0) { buf[0] = 0; return buf; }");
+    println!("    buf[n] = 0;");
+    println!("    return buf;");
+    println!("}");
+    println!("static const char* __glide_exe_dir(void) {");
+    println!("    static char buf[1024];");
+    println!("    ssize_t n = readlink(\"/proc/self/exe\", buf, sizeof(buf) - 1);");
+    println!("    if (n <= 0) { buf[0] = 0; return buf; }");
+    println!("    buf[n] = 0;");
+    println!("    for (ssize_t i = n; i > 0; i--) { if (buf[i-1] == '/') { buf[i-1] = 0; return buf; } }");
+    println!("    return \"\";");
+    println!("}");
+    println!("#endif");
     // Arena allocator runtime
     println!("typedef struct Arena { unsigned char* head; int cap; int used; } Arena;");
     println!("static Arena* Arena_new(int cap) {");
@@ -2695,10 +2766,11 @@ pub fn emit_program(program: *Vector<Stmt>) {
     }
     g.spawn_count = 0;
 
-    // Function + impl definitions (skip generic ones for now).
+    // Function + impl definitions (skip generic ones, and skip extern/bodyless).
     for let i: int = 0; i < program.len(); i++ {
         let s: Stmt = program.get(i);
-        if s.kind == ST_FN && (s.type_params == null || s.type_params.len() == 0) {
+        if s.kind == ST_FN && (s.type_params == null || s.type_params.len() == 0)
+           && s.fn_body != null {
             emit_fn(g, &s); println!("");
         }
         if s.kind == ST_IMPL && (s.type_params == null || s.type_params.len() == 0) {
