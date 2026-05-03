@@ -1,14 +1,45 @@
-// HashMap<V>: open-addressing hash map with string keys.
-// Linear probing, ~75% load factor, power-of-two capacities.
+/// A hash map from `string` keys to `V` values.
+///
+/// Implemented with open addressing and linear probing on a power-of-two
+/// table. Resizes automatically when the load factor reaches 75%. Keys are
+/// stored by value so the caller's strings can be freed independently.
+///
+/// All operations except `resize` are amortised O(1). Resize is O(n).
+///
+/// ```glide
+/// let m: *HashMap<int> = HashMap::new();
+/// defer m.free();
+///
+/// m.insert("one", 1);
+/// m.insert("two", 2);
+///
+/// if m.contains("one") {
+///     println!("one ->", m.get("one"));   // 1
+/// }
+///
+/// m.remove("one");
+/// println!("len:", m.len());              // 1
+/// ```
 struct HashMap<V> {
+    /// Slot keys; meaningful only when `occupied[i]` is `true`.
     keys: *string,
+    /// Slot values; meaningful only when `occupied[i]` is `true`.
     values: *V,
+    /// Per-slot occupancy flag. Open-addressing requires this for probing.
     occupied: *bool,
+    /// Number of live entries.
     len: int,
+    /// Allocation size in slots. Always a power of two once non-zero.
     cap: int,
 }
 
 impl<V> HashMap<V> {
+    /// Create an empty map with no allocation. The first `insert` allocates.
+    ///
+    /// ```glide
+    /// let m: *HashMap<int> = HashMap::new();
+    /// defer m.free();
+    /// ```
     fn new() -> *HashMap<V> {
         let m: *HashMap<V> = malloc(sizeof(HashMap<V>)) as *HashMap<V>;
         m.keys = null;
@@ -19,11 +50,15 @@ impl<V> HashMap<V> {
         return m;
     }
 
+    /// Number of live entries currently held.
     fn len(self: *HashMap<V>) -> int { return self.len; }
 
+    /// Allocated slot count (always a power of two once non-zero). Useful
+    /// for diagnostics; most callers want `len()` instead.
     fn cap(self: *HashMap<V>) -> int { return self.cap; }
 
-    // Internal: hash a string (Java-ish, multiply-add).
+    /// Internal: hash a string with the classic 31x multiply-add. Folds the
+    /// negative case into the positive range so callers can `& mask` safely.
     fn hash_key(self: *HashMap<V>, k: string) -> int {
         let mut h: int = 0;
         let n: int = k.len();
@@ -34,8 +69,8 @@ impl<V> HashMap<V> {
         return h;
     }
 
-    // Internal: find the slot for `k`. Returns -1 if cap == 0.
-    // If found: index of existing slot. Otherwise: index of first empty slot.
+    /// Internal: linear-probe to find either the slot holding `k` or the
+    /// first empty slot in the chain. Returns -1 when `cap == 0`.
     fn slot(self: *HashMap<V>, k: string) -> int {
         if self.cap == 0 { return -1; }
         let mask: int = self.cap - 1;
@@ -47,18 +82,32 @@ impl<V> HashMap<V> {
         return i;
     }
 
+    /// `true` when `k` is bound to a value.
+    ///
+    /// ```glide
+    /// if m.contains("ready") { println!("yep"); }
+    /// ```
     fn contains(self: *HashMap<V>, k: string) -> bool {
         let i: int = self.slot(k);
         if i < 0 { return false; }
         return self.occupied[i] && self.keys[i].eq(k);
     }
 
+    /// Read the value bound to `k`. **Undefined behaviour** when `k` is
+    /// absent - call `contains(k)` first if you're not sure.
+    ///
+    /// ```glide
+    /// if m.contains("count") {
+    ///     let n: int = m.get("count");
+    /// }
+    /// ```
     fn get(self: *HashMap<V>, k: string) -> V {
         let i: int = self.slot(k);
         return self.values[i];
     }
 
-    // Resize to a new power-of-two capacity. Rehashes all entries.
+    /// Resize to a new power-of-two capacity and rehash every entry.
+    /// Called automatically by `insert`; rarely useful directly.
     fn resize(self: *HashMap<V>, new_cap: int) {
         let old_keys: *string = self.keys;
         let old_values: *V = self.values;
@@ -87,6 +136,14 @@ impl<V> HashMap<V> {
         }
     }
 
+    /// Bind `k` to `v`. Replaces the existing value if `k` was already
+    /// present. Triggers a resize when the table reaches 75% load.
+    ///
+    /// ```glide
+    /// m.insert("count", 1);
+    /// m.insert("count", 2);     // overwrite
+    /// println!(m.get("count")); // 2
+    /// ```
     fn insert(self: *HashMap<V>, k: string, v: V) {
         // Grow when load >= 3/4
         if self.cap == 0 {
@@ -106,6 +163,15 @@ impl<V> HashMap<V> {
         self.values[i] = v;
     }
 
+    /// Remove the entry for `k`. Returns `true` if anything was removed.
+    /// Re-inserts the rest of the probe chain so subsequent lookups still
+    /// land on the correct slot.
+    ///
+    /// ```glide
+    /// m.insert("a", 1);
+    /// let was_present: bool = m.remove("a");   // true
+    /// let again: bool      = m.remove("a");    // false
+    /// ```
     fn remove(self: *HashMap<V>, k: string) -> bool {
         let i: int = self.slot(k);
         if i < 0 { return false; }
@@ -129,6 +195,8 @@ impl<V> HashMap<V> {
         return true;
     }
 
+    /// Drop every entry. Capacity is preserved so subsequent inserts don't
+    /// re-allocate.
     fn clear(self: *HashMap<V>) {
         for let i: int = 0; i < self.cap; i++ {
             self.occupied[i] = false;
@@ -136,6 +204,15 @@ impl<V> HashMap<V> {
         self.len = 0;
     }
 
+    /// Release the three slot buffers and the map struct itself. After
+    /// `free`, the pointer is dangling; do not touch it again.
+    ///
+    /// Pair with `defer` so leaks are impossible:
+    ///
+    /// ```glide
+    /// let m: *HashMap<int> = HashMap::new();
+    /// defer m.free();
+    /// ```
     fn free(self: *HashMap<V>) {
         if self.cap > 0 {
             free(self.keys as *void);

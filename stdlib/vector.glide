@@ -1,12 +1,36 @@
-// Vector<T>: growable owning array. Calls libc malloc/free directly.
-// Use `Vector::new()` to construct, `v.push(x)` / `v.pop()` to mutate.
+/// A growable, owning array of `T`.
+///
+/// `Vector<T>` owns a heap buffer that doubles whenever it fills up. Element
+/// access is O(1); pushing is amortised O(1). The vector calls libc
+/// `malloc` / `free` directly and is *not* tracked by Glide's auto-drop, so
+/// you must release it explicitly:
+///
+/// ```glide
+/// let v: *Vector<int> = Vector::new();
+/// defer v.free();
+///
+/// v.push(1);
+/// v.push(2);
+/// println!(v.len());      // 2
+/// ```
+///
+/// For a known final size, prefer `Vector::with_cap(n)` to avoid reallocations.
 struct Vector<T> {
+    /// Heap buffer. `null` while `cap == 0`.
     data: *T,
+    /// Number of initialised elements (`<= cap`).
     len: int,
+    /// Allocation size in elements. Always a power of two once non-zero.
     cap: int,
 }
 
 impl<T> Vector<T> {
+    /// Create an empty vector with no allocation. The first `push` allocates.
+    ///
+    /// ```glide
+    /// let v: *Vector<int> = Vector::new();
+    /// defer v.free();
+    /// ```
     fn new() -> *Vector<T> {
         let v: *Vector<T> = malloc(sizeof(Vector<T>)) as *Vector<T>;
         v.data = null;
@@ -15,6 +39,15 @@ impl<T> Vector<T> {
         return v;
     }
 
+    /// Create an empty vector pre-allocated to hold at least `cap` elements
+    /// without reallocating. Use this when the final size is known to avoid
+    /// the geometric growth chain.
+    ///
+    /// ```glide
+    /// let v: *Vector<int> = Vector::with_cap(1024);
+    /// defer v.free();
+    /// for let i: int = 0; i < 1024; i++ { v.push(i); }
+    /// ```
     fn with_cap(cap: int) -> *Vector<T> {
         let v: *Vector<T> = malloc(sizeof(Vector<T>)) as *Vector<T>;
         v.data = null;
@@ -27,6 +60,15 @@ impl<T> Vector<T> {
         return v;
     }
 
+    /// Append `x` to the end of the vector. Reallocates (capacity doubles)
+    /// when the buffer is full, so the amortised cost is O(1).
+    ///
+    /// ```glide
+    /// let v: *Vector<int> = Vector::new();
+    /// defer v.free();
+    /// v.push(10);
+    /// v.push(20);
+    /// ```
     fn push(self: *Vector<T>, x: T) {
         if self.len == self.cap {
             let mut new_cap: int = 4;
@@ -43,43 +85,96 @@ impl<T> Vector<T> {
         self.len = self.len + 1;
     }
 
+    /// Remove and return the last element. **Undefined behaviour** if the
+    /// vector is empty - callers must check `is_empty()` first.
+    ///
+    /// ```glide
+    /// let v: *Vector<int> = Vector::new();
+    /// defer v.free();
+    /// v.push(1); v.push(2); v.push(3);
+    /// let last: int = v.pop();   // 3
+    /// ```
     fn pop(self: *Vector<T>) -> T {
         self.len = self.len - 1;
         return self.data[self.len];
     }
 
+    /// Read the element at index `i`. **No bounds check** - reading past
+    /// `len()` is undefined behaviour.
+    ///
+    /// ```glide
+    /// let x: int = v.get(0);
+    /// ```
     fn get(self: *Vector<T>, i: int) -> T {
         return self.data[i];
     }
 
+    /// Overwrite the element at index `i`. **No bounds check** - writing
+    /// past `len()` is undefined behaviour.
+    ///
+    /// ```glide
+    /// v.set(0, 42);
+    /// ```
     fn set(self: *Vector<T>, i: int, x: T) {
         self.data[i] = x;
     }
 
+    /// Number of initialised elements currently held.
     fn len(self: *Vector<T>) -> int {
         return self.len;
     }
 
+    /// `true` when `len() == 0`.
+    ///
+    /// ```glide
+    /// let v: *Vector<int> = Vector::new();
+    /// defer v.free();
+    /// if v.is_empty() { println!("nothing here"); }
+    /// ```
     fn is_empty(self: *Vector<T>) -> bool {
         return self.len == 0;
     }
 
+    /// First element. **Undefined behaviour** if the vector is empty.
+    ///
+    /// ```glide
+    /// if !v.is_empty() { println!("head:", v.first()); }
+    /// ```
     fn first(self: *Vector<T>) -> T {
         return self.data[0];
     }
 
+    /// Last element. **Undefined behaviour** if the vector is empty.
+    ///
+    /// ```glide
+    /// if !v.is_empty() { println!("tail:", v.last()); }
+    /// ```
     fn last(self: *Vector<T>) -> T {
         return self.data[self.len - 1];
     }
 
+    /// Swap the elements at indices `i` and `j` in place.
+    ///
+    /// ```glide
+    /// v.swap(0, v.len() - 1);   // bring last to front
+    /// ```
     fn swap(self: *Vector<T>, i: int, j: int) {
         let tmp: T = self.data[i];
         self.data[i] = self.data[j];
         self.data[j] = tmp;
     }
 
-    // Remove and return element at index `i` in O(1) by swapping it with the
-    // last element. Order-changing — use `remove(i)` if order matters.
+    /// Remove and return the element at index `i` in O(1) by swapping it
+    /// with the last element. The order of remaining elements changes -
+    /// use a linear `remove(i)` if order matters.
+    ///
+    /// ```glide
+    /// let v: *Vector<int> = Vector::new();
+    /// defer v.free();
+    /// v.push_all!(10, 20, 30, 40);
+    /// let removed: int = v.swap_remove(1);   // 20
+    /// // v is now [10, 40, 30]
+    /// ```
     fn swap_remove(self: *Vector<T>, i: int) -> T {
         let out: T = self.data[i];
         self.len = self.len - 1;
@@ -89,6 +184,15 @@ impl<T> Vector<T> {
         return out;
     }
 
+    /// Reverse the elements in place. O(n).
+    ///
+    /// ```glide
+    /// let v: *Vector<int> = Vector::new();
+    /// defer v.free();
+    /// v.push_all!(1, 2, 3);
+    /// v.reverse();
+    /// // v is now [3, 2, 1]
+    /// ```
     fn reverse(self: *Vector<T>) {
         let mut lo: int = 0;
         let mut hi: int = self.len - 1;
@@ -101,33 +205,65 @@ impl<T> Vector<T> {
         }
     }
 
-    // Shorten the vector to at most `n` elements. No-op if already shorter.
+    /// Shorten the vector to at most `n` elements. No-op if already shorter.
+    /// Capacity is **not** reduced - use `free` + a fresh vector to release
+    /// memory.
+    ///
+    /// ```glide
+    /// v.truncate(0);          // same as clear()
+    /// v.truncate(v.len());    // no-op
+    /// ```
     fn truncate(self: *Vector<T>, n: int) {
         if n < 0 { return; }
         if n < self.len { self.len = n; }
     }
 
-    // Append every element of `other` to `self`. `other` is left intact.
+    /// Append every element of `other` to `self`. `other` is left intact.
+    ///
+    /// ```glide
+    /// let a: *Vector<int> = Vector::new();  defer a.free();
+    /// let b: *Vector<int> = Vector::new();  defer b.free();
+    /// a.push_all!(1, 2);
+    /// b.push_all!(3, 4);
+    /// a.extend(b);
+    /// // a is now [1, 2, 3, 4]; b is unchanged
+    /// ```
     fn extend(self: *Vector<T>, other: *Vector<T>) {
         for let i: int = 0; i < other.len; i++ {
             self.push(other.data[i]);
         }
     }
 
+    /// Drop every element by resetting `len` to 0. Capacity is preserved
+    /// so subsequent pushes don't reallocate.
     fn clear(self: *Vector<T>) {
         self.len = 0;
     }
 
+    /// Release the heap buffer and the vector struct itself. After `free`,
+    /// the pointer is dangling; do not touch it again.
+    ///
+    /// Pair with `defer` to make leaks impossible:
+    ///
+    /// ```glide
+    /// let v: *Vector<int> = Vector::new();
+    /// defer v.free();
+    /// // ...use v...
+    /// ```
     fn free(self: *Vector<T>) {
         if self.cap > 0 { free(self.data as *void); }
         free(self as *void);
     }
 
-    // Push every passed element. Variadic over expressions of type T.
-    //
-    //     v.push_all!(1, 2, 3);
-    //     Vector::push_all!(v, 4, 5);
-    //     Vector::new().push_all!(7, 8, 9);
+    /// Push every passed element. Variadic over expressions of type `T`.
+    ///
+    /// Three call shapes work the same way:
+    ///
+    /// ```glide
+    /// v.push_all!(1, 2, 3);
+    /// Vector::push_all!(v, 4, 5);
+    /// Vector::new().push_all!(7, 8, 9);
+    /// ```
     macro push_all!($($x:expr),*) {
         $( self.push($x); )*
     }
