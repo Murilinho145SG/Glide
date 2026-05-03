@@ -2,9 +2,9 @@
 
 fn producer(c: chan<int>) {
     for let i: int = 1; i <= 5; i++ {
-        send(c, i);
+        c.send(i);
     }
-    close(c);
+    c.close();
 }
 
 fn main() -> int {
@@ -12,10 +12,10 @@ fn main() -> int {
     spawn producer(c);
 
     let mut total: int = 0;
-    let mut got: int = recv(c);
+    let mut got: int = c.recv();
     while got != 0 {             // closed empty chan returns zero-init
         total = total + got;
-        got = recv(c);
+        got = c.recv();
     }
     return total;                // 1+2+3+4+5 = 15
 }
