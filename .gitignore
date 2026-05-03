@@ -24,3 +24,4 @@ Thumbs.db
 /vscode-extension/out
 /vscode-extension/*.vsix
 *.pdb
+a.glide

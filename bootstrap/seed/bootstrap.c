@@ -919,7 +919,11 @@ Stmt*   fn_containing (Vector__Stmt*   stmts, int   line0);
 void   collect_locals (Vector__Stmt*   body, int   before_line, Vector__Stmt*   out);
 void   collect_locals_stmt (Stmt*   s, int   before_line, Vector__Stmt*   out);
 JsonValue*   completion_item (const char*   label, int   kind, const char*   detail);
+int   cursor_before_partial (const char*   text, int   line0, int   col0);
 const char*   path_qualifier_before (const char*   text, int   line0, int   col0);
+const char*   member_qualifier_before (const char*   text, int   line0, int   col0);
+const char*   lookup_local_type (Vector__Stmt*   stmts, int   line0, const char*   var);
+void   list_fields_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen);
 void   list_methods_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen);
 void   handle_completion (JsonValue*   req, LspState*   state);
 void   collect_uses_in_expr (Expr*   e, const char*   name, Vector__UseSite*   out);
@@ -8919,7 +8923,7 @@ JsonValue*   completion_item (const char*   label, int   kind, const char*   det
     return it;
 }
 
-const char*   path_qualifier_before (const char*   text, int   line0, int   col0) {
+int   cursor_before_partial (const char*   text, int   line0, int   col0) {
     int   pos = 0;
     int   line = 0;
     int   n = __glide_string_len(text);
@@ -8942,6 +8946,11 @@ const char*   path_qualifier_before (const char*   text, int   line0, int   col0
             break;
         }
     }
+    return p;
+}
+
+const char*   path_qualifier_before (const char*   text, int   line0, int   col0) {
+    int   p = cursor_before_partial(text, line0, col0);
     if ((p  <  2)) {
         return "";
     }
@@ -8958,6 +8967,100 @@ const char*   path_qualifier_before (const char*   text, int   line0, int   col0
         }
     }
     return __glide_string_substring(text, start, (p  -  2));
+}
+
+const char*   member_qualifier_before (const char*   text, int   line0, int   col0) {
+    int   p = cursor_before_partial(text, line0, col0);
+    if ((p  <  1)) {
+        return "";
+    }
+    if ((__glide_char_to_int(__glide_string_at(text, (p  -  1)))  !=  46)) {
+        return "";
+    }
+    int   start = (p  -  1);
+    while ((start  >  0)) {
+        int   c = __glide_char_to_int(__glide_string_at(text, (start  -  1)));
+        if ((((((c  >=  65)  &&  (c  <=  90))  ||  ((c  >=  97)  &&  (c  <=  122)))  ||  ((c  >=  48)  &&  (c  <=  57)))  ||  (c  ==  95))) {
+            (start  =  (start  -  1));
+        } else {
+            break;
+        }
+    }
+    return __glide_string_substring(text, start, (p  -  1));
+}
+
+const char*   lookup_local_type (Vector__Stmt*   stmts, int   line0, const char*   var) {
+    Stmt*   host = fn_containing(stmts, line0);
+    if (((host  ==  NULL)  ||  ((host-> fn_body )  ==  NULL))) {
+        return "";
+    }
+    if (((host-> fn_params )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Param((host-> fn_params ))); i++) {
+            Param   pp = Vector_get__Param((host-> fn_params ), i);
+            if (__glide_string_eq((pp. name ), var)) {
+                Type*   t = (pp. ty );
+                while (((t  !=  NULL)  &&  ((((t-> kind )  ==  TY_POINTER)  ||  ((t-> kind )  ==  TY_BORROW))  ||  ((t-> kind )  ==  TY_BORROW_MUT)))) {
+                    (t  =  (t-> inner ));
+                }
+                if ((t  ==  NULL)) {
+                    return "";
+                }
+                if (((t-> kind )  ==  TY_NAMED)) {
+                    return (t-> name );
+                }
+                if (((t-> kind )  ==  TY_GENERIC)) {
+                    return (t-> name );
+                }
+                return "";
+            }
+        }
+    }
+    int   n = Vector_len__Stmt((host-> fn_body ));
+    for (int   i = 0; (i  <  n); i++) {
+        Stmt   s = Vector_get__Stmt((host-> fn_body ), i);
+        if (((s. kind )  !=  ST_LET)) {
+            continue;
+        }
+        if ((!__glide_string_eq((s. name ), var))) {
+            continue;
+        }
+        if (((s. let_ty )  !=  NULL)) {
+            Type*   t = (s. let_ty );
+            while (((t  !=  NULL)  &&  ((((t-> kind )  ==  TY_POINTER)  ||  ((t-> kind )  ==  TY_BORROW))  ||  ((t-> kind )  ==  TY_BORROW_MUT)))) {
+                (t  =  (t-> inner ));
+            }
+            if (((t  !=  NULL)  &&  (((t-> kind )  ==  TY_NAMED)  ||  ((t-> kind )  ==  TY_GENERIC)))) {
+                return (t-> name );
+            }
+        }
+        if ((((((s. let_value )  !=  NULL)  &&  (((s. let_value )-> kind )  ==  EX_CALL))  &&  (((s. let_value )-> lhs )  !=  NULL))  &&  ((((s. let_value )-> lhs )-> kind )  ==  EX_PATH))) {
+            return (((s. let_value )-> lhs )-> str_val );
+        }
+    }
+    return "";
+}
+
+void   list_fields_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen) {
+    if ((stmts  ==  NULL)) {
+        return;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(stmts)); i++) {
+        Stmt   s = Vector_get__Stmt(stmts, i);
+        if ((((s. kind )  !=  ST_STRUCT)  ||  (!__glide_string_eq((s. name ), type_name)))) {
+            continue;
+        }
+        if (((s. struct_fields )  ==  NULL)) {
+            continue;
+        }
+        for (int   j = 0; (j  <  Vector_len__Field((s. struct_fields ))); j++) {
+            Field   f = Vector_get__Field((s. struct_fields ), j);
+            if (HashMap_contains__bool(seen, (f. name ))) {
+                continue;
+            }
+            HashMap_insert__bool(seen, (f. name ), true);
+            json_arr_push(items, completion_item((f. name ), 5, type_to_string_pretty((f. ty ))));
+        }
+    }
 }
 
 void   list_methods_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen) {
@@ -9017,6 +9120,17 @@ void   handle_completion (JsonValue*   req, LspState*   state) {
     const char*   qualifier = path_qualifier_before((doc. text ), line0, col0);
     if ((!__glide_string_eq(qualifier, ""))) {
         list_methods_for_type((doc. stmts ), qualifier, items, seen);
+        HashMap_free__bool(seen);
+        lsp_send_response(id, items);
+        return;
+    }
+    const char*   member_var = member_qualifier_before((doc. text ), line0, col0);
+    if ((!__glide_string_eq(member_var, ""))) {
+        const char*   var_type = lookup_local_type((doc. stmts ), line0, member_var);
+        if ((!__glide_string_eq(var_type, ""))) {
+            list_fields_for_type((doc. stmts ), var_type, items, seen);
+            list_methods_for_type((doc. stmts ), var_type, items, seen);
+        }
         HashMap_free__bool(seen);
         lsp_send_response(id, items);
         return;

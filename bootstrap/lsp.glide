@@ -561,9 +561,9 @@ fn completion_item(label: string, kind: int, detail: string) -> *JsonValue {
     return it;
 }
 
-// Walk back from (line0, col0) and return the identifier that immediately
-// precedes a `::`, or "" if the cursor isn't right after `Type::[partial]`.
-fn path_qualifier_before(text: string, line0: int, col0: int) -> string {
+// Walk back from (line0, col0) and skip any partial identifier the user is
+// typing. Returns the cursor position just before that partial.
+fn cursor_before_partial(text: string, line0: int, col0: int) -> int {
     let mut pos: int = 0;
     let mut line: int = 0;
     let n: int = text.len();
@@ -580,6 +580,13 @@ fn path_qualifier_before(text: string, line0: int, col0: int) -> string {
             p = p - 1;
         } else { break; }
     }
+    return p;
+}
+
+// If the cursor sits right after `Type::[partial]`, return the type name.
+// Otherwise return "".
+fn path_qualifier_before(text: string, line0: int, col0: int) -> string {
+    let p: int = cursor_before_partial(text, line0, col0);
     if p < 2 { return ""; }
     if text.at(p - 1).to_int() != 58 || text.at(p - 2).to_int() != 58 { return ""; }
     let mut start: int = p - 2;
@@ -590,6 +597,76 @@ fn path_qualifier_before(text: string, line0: int, col0: int) -> string {
         } else { break; }
     }
     return text.substring(start, p - 2);
+}
+
+// If the cursor sits right after `var.[partial]`, return the var name.
+// Otherwise return "".
+fn member_qualifier_before(text: string, line0: int, col0: int) -> string {
+    let p: int = cursor_before_partial(text, line0, col0);
+    if p < 1 { return ""; }
+    if text.at(p - 1).to_int() != 46 { return ""; }
+    let mut start: int = p - 1;
+    while start > 0 {
+        let c: int = text.at(start - 1).to_int();
+        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 {
+            start = start - 1;
+        } else { break; }
+    }
+    return text.substring(start, p - 1);
+}
+
+// Best-effort lookup of the type a local was declared with. Walks the fn
+// containing the cursor, finds the matching let, and returns the underlying
+// generic / named type as a string we can match against impl targets.
+fn lookup_local_type(stmts: *Vector<Stmt>, line0: int, var: string) -> string {
+    let host: *Stmt = fn_containing(stmts, line0);
+    if host == null || host.fn_body == null { return ""; }
+    if host.fn_params != null {
+        for let i: int = 0; i < host.fn_params.len(); i++ {
+            let pp: Param = host.fn_params.get(i);
+            if pp.name.eq(var) {
+                let mut t: *Type = pp.ty;
+                while t != null && (t.kind == TY_POINTER || t.kind == TY_BORROW || t.kind == TY_BORROW_MUT) { t = t.inner; }
+                if t == null { return ""; }
+                if t.kind == TY_NAMED { return t.name; }
+                if t.kind == TY_GENERIC { return t.name; }
+                return "";
+            }
+        }
+    }
+    let n: int = host.fn_body.len();
+    for let i: int = 0; i < n; i++ {
+        let s: Stmt = host.fn_body.get(i);
+        if s.kind != ST_LET { continue; }
+        if !s.name.eq(var) { continue; }
+        // Explicit annotation wins.
+        if s.let_ty != null {
+            let mut t: *Type = s.let_ty;
+            while t != null && (t.kind == TY_POINTER || t.kind == TY_BORROW || t.kind == TY_BORROW_MUT) { t = t.inner; }
+            if t != null && (t.kind == TY_NAMED || t.kind == TY_GENERIC) { return t.name; }
+        }
+        // Else recognize `Generic::new()` style RHS.
+        if s.let_value != null && s.let_value.kind == EX_CALL && s.let_value.lhs != null
+           && s.let_value.lhs.kind == EX_PATH {
+            return s.let_value.lhs.str_val;
+        }
+    }
+    return "";
+}
+
+fn list_fields_for_type(stmts: *Vector<Stmt>, type_name: string, items: *JsonValue, seen: *HashMap<bool>) {
+    if stmts == null { return; }
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if s.kind != ST_STRUCT || !s.name.eq(type_name) { continue; }
+        if s.struct_fields == null { continue; }
+        for let j: int = 0; j < s.struct_fields.len(); j++ {
+            let f: Field = s.struct_fields.get(j);
+            if seen.contains(f.name) { continue; }
+            seen.insert(f.name, true);
+            json_arr_push(items, completion_item(f.name, 5, type_to_string_pretty(f.ty)));  // 5 = Field
+        }
+    }
 }
 
 fn list_methods_for_type(stmts: *Vector<Stmt>, type_name: string, items: *JsonValue, seen: *HashMap<bool>) {
@@ -628,10 +705,24 @@ fn handle_completion(req: *JsonValue, state: *LspState) {
     let seen: *HashMap<bool> = HashMap::new();
 
     // Path completion: cursor is right after `Type::` (or `Type::partial`).
-    // List that type's methods and return immediately.
     let qualifier: string = path_qualifier_before(doc.text, line0, col0);
     if !qualifier.eq("") {
         list_methods_for_type(doc.stmts, qualifier, items, seen);
+        seen.free();
+        lsp_send_response(id, items);
+        return;
+    }
+
+    // Member completion: cursor is right after `var.` (or `var.partial`).
+    // Resolve the local's type and list both its struct fields (if any) and
+    // its impl methods.
+    let member_var: string = member_qualifier_before(doc.text, line0, col0);
+    if !member_var.eq("") {
+        let var_type: string = lookup_local_type(doc.stmts, line0, member_var);
+        if !var_type.eq("") {
+            list_fields_for_type(doc.stmts, var_type, items, seen);
+            list_methods_for_type(doc.stmts, var_type, items, seen);
+        }
         seen.free();
         lsp_send_response(id, items);
         return;
