@@ -18,3 +18,8 @@ __glide_run_tmp*
 
 .DS_Store
 Thumbs.db
+
+# VSCode extension build outputs
+/vscode-extension/node_modules
+/vscode-extension/out
+/vscode-extension/*.vsix

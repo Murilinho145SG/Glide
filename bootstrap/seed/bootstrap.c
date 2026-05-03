@@ -210,6 +210,7 @@ typedef struct  Vector__FnMonoEntry   Vector__FnMonoEntry ;
 typedef struct  Vector__AnonFn   Vector__AnonFn ;
 typedef struct  Vector__JsonValue   Vector__JsonValue ;
 typedef struct  HashMap__LspDoc   HashMap__LspDoc ;
+typedef struct  Vector__UseSite   Vector__UseSite ;
 typedef struct  Token   Token ;
 typedef struct  Lexer   Lexer ;
 typedef struct  Type   Type ;
@@ -232,6 +233,7 @@ typedef struct  JsonValue   JsonValue ;
 typedef struct  JsonParser   JsonParser ;
 typedef struct  LspDoc   LspDoc ;
 typedef struct  LspState   LspState ;
+typedef struct  UseSite   UseSite ;
 
 struct  Vector__Type  {
      Type*   data;
@@ -353,6 +355,12 @@ struct  HashMap__LspDoc  {
      const char**   keys;
      LspDoc*   values;
      bool*   occupied;
+     int   len;
+     int   cap;
+};
+
+struct  Vector__UseSite  {
+     UseSite*   data;
      int   len;
      int   cap;
 };
@@ -553,6 +561,11 @@ typedef struct  LspState  {
      HashMap__LspDoc*   docs;
      bool   shutdown_requested;
 }  LspState ;
+
+typedef struct  UseSite  {
+     int   line;
+     int   col;
+}  UseSite ;
 
 #define  TOK_EOF  0
 #define  TOK_IDENT  1
@@ -850,6 +863,18 @@ JsonValue*   position_to_json (int   line1, int   col1);
 JsonValue*   range_for_stmt (Stmt*   s);
 void   handle_document_symbol (JsonValue*   req, LspState*   state);
 void   handle_definition (JsonValue*   req, LspState*   state);
+int   ci_kind_for (Stmt*   s);
+Stmt*   fn_containing (Vector__Stmt*   stmts, int   line0);
+void   collect_locals (Vector__Stmt*   body, int   before_line, Vector__Stmt*   out);
+void   collect_locals_stmt (Stmt*   s, int   before_line, Vector__Stmt*   out);
+JsonValue*   completion_item (const char*   label, int   kind, const char*   detail);
+void   handle_completion (JsonValue*   req, LspState*   state);
+void   collect_uses_in_expr (Expr*   e, const char*   name, Vector__UseSite*   out);
+void   collect_uses_in_stmt (Stmt*   s, const char*   name, Vector__UseSite*   out);
+JsonValue*   use_to_range (UseSite*   u, int   name_len);
+void   handle_references (JsonValue*   req, LspState*   state);
+void   handle_document_highlight (JsonValue*   req, LspState*   state);
+void   handle_rename (JsonValue*   req, LspState*   state);
 void   analysis_unused_vars (Typer*   t, Vector__Stmt*   program);
 void   check_unused_in_body (Typer*   t, Vector__Stmt*   body);
 bool   stmt_uses_name (Stmt*   s, const char*   name);
@@ -988,6 +1013,10 @@ void   HashMap_insert__LspDoc (HashMap__LspDoc*   self, const char*   k, LspDoc 
 int   Vector_len__DiagEntry (Vector__DiagEntry*   self);
 DiagEntry   Vector_get__DiagEntry (Vector__DiagEntry*   self, int   i);
 bool   HashMap_remove__LspDoc (HashMap__LspDoc*   self, const char*   k);
+void   Vector_push__UseSite (Vector__UseSite*   self, UseSite   x);
+Vector__UseSite*   Vector_new__UseSite (void);
+int   Vector_len__UseSite (Vector__UseSite*   self);
+UseSite   Vector_get__UseSite (Vector__UseSite*   self, int   i);
 void   HashMap_resize__FnSig (HashMap__FnSig*   self, int   new_cap);
 int   HashMap_slot__FnSig (HashMap__FnSig*   self, const char*   k);
 void   HashMap_resize__bool (HashMap__bool*   self, int   new_cap);
@@ -7497,6 +7526,15 @@ void   handle_initialize (JsonValue*   req) {
     json_obj_set(caps, "hoverProvider", json_bool(true));
     json_obj_set(caps, "documentSymbolProvider", json_bool(true));
     json_obj_set(caps, "definitionProvider", json_bool(true));
+    json_obj_set(caps, "referencesProvider", json_bool(true));
+    json_obj_set(caps, "documentHighlightProvider", json_bool(true));
+    json_obj_set(caps, "renameProvider", json_bool(true));
+    JsonValue*   comp = json_object();
+    JsonValue*   trig = json_array();
+    json_arr_push(trig, json_string("."));
+    json_arr_push(trig, json_string(":"));
+    json_obj_set(comp, "triggerCharacters", trig);
+    json_obj_set(caps, "completionProvider", comp);
     json_obj_set(result, "capabilities", caps);
     JsonValue*   info = json_object();
     json_obj_set(info, "name", json_string("glide-lsp"));
@@ -7840,6 +7878,415 @@ void   handle_definition (JsonValue*   req, LspState*   state) {
     json_obj_set(loc, "uri", json_string(uri));
     json_obj_set(loc, "range", range_for_stmt(decl));
     lsp_send_response(id, loc);
+}
+
+int   ci_kind_for (Stmt*   s) {
+    if (((s-> kind )  ==  ST_FN)) {
+        return 3;
+    }
+    if (((s-> kind )  ==  ST_STRUCT)) {
+        return 8;
+    }
+    if (((s-> kind )  ==  ST_ENUM)) {
+        return 13;
+    }
+    if (((s-> kind )  ==  ST_CONST)) {
+        return 21;
+    }
+    return 6;
+}
+
+Stmt*   fn_containing (Vector__Stmt*   stmts, int   line0) {
+    if ((stmts  ==  NULL)) {
+        return NULL;
+    }
+    Stmt*   best = NULL;
+    int   best_line = (-1);
+    for (int   i = 0; (i  <  Vector_len__Stmt(stmts)); i++) {
+        Stmt   s = Vector_get__Stmt(stmts, i);
+        if ((((s. kind )  !=  ST_FN)  ||  ((s. fn_body )  ==  NULL))) {
+            continue;
+        }
+        int   start = ((s. line )  -  1);
+        if (((start  <=  line0)  &&  (start  >  best_line))) {
+            (best_line  =  start);
+            Stmt*   p = (( Stmt* )malloc(sizeof( Stmt )));
+            ((*p)  =  s);
+            (best  =  p);
+        }
+    }
+    return best;
+}
+
+void   collect_locals (Vector__Stmt*   body, int   before_line, Vector__Stmt*   out) {
+    if ((body  ==  NULL)) {
+        return;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(body)); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        if ((((s. kind )  ==  ST_LET)  &&  (((s. line )  -  1)  <  before_line))) {
+            Vector_push__Stmt(out, s);
+        }
+        if ((((s. kind )  ==  ST_FOR)  &&  ((s. for_init )  !=  NULL))) {
+            collect_locals_stmt((s. for_init ), before_line, out);
+        }
+        if (((s. then_body )  !=  NULL)) {
+            collect_locals((s. then_body ), before_line, out);
+        }
+        if (((s. else_body )  !=  NULL)) {
+            collect_locals((s. else_body ), before_line, out);
+        }
+    }
+}
+
+void   collect_locals_stmt (Stmt*   s, int   before_line, Vector__Stmt*   out) {
+    if ((s  ==  NULL)) {
+        return;
+    }
+    if ((((s-> kind )  ==  ST_LET)  &&  (((s-> line )  -  1)  <  before_line))) {
+        Vector_push__Stmt(out, (*s));
+    }
+}
+
+JsonValue*   completion_item (const char*   label, int   kind, const char*   detail) {
+    JsonValue*   it = json_object();
+    json_obj_set(it, "label", json_string(label));
+    json_obj_set(it, "kind", json_int(kind));
+    if ((!__glide_string_eq(detail, ""))) {
+        json_obj_set(it, "detail", json_string(detail));
+    }
+    return it;
+}
+
+void   handle_completion (JsonValue*   req, LspState*   state) {
+    JsonValue*   id = json_get(req, "id");
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    JsonValue*   pos = json_get(params, "position");
+    int   line0 = json_as_int(json_get(pos, "line"));
+    int   _col0 = json_as_int(json_get(pos, "character"));
+    if ((!HashMap_contains__LspDoc((state-> docs ), uri))) {
+        lsp_send_response(id, json_array());
+        return;
+    }
+    LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    JsonValue*   items = json_array();
+    HashMap__bool*   seen = HashMap_new__bool();
+    Stmt*   host = fn_containing((doc. stmts ), line0);
+    if ((host  !=  NULL)) {
+        if (((host-> fn_params )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Param((host-> fn_params ))); i++) {
+                Param   p = Vector_get__Param((host-> fn_params ), i);
+                if ((!HashMap_contains__bool(seen, (p. name )))) {
+                    HashMap_insert__bool(seen, (p. name ), true);
+                    const char*   detail = __glide_string_concat("param: ", type_to_string_pretty((p. ty )));
+                    json_arr_push(items, completion_item((p. name ), 6, detail));
+                }
+            }
+        }
+        Vector__Stmt*   locals = Vector_new__Stmt();
+        collect_locals((host-> fn_body ), line0, locals);
+        for (int   i = 0; (i  <  Vector_len__Stmt(locals)); i++) {
+            Stmt   s = Vector_get__Stmt(locals, i);
+            if (HashMap_contains__bool(seen, (s. name ))) {
+                continue;
+            }
+            HashMap_insert__bool(seen, (s. name ), true);
+            const char*   detail = "local";
+            if (((s. let_ty )  !=  NULL)) {
+                (detail  =  __glide_string_concat(__glide_string_concat(__glide_string_concat("let ", (s. name )), ": "), type_to_string_pretty((s. let_ty ))));
+            }
+            json_arr_push(items, completion_item((s. name ), 6, detail));
+        }
+    }
+    if (((doc. stmts )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((doc. stmts ))); i++) {
+            Stmt   s = Vector_get__Stmt((doc. stmts ), i);
+            if ((((((s. kind )  !=  ST_FN)  &&  ((s. kind )  !=  ST_STRUCT))  &&  ((s. kind )  !=  ST_ENUM))  &&  ((s. kind )  !=  ST_CONST))) {
+                continue;
+            }
+            if (HashMap_contains__bool(seen, (s. name ))) {
+                continue;
+            }
+            HashMap_insert__bool(seen, (s. name ), true);
+            const char*   detail = "";
+            if (((s. kind )  ==  ST_FN)) {
+                (detail  =  fn_signature((&s)));
+            } else {
+                if (((s. kind )  ==  ST_STRUCT)) {
+                    (detail  =  __glide_string_concat("struct ", (s. name )));
+                } else {
+                    if (((s. kind )  ==  ST_ENUM)) {
+                        (detail  =  __glide_string_concat("enum ", (s. name )));
+                    } else {
+                        if (((s. kind )  ==  ST_CONST)) {
+                            (detail  =  __glide_string_concat("const ", (s. name )));
+                            if (((s. let_ty )  !=  NULL)) {
+                                (detail  =  __glide_string_concat(__glide_string_concat(detail, ": "), type_to_string_pretty((s. let_ty ))));
+                            }
+                        }
+                    }
+                }
+            }
+            json_arr_push(items, completion_item((s. name ), ci_kind_for((&s)), detail));
+        }
+    }
+    Vector__string*   kws = Vector_new__string();
+    Vector_push__string(kws, "let");
+    Vector_push__string(kws, "const");
+    Vector_push__string(kws, "mut");
+    Vector_push__string(kws, "fn");
+    Vector_push__string(kws, "struct");
+    Vector_push__string(kws, "enum");
+    Vector_push__string(kws, "impl");
+    Vector_push__string(kws, "interface");
+    Vector_push__string(kws, "if");
+    Vector_push__string(kws, "else");
+    Vector_push__string(kws, "while");
+    Vector_push__string(kws, "for");
+    Vector_push__string(kws, "return");
+    Vector_push__string(kws, "break");
+    Vector_push__string(kws, "continue");
+    Vector_push__string(kws, "match");
+    Vector_push__string(kws, "defer");
+    Vector_push__string(kws, "spawn");
+    Vector_push__string(kws, "import");
+    Vector_push__string(kws, "pub");
+    Vector_push__string(kws, "extern");
+    Vector_push__string(kws, "true");
+    Vector_push__string(kws, "false");
+    Vector_push__string(kws, "null");
+    Vector_push__string(kws, "as");
+    Vector_push__string(kws, "type");
+    Vector_push__string(kws, "move");
+    Vector_push__string(kws, "chan");
+    for (int   i = 0; (i  <  Vector_len__string(kws)); i++) {
+        const char*   k = Vector_get__string(kws, i);
+        if (HashMap_contains__bool(seen, k)) {
+            continue;
+        }
+        HashMap_insert__bool(seen, k, true);
+        json_arr_push(items, completion_item(k, 14, ""));
+    }
+    HashMap_free__bool(seen);
+    lsp_send_response(id, items);
+}
+
+void   collect_uses_in_expr (Expr*   e, const char*   name, Vector__UseSite*   out) {
+    if ((e  ==  NULL)) {
+        return;
+    }
+    if ((((e-> kind )  ==  EX_IDENT)  &&  __glide_string_eq((e-> str_val ), name))) {
+        UseSite   u = (( UseSite ){. line  = (e-> line ), . col  = (e-> column )});
+        Vector_push__UseSite(out, u);
+    }
+    if ((((((e-> kind )  ==  EX_CALL)  &&  ((e-> lhs )  !=  NULL))  &&  (((e-> lhs )-> kind )  ==  EX_PATH))  &&  __glide_string_eq(((e-> lhs )-> str_val ), name))) {
+        UseSite   u = (( UseSite ){. line  = (e-> line ), . col  = (e-> column )});
+        Vector_push__UseSite(out, u);
+    }
+    if (((e-> lhs )  !=  NULL)) {
+        collect_uses_in_expr((e-> lhs ), name, out);
+    }
+    if (((e-> rhs )  !=  NULL)) {
+        collect_uses_in_expr((e-> rhs ), name, out);
+    }
+    if (((e-> operand )  !=  NULL)) {
+        collect_uses_in_expr((e-> operand ), name, out);
+    }
+    if (((e-> args )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
+            Expr   a = Vector_get__Expr((e-> args ), i);
+            collect_uses_in_expr((&a), name, out);
+        }
+    }
+}
+
+void   collect_uses_in_stmt (Stmt*   s, const char*   name, Vector__UseSite*   out) {
+    if ((s  ==  NULL)) {
+        return;
+    }
+    if (((((((s-> kind )  ==  ST_FN)  ||  ((s-> kind )  ==  ST_STRUCT))  ||  ((s-> kind )  ==  ST_ENUM))  ||  ((s-> kind )  ==  ST_CONST))  &&  __glide_string_eq((s-> name ), name))) {
+        UseSite   u = (( UseSite ){. line  = (s-> line ), . col  = (s-> column )});
+        Vector_push__UseSite(out, u);
+    }
+    if ((((s-> kind )  ==  ST_LET)  &&  __glide_string_eq((s-> name ), name))) {
+        UseSite   u = (( UseSite ){. line  = (s-> line ), . col  = (s-> column )});
+        Vector_push__UseSite(out, u);
+    }
+    if (((s-> let_value )  !=  NULL)) {
+        collect_uses_in_expr((s-> let_value ), name, out);
+    }
+    if (((s-> expr_value )  !=  NULL)) {
+        collect_uses_in_expr((s-> expr_value ), name, out);
+    }
+    if (((s-> cond )  !=  NULL)) {
+        collect_uses_in_expr((s-> cond ), name, out);
+    }
+    if (((s-> for_step )  !=  NULL)) {
+        collect_uses_in_expr((s-> for_step ), name, out);
+    }
+    if (((s-> for_init )  !=  NULL)) {
+        collect_uses_in_stmt((s-> for_init ), name, out);
+    }
+    if (((s-> then_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> then_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> then_body ), i);
+            collect_uses_in_stmt((&b), name, out);
+        }
+    }
+    if (((s-> else_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> else_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> else_body ), i);
+            collect_uses_in_stmt((&b), name, out);
+        }
+    }
+    if (((s-> fn_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> fn_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> fn_body ), i);
+            collect_uses_in_stmt((&b), name, out);
+        }
+    }
+    if (((s-> impl_methods )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> impl_methods ))); i++) {
+            Stmt   m = Vector_get__Stmt((s-> impl_methods ), i);
+            collect_uses_in_stmt((&m), name, out);
+        }
+    }
+}
+
+JsonValue*   use_to_range (UseSite*   u, int   name_len) {
+    JsonValue*   r = json_object();
+    int   l = ((u-> line )  -  1);
+    if ((l  <  0)) {
+        (l  =  0);
+    }
+    int   c = ((u-> col )  -  1);
+    if ((c  <  0)) {
+        (c  =  0);
+    }
+    JsonValue*   s = json_object();
+    json_obj_set(s, "line", json_int(l));
+    json_obj_set(s, "character", json_int(c));
+    JsonValue*   e = json_object();
+    json_obj_set(e, "line", json_int(l));
+    json_obj_set(e, "character", json_int((c  +  name_len)));
+    json_obj_set(r, "start", s);
+    json_obj_set(r, "end", e);
+    return r;
+}
+
+void   handle_references (JsonValue*   req, LspState*   state) {
+    JsonValue*   id = json_get(req, "id");
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    JsonValue*   pos = json_get(params, "position");
+    int   line0 = json_as_int(json_get(pos, "line"));
+    int   col0 = json_as_int(json_get(pos, "character"));
+    if ((!HashMap_contains__LspDoc((state-> docs ), uri))) {
+        lsp_send_response(id, json_array());
+        return;
+    }
+    LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    const char*   word = word_at((doc. text ), line0, col0);
+    if (__glide_string_eq(word, "")) {
+        lsp_send_response(id, json_array());
+        return;
+    }
+    Vector__UseSite*   uses = Vector_new__UseSite();
+    if (((doc. stmts )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((doc. stmts ))); i++) {
+            Stmt   s = Vector_get__Stmt((doc. stmts ), i);
+            collect_uses_in_stmt((&s), word, uses);
+        }
+    }
+    JsonValue*   arr = json_array();
+    for (int   i = 0; (i  <  Vector_len__UseSite(uses)); i++) {
+        UseSite   u = Vector_get__UseSite(uses, i);
+        JsonValue*   loc = json_object();
+        json_obj_set(loc, "uri", json_string(uri));
+        json_obj_set(loc, "range", use_to_range((&u), __glide_string_len(word)));
+        json_arr_push(arr, loc);
+    }
+    lsp_send_response(id, arr);
+}
+
+void   handle_document_highlight (JsonValue*   req, LspState*   state) {
+    JsonValue*   id = json_get(req, "id");
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    JsonValue*   pos = json_get(params, "position");
+    int   line0 = json_as_int(json_get(pos, "line"));
+    int   col0 = json_as_int(json_get(pos, "character"));
+    if ((!HashMap_contains__LspDoc((state-> docs ), uri))) {
+        lsp_send_response(id, json_array());
+        return;
+    }
+    LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    const char*   word = word_at((doc. text ), line0, col0);
+    if (__glide_string_eq(word, "")) {
+        lsp_send_response(id, json_array());
+        return;
+    }
+    Vector__UseSite*   uses = Vector_new__UseSite();
+    if (((doc. stmts )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((doc. stmts ))); i++) {
+            Stmt   s = Vector_get__Stmt((doc. stmts ), i);
+            collect_uses_in_stmt((&s), word, uses);
+        }
+    }
+    JsonValue*   arr = json_array();
+    for (int   i = 0; (i  <  Vector_len__UseSite(uses)); i++) {
+        UseSite   u = Vector_get__UseSite(uses, i);
+        JsonValue*   h = json_object();
+        json_obj_set(h, "range", use_to_range((&u), __glide_string_len(word)));
+        json_obj_set(h, "kind", json_int(1));
+        json_arr_push(arr, h);
+    }
+    lsp_send_response(id, arr);
+}
+
+void   handle_rename (JsonValue*   req, LspState*   state) {
+    JsonValue*   id = json_get(req, "id");
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    JsonValue*   pos = json_get(params, "position");
+    int   line0 = json_as_int(json_get(pos, "line"));
+    int   col0 = json_as_int(json_get(pos, "character"));
+    const char*   new_name = json_as_string(json_get(params, "newName"));
+    if (((!HashMap_contains__LspDoc((state-> docs ), uri))  ||  __glide_string_eq(new_name, ""))) {
+        lsp_send_response(id, json_null());
+        return;
+    }
+    LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    const char*   word = word_at((doc. text ), line0, col0);
+    if (__glide_string_eq(word, "")) {
+        lsp_send_response(id, json_null());
+        return;
+    }
+    Vector__UseSite*   uses = Vector_new__UseSite();
+    if (((doc. stmts )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((doc. stmts ))); i++) {
+            Stmt   s = Vector_get__Stmt((doc. stmts ), i);
+            collect_uses_in_stmt((&s), word, uses);
+        }
+    }
+    JsonValue*   edits = json_array();
+    for (int   i = 0; (i  <  Vector_len__UseSite(uses)); i++) {
+        UseSite   u = Vector_get__UseSite(uses, i);
+        JsonValue*   edit = json_object();
+        json_obj_set(edit, "range", use_to_range((&u), __glide_string_len(word)));
+        json_obj_set(edit, "newText", json_string(new_name));
+        json_arr_push(edits, edit);
+    }
+    JsonValue*   changes = json_object();
+    json_obj_set(changes, uri, edits);
+    JsonValue*   result = json_object();
+    json_obj_set(result, "changes", changes);
+    lsp_send_response(id, result);
 }
 
 void   analysis_unused_vars (Typer*   t, Vector__Stmt*   program) {
@@ -8600,6 +9047,22 @@ int   lsp_main (void) {
             handle_definition(req, state);
             continue;
         }
+        if (__glide_string_eq(method, "textDocument/completion")) {
+            handle_completion(req, state);
+            continue;
+        }
+        if (__glide_string_eq(method, "textDocument/references")) {
+            handle_references(req, state);
+            continue;
+        }
+        if (__glide_string_eq(method, "textDocument/documentHighlight")) {
+            handle_document_highlight(req, state);
+            continue;
+        }
+        if (__glide_string_eq(method, "textDocument/rename")) {
+            handle_rename(req, state);
+            continue;
+        }
         JsonValue*   id = json_get(req, "id");
         if ((id  !=  NULL)) {
             lsp_send_response(id, json_null());
@@ -9277,6 +9740,42 @@ void   HashMap_resize__FnSig (HashMap__FnSig*   self, int   new_cap) {
         free((( void* )old_values));
         free((( void* )old_occupied));
     }
+}
+
+UseSite   Vector_get__UseSite (Vector__UseSite*   self, int   i) {
+    return (self-> data )[i];
+}
+
+int   Vector_len__UseSite (Vector__UseSite*   self) {
+    return (self-> len );
+}
+
+Vector__UseSite*   Vector_new__UseSite (void) {
+    Vector__UseSite*   v = (( Vector__UseSite* )malloc(sizeof( Vector__UseSite )));
+    ((v-> data )  =  NULL);
+    ((v-> len )  =  0);
+    ((v-> cap )  =  0);
+    return v;
+}
+
+void   Vector_push__UseSite (Vector__UseSite*   self, UseSite   x) {
+    if (((self-> len )  ==  (self-> cap ))) {
+        int   new_cap = 4;
+        if (((self-> cap )  >  0)) {
+            (new_cap  =  ((self-> cap )  *  2));
+        }
+        UseSite*   new_data = (( UseSite* )malloc((new_cap  *  sizeof( UseSite ))));
+        for (int   i = 0; (i  <  (self-> len )); i++) {
+            (new_data[i]  =  (self-> data )[i]);
+        }
+        if (((self-> cap )  >  0)) {
+            free((( void* )(self-> data )));
+        }
+        ((self-> data )  =  new_data);
+        ((self-> cap )  =  new_cap);
+    }
+    ((self-> data )[(self-> len )]  =  x);
+    ((self-> len )  =  ((self-> len )  +  1));
 }
 
 bool   HashMap_remove__LspDoc (HashMap__LspDoc*   self, const char*   k) {

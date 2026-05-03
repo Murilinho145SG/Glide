@@ -120,6 +120,15 @@ fn handle_initialize(req: *JsonValue) {
     json_obj_set(caps, "hoverProvider", json_bool(true));
     json_obj_set(caps, "documentSymbolProvider", json_bool(true));
     json_obj_set(caps, "definitionProvider", json_bool(true));
+    json_obj_set(caps, "referencesProvider", json_bool(true));
+    json_obj_set(caps, "documentHighlightProvider", json_bool(true));
+    json_obj_set(caps, "renameProvider", json_bool(true));
+    let comp: *JsonValue = json_object();
+    let trig: *JsonValue = json_array();
+    json_arr_push(trig, json_string("."));
+    json_arr_push(trig, json_string(":"));
+    json_obj_set(comp, "triggerCharacters", trig);
+    json_obj_set(caps, "completionProvider", comp);
     json_obj_set(result, "capabilities", caps);
     let info: *JsonValue = json_object();
     json_obj_set(info, "name", json_string("glide-lsp"));
@@ -430,6 +439,325 @@ fn handle_definition(req: *JsonValue, state: *LspState) {
     json_obj_set(loc, "uri", json_string(uri));
     json_obj_set(loc, "range", range_for_stmt(decl));
     lsp_send_response(id, loc);
+}
+
+// LSP CompletionItemKind:
+//   3 = Function, 6 = Variable, 5 = Field, 8 = Class (struct), 13 = Enum,
+//   14 = Keyword, 21 = Constant, 25 = TypeParameter
+fn ci_kind_for(s: *Stmt) -> int {
+    if s.kind == ST_FN { return 3; }
+    if s.kind == ST_STRUCT { return 8; }
+    if s.kind == ST_ENUM { return 13; }
+    if s.kind == ST_CONST { return 21; }
+    return 6;
+}
+
+// Walk the doc, find the fn that contains the cursor (line0 0-indexed).
+// Used for scope-local completion.
+fn fn_containing(stmts: *Vector<Stmt>, line0: int) -> *Stmt {
+    if stmts == null { return null; }
+    let mut best: *Stmt = null;
+    let mut best_line: int = -1;
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if s.kind != ST_FN || s.fn_body == null { continue; }
+        let start: int = s.line - 1;
+        if start <= line0 && start > best_line {
+            best_line = start;
+            let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+            *p = s;
+            best = p;
+        }
+    }
+    return best;
+}
+
+// Recursively collect names declared in body up to `before_line` (0-indexed).
+fn collect_locals(body: *Vector<Stmt>, before_line: int, out: *Vector<Stmt>) {
+    if body == null { return; }
+    for let i: int = 0; i < body.len(); i++ {
+        let s: Stmt = body.get(i);
+        if s.kind == ST_LET && (s.line - 1) < before_line {
+            out.push(s);
+        }
+        if s.kind == ST_FOR && s.for_init != null {
+            collect_locals_stmt(s.for_init, before_line, out);
+        }
+        if s.then_body != null { collect_locals(s.then_body, before_line, out); }
+        if s.else_body != null { collect_locals(s.else_body, before_line, out); }
+    }
+}
+
+fn collect_locals_stmt(s: *Stmt, before_line: int, out: *Vector<Stmt>) {
+    if s == null { return; }
+    if s.kind == ST_LET && (s.line - 1) < before_line { out.push(*s); }
+}
+
+fn completion_item(label: string, kind: int, detail: string) -> *JsonValue {
+    let it: *JsonValue = json_object();
+    json_obj_set(it, "label", json_string(label));
+    json_obj_set(it, "kind", json_int(kind));
+    if !detail.eq("") { json_obj_set(it, "detail", json_string(detail)); }
+    return it;
+}
+
+fn handle_completion(req: *JsonValue, state: *LspState) {
+    let id: *JsonValue = json_get(req, "id");
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    let pos: *JsonValue = json_get(params, "position");
+    let line0: int = json_as_int(json_get(pos, "line"));
+    let _col0: int = json_as_int(json_get(pos, "character"));
+
+    if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
+    let doc: LspDoc = state.docs.get(uri);
+    let items: *JsonValue = json_array();
+    let mut seen: *HashMap<bool> = HashMap::new();
+
+    // 1. Locals in scope (params + lets above the cursor in the containing fn).
+    let host: *Stmt = fn_containing(doc.stmts, line0);
+    if host != null {
+        if host.fn_params != null {
+            for let i: int = 0; i < host.fn_params.len(); i++ {
+                let p: Param = host.fn_params.get(i);
+                if !seen.contains(p.name) {
+                    seen.insert(p.name, true);
+                    let detail: string = "param: ".concat(type_to_string_pretty(p.ty));
+                    json_arr_push(items, completion_item(p.name, 6, detail));
+                }
+            }
+        }
+        let locals: *Vector<Stmt> = Vector::new();
+        collect_locals(host.fn_body, line0, locals);
+        for let i: int = 0; i < locals.len(); i++ {
+            let s: Stmt = locals.get(i);
+            if seen.contains(s.name) { continue; }
+            seen.insert(s.name, true);
+            let mut detail: string = "local";
+            if s.let_ty != null { detail = "let ".concat(s.name).concat(": ").concat(type_to_string_pretty(s.let_ty)); }
+            json_arr_push(items, completion_item(s.name, 6, detail));
+        }
+    }
+
+    // 2. Top-level decls.
+    if doc.stmts != null {
+        for let i: int = 0; i < doc.stmts.len(); i++ {
+            let s: Stmt = doc.stmts.get(i);
+            if s.kind != ST_FN && s.kind != ST_STRUCT && s.kind != ST_ENUM && s.kind != ST_CONST { continue; }
+            if seen.contains(s.name) { continue; }
+            seen.insert(s.name, true);
+            let mut detail: string = "";
+            if s.kind == ST_FN { detail = fn_signature(&s); }
+            else if s.kind == ST_STRUCT { detail = "struct ".concat(s.name); }
+            else if s.kind == ST_ENUM { detail = "enum ".concat(s.name); }
+            else if s.kind == ST_CONST {
+                detail = "const ".concat(s.name);
+                if s.let_ty != null { detail = detail.concat(": ").concat(type_to_string_pretty(s.let_ty)); }
+            }
+            json_arr_push(items, completion_item(s.name, ci_kind_for(&s), detail));
+        }
+    }
+
+    // 3. Glide keywords.
+    let kws: *Vector<string> = Vector::new();
+    kws.push("let"); kws.push("const"); kws.push("mut"); kws.push("fn");
+    kws.push("struct"); kws.push("enum"); kws.push("impl"); kws.push("interface");
+    kws.push("if"); kws.push("else"); kws.push("while"); kws.push("for");
+    kws.push("return"); kws.push("break"); kws.push("continue");
+    kws.push("match"); kws.push("defer"); kws.push("spawn"); kws.push("import");
+    kws.push("pub"); kws.push("extern"); kws.push("true"); kws.push("false"); kws.push("null");
+    kws.push("as"); kws.push("type"); kws.push("move"); kws.push("chan");
+    for let i: int = 0; i < kws.len(); i++ {
+        let k: string = kws.get(i);
+        if seen.contains(k) { continue; }
+        seen.insert(k, true);
+        json_arr_push(items, completion_item(k, 14, ""));
+    }
+
+    seen.free();
+    lsp_send_response(id, items);
+}
+
+// Walks the program collecting every usage of `name` as an identifier.
+// Returns a list of (line, col) pairs, 1-indexed.
+struct UseSite { line: int, col: int }
+
+fn collect_uses_in_expr(e: *Expr, name: string, out: *Vector<UseSite>) {
+    if e == null { return; }
+    if e.kind == EX_IDENT && e.str_val.eq(name) {
+        let u: UseSite = UseSite { line: e.line, col: e.column };
+        out.push(u);
+    }
+    if e.kind == EX_CALL && e.lhs != null && e.lhs.kind == EX_PATH
+       && e.lhs.str_val.eq(name) {
+        let u: UseSite = UseSite { line: e.line, col: e.column };
+        out.push(u);
+    }
+    if e.lhs != null { collect_uses_in_expr(e.lhs, name, out); }
+    if e.rhs != null { collect_uses_in_expr(e.rhs, name, out); }
+    if e.operand != null { collect_uses_in_expr(e.operand, name, out); }
+    if e.args != null {
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            collect_uses_in_expr(&a, name, out);
+        }
+    }
+}
+
+fn collect_uses_in_stmt(s: *Stmt, name: string, out: *Vector<UseSite>) {
+    if s == null { return; }
+    // Declaration site of fn / struct / enum / const itself with this name.
+    if (s.kind == ST_FN || s.kind == ST_STRUCT || s.kind == ST_ENUM || s.kind == ST_CONST)
+       && s.name.eq(name) {
+        let u: UseSite = UseSite { line: s.line, col: s.column };
+        out.push(u);
+    }
+    if s.kind == ST_LET && s.name.eq(name) {
+        let u: UseSite = UseSite { line: s.line, col: s.column };
+        out.push(u);
+    }
+    if s.let_value != null { collect_uses_in_expr(s.let_value, name, out); }
+    if s.expr_value != null { collect_uses_in_expr(s.expr_value, name, out); }
+    if s.cond != null { collect_uses_in_expr(s.cond, name, out); }
+    if s.for_step != null { collect_uses_in_expr(s.for_step, name, out); }
+    if s.for_init != null { collect_uses_in_stmt(s.for_init, name, out); }
+    if s.then_body != null {
+        for let i: int = 0; i < s.then_body.len(); i++ {
+            let b: Stmt = s.then_body.get(i);
+            collect_uses_in_stmt(&b, name, out);
+        }
+    }
+    if s.else_body != null {
+        for let i: int = 0; i < s.else_body.len(); i++ {
+            let b: Stmt = s.else_body.get(i);
+            collect_uses_in_stmt(&b, name, out);
+        }
+    }
+    if s.fn_body != null {
+        for let i: int = 0; i < s.fn_body.len(); i++ {
+            let b: Stmt = s.fn_body.get(i);
+            collect_uses_in_stmt(&b, name, out);
+        }
+    }
+    if s.impl_methods != null {
+        for let i: int = 0; i < s.impl_methods.len(); i++ {
+            let m: Stmt = s.impl_methods.get(i);
+            collect_uses_in_stmt(&m, name, out);
+        }
+    }
+}
+
+fn use_to_range(u: *UseSite, name_len: int) -> *JsonValue {
+    let r: *JsonValue = json_object();
+    let mut l: int = u.line - 1; if l < 0 { l = 0; }
+    let mut c: int = u.col - 1; if c < 0 { c = 0; }
+    let s: *JsonValue = json_object();
+    json_obj_set(s, "line", json_int(l));
+    json_obj_set(s, "character", json_int(c));
+    let e: *JsonValue = json_object();
+    json_obj_set(e, "line", json_int(l));
+    json_obj_set(e, "character", json_int(c + name_len));
+    json_obj_set(r, "start", s);
+    json_obj_set(r, "end", e);
+    return r;
+}
+
+fn handle_references(req: *JsonValue, state: *LspState) {
+    let id: *JsonValue = json_get(req, "id");
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    let pos: *JsonValue = json_get(params, "position");
+    let line0: int = json_as_int(json_get(pos, "line"));
+    let col0: int = json_as_int(json_get(pos, "character"));
+    if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
+    let doc: LspDoc = state.docs.get(uri);
+    let word: string = word_at(doc.text, line0, col0);
+    if word.eq("") { lsp_send_response(id, json_array()); return; }
+    let uses: *Vector<UseSite> = Vector::new();
+    if doc.stmts != null {
+        for let i: int = 0; i < doc.stmts.len(); i++ {
+            let s: Stmt = doc.stmts.get(i);
+            collect_uses_in_stmt(&s, word, uses);
+        }
+    }
+    let arr: *JsonValue = json_array();
+    for let i: int = 0; i < uses.len(); i++ {
+        let u: UseSite = uses.get(i);
+        let loc: *JsonValue = json_object();
+        json_obj_set(loc, "uri", json_string(uri));
+        json_obj_set(loc, "range", use_to_range(&u, word.len()));
+        json_arr_push(arr, loc);
+    }
+    lsp_send_response(id, arr);
+}
+
+fn handle_document_highlight(req: *JsonValue, state: *LspState) {
+    let id: *JsonValue = json_get(req, "id");
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    let pos: *JsonValue = json_get(params, "position");
+    let line0: int = json_as_int(json_get(pos, "line"));
+    let col0: int = json_as_int(json_get(pos, "character"));
+    if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
+    let doc: LspDoc = state.docs.get(uri);
+    let word: string = word_at(doc.text, line0, col0);
+    if word.eq("") { lsp_send_response(id, json_array()); return; }
+    let uses: *Vector<UseSite> = Vector::new();
+    if doc.stmts != null {
+        for let i: int = 0; i < doc.stmts.len(); i++ {
+            let s: Stmt = doc.stmts.get(i);
+            collect_uses_in_stmt(&s, word, uses);
+        }
+    }
+    let arr: *JsonValue = json_array();
+    for let i: int = 0; i < uses.len(); i++ {
+        let u: UseSite = uses.get(i);
+        let h: *JsonValue = json_object();
+        json_obj_set(h, "range", use_to_range(&u, word.len()));
+        json_obj_set(h, "kind", json_int(1));     // 1 = Text (read), 2 = Read, 3 = Write
+        json_arr_push(arr, h);
+    }
+    lsp_send_response(id, arr);
+}
+
+fn handle_rename(req: *JsonValue, state: *LspState) {
+    let id: *JsonValue = json_get(req, "id");
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    let pos: *JsonValue = json_get(params, "position");
+    let line0: int = json_as_int(json_get(pos, "line"));
+    let col0: int = json_as_int(json_get(pos, "character"));
+    let new_name: string = json_as_string(json_get(params, "newName"));
+    if !state.docs.contains(uri) || new_name.eq("") {
+        lsp_send_response(id, json_null()); return;
+    }
+    let doc: LspDoc = state.docs.get(uri);
+    let word: string = word_at(doc.text, line0, col0);
+    if word.eq("") { lsp_send_response(id, json_null()); return; }
+    let uses: *Vector<UseSite> = Vector::new();
+    if doc.stmts != null {
+        for let i: int = 0; i < doc.stmts.len(); i++ {
+            let s: Stmt = doc.stmts.get(i);
+            collect_uses_in_stmt(&s, word, uses);
+        }
+    }
+    let edits: *JsonValue = json_array();
+    for let i: int = 0; i < uses.len(); i++ {
+        let u: UseSite = uses.get(i);
+        let edit: *JsonValue = json_object();
+        json_obj_set(edit, "range", use_to_range(&u, word.len()));
+        json_obj_set(edit, "newText", json_string(new_name));
+        json_arr_push(edits, edit);
+    }
+    let changes: *JsonValue = json_object();
+    json_obj_set(changes, uri, edits);
+    let result: *JsonValue = json_object();
+    json_obj_set(result, "changes", changes);
+    lsp_send_response(id, result);
 }
 
 // ---- Custom analysis passes --------------------------------------------
@@ -995,6 +1323,10 @@ pub fn lsp_main() -> int {
         if method.eq("textDocument/hover") { handle_hover(req, state); continue; }
         if method.eq("textDocument/documentSymbol") { handle_document_symbol(req, state); continue; }
         if method.eq("textDocument/definition") { handle_definition(req, state); continue; }
+        if method.eq("textDocument/completion") { handle_completion(req, state); continue; }
+        if method.eq("textDocument/references") { handle_references(req, state); continue; }
+        if method.eq("textDocument/documentHighlight") { handle_document_highlight(req, state); continue; }
+        if method.eq("textDocument/rename") { handle_rename(req, state); continue; }
         // Any unhandled request gets an empty-result reply so clients don't hang.
         let id: *JsonValue = json_get(req, "id");
         if id != null { lsp_send_response(id, json_null()); }
