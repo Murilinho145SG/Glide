@@ -8,6 +8,7 @@
     "vscode": "^1.85.0"
   },
   "categories": ["Programming Languages"],
+  "icon": "icons/glide-256.png",
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:glide"
@@ -18,7 +19,11 @@
         "id": "glide",
         "aliases": ["Glide", "glide"],
         "extensions": [".glide"],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/glide-light.png",
+          "dark": "./icons/glide-dark.png"
+        }
       }
     ],
     "grammars": [
