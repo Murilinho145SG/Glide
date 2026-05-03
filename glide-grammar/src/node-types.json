@@ -56,6 +56,10 @@
           "named": true
         },
         {
+          "type": "macro_var_expr",
+          "named": true
+        },
+        {
           "type": "member_expr",
           "named": true
         },
@@ -167,6 +171,10 @@
           "named": true
         },
         {
+          "type": "macro_var_expr",
+          "named": true
+        },
+        {
           "type": "member_expr",
           "named": true
         },
@@ -271,6 +279,10 @@
           },
           {
             "type": "macro_call",
+            "named": true
+          },
+          {
+            "type": "macro_var_expr",
             "named": true
           },
           {
@@ -430,6 +442,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -535,6 +551,10 @@
           },
           {
             "type": "macro_call",
+            "named": true
+          },
+          {
+            "type": "macro_var_expr",
             "named": true
           },
           {
@@ -718,6 +738,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -834,6 +858,10 @@
         },
         {
           "type": "let_stmt",
+          "named": true
+        },
+        {
+          "type": "macro_rep_stmt",
           "named": true
         },
         {
@@ -1040,6 +1068,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -1157,6 +1189,10 @@
         },
         {
           "type": "macro_call",
+          "named": true
+        },
+        {
+          "type": "macro_var_expr",
           "named": true
         },
         {
@@ -1378,6 +1414,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -1492,6 +1532,10 @@
         },
         {
           "type": "macro_call",
+          "named": true
+        },
+        {
+          "type": "macro_var_expr",
           "named": true
         },
         {
@@ -1683,6 +1727,10 @@
         },
         {
           "type": "macro_call",
+          "named": true
+        },
+        {
+          "type": "macro_var_expr",
           "named": true
         },
         {
@@ -2156,6 +2204,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -2269,6 +2321,10 @@
           },
           {
             "type": "macro_call",
+            "named": true
+          },
+          {
+            "type": "macro_var_expr",
             "named": true
           },
           {
@@ -2416,6 +2472,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -2520,6 +2580,10 @@
         },
         {
           "type": "macro_call",
+          "named": true
+        },
+        {
+          "type": "macro_var_expr",
           "named": true
         },
         {
@@ -2667,6 +2731,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -2792,6 +2860,10 @@
         {
           "type": "fn_decl",
           "named": true
+        },
+        {
+          "type": "macro_def",
+          "named": true
         }
       ]
     }
@@ -2888,6 +2960,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -2979,6 +3055,10 @@
           },
           {
             "type": "macro_call",
+            "named": true
+          },
+          {
+            "type": "macro_var_expr",
             "named": true
           },
           {
@@ -3238,6 +3318,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -3396,6 +3480,10 @@
           "named": true
         },
         {
+          "type": "macro_var_expr",
+          "named": true
+        },
+        {
           "type": "member_expr",
           "named": true
         },
@@ -3448,6 +3536,203 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "macro_def",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "macro_matcher_rep",
+          "named": true
+        },
+        {
+          "type": "macro_matcher_var",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "macro_matcher_rep",
+    "named": true,
+    "fields": {
+      "kind": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "separator": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": ",",
+            "named": false
+          },
+          {
+            "type": ";",
+            "named": false
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "macro_matcher_var",
+    "named": true,
+    "fields": {
+      "kind": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      },
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "macro_rep_stmt",
+    "named": true,
+    "fields": {},
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "block",
+          "named": true
+        },
+        {
+          "type": "break_stmt",
+          "named": true
+        },
+        {
+          "type": "const_stmt",
+          "named": true
+        },
+        {
+          "type": "continue_stmt",
+          "named": true
+        },
+        {
+          "type": "defer_stmt",
+          "named": true
+        },
+        {
+          "type": "expression_statement",
+          "named": true
+        },
+        {
+          "type": "fn_decl",
+          "named": true
+        },
+        {
+          "type": "for_stmt",
+          "named": true
+        },
+        {
+          "type": "if_stmt",
+          "named": true
+        },
+        {
+          "type": "let_stmt",
+          "named": true
+        },
+        {
+          "type": "macro_rep_stmt",
+          "named": true
+        },
+        {
+          "type": "match_stmt",
+          "named": true
+        },
+        {
+          "type": "return_stmt",
+          "named": true
+        },
+        {
+          "type": "spawn_stmt",
+          "named": true
+        },
+        {
+          "type": "struct_decl",
+          "named": true
+        },
+        {
+          "type": "while_stmt",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "macro_var_expr",
+    "named": true,
+    "fields": {
+      "name": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -3508,6 +3793,10 @@
           },
           {
             "type": "macro_call",
+            "named": true
+          },
+          {
+            "type": "macro_var_expr",
             "named": true
           },
           {
@@ -3645,6 +3934,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -3765,6 +4058,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -3871,6 +4168,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -3971,6 +4272,10 @@
         },
         {
           "type": "macro_call",
+          "named": true
+        },
+        {
+          "type": "macro_var_expr",
           "named": true
         },
         {
@@ -4199,6 +4504,10 @@
           "named": true
         },
         {
+          "type": "macro_var_expr",
+          "named": true
+        },
+        {
           "type": "member_expr",
           "named": true
         },
@@ -4354,6 +4663,10 @@
         },
         {
           "type": "macro_call",
+          "named": true
+        },
+        {
+          "type": "macro_var_expr",
           "named": true
         },
         {
@@ -4518,6 +4831,10 @@
           "named": true
         },
         {
+          "type": "macro_var_expr",
+          "named": true
+        },
+        {
           "type": "member_expr",
           "named": true
         },
@@ -4665,6 +4982,10 @@
         },
         {
           "type": "macro_call",
+          "named": true
+        },
+        {
+          "type": "macro_var_expr",
           "named": true
         },
         {
@@ -4862,6 +5183,10 @@
           "named": true
         },
         {
+          "type": "macro_def",
+          "named": true
+        },
+        {
           "type": "struct_decl",
           "named": true
         },
@@ -4926,6 +5251,10 @@
         },
         {
           "type": "macro_call",
+          "named": true
+        },
+        {
+          "type": "macro_var_expr",
           "named": true
         },
         {
@@ -5131,6 +5460,10 @@
           },
           {
             "type": "macro_call",
+            "named": true
+          },
+          {
+            "type": "macro_var_expr",
             "named": true
           },
           {
@@ -5410,6 +5743,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -5563,6 +5900,10 @@
             "named": true
           },
           {
+            "type": "macro_var_expr",
+            "named": true
+          },
+          {
             "type": "member_expr",
             "named": true
           },
@@ -5624,6 +5965,10 @@
   },
   {
     "type": "!=",
+    "named": false
+  },
+  {
+    "type": "$",
     "named": false
   },
   {
@@ -5883,6 +6228,10 @@
     "type": "line_comment",
     "named": true,
     "extra": true
+  },
+  {
+    "type": "macro",
+    "named": false
   },
   {
     "type": "match",

@@ -47,6 +47,7 @@ module.exports = grammar({
       $.let_stmt,
       $.const_stmt,
       $.type_alias,
+      $.macro_def,
     ),
 
     c_include: $ => seq('c_include', $.string_literal, ';'),
@@ -193,8 +194,50 @@ module.exports = grammar({
       field('interface', $.identifier),
       optional(seq('for', field('target', $._type))),
       '{',
-      repeat($.fn_decl),
+      repeat(choice($.fn_decl, $.macro_def)),
       '}',
+    ),
+
+    // `macro name!($x:expr, $($y:expr),*) { body }`
+    macro_def: $ => seq(
+      optional('pub'),
+      'macro',
+      field('name', $.identifier),
+      '!',
+      '(',
+      optional(seq(
+        $._macro_matcher,
+        repeat(seq(',', $._macro_matcher)),
+        optional(','),
+      )),
+      ')',
+      field('body', $.block),
+    ),
+
+    _macro_matcher: $ => choice(
+      $.macro_matcher_var,
+      $.macro_matcher_rep,
+    ),
+
+    // `$x:expr`
+    macro_matcher_var: $ => seq(
+      '$',
+      field('name', $.identifier),
+      ':',
+      field('kind', $.identifier),
+    ),
+
+    // `$($x:expr),*` — variadic with optional separator (`,` or `;`).
+    macro_matcher_rep: $ => seq(
+      '$',
+      '(',
+      '$',
+      field('name', $.identifier),
+      ':',
+      field('kind', $.identifier),
+      ')',
+      optional(field('separator', choice(',', ';'))),
+      '*',
     ),
 
     // ---- statements ----
@@ -214,7 +257,18 @@ module.exports = grammar({
       $.break_stmt,
       $.continue_stmt,
       $.block,
+      $.macro_rep_stmt,
       $.expression_statement,
+    ),
+
+    // `$( body );*` — body repetition inside a macro def.
+    macro_rep_stmt: $ => seq(
+      '$',
+      '(',
+      repeat($._statement),
+      ')',
+      optional(choice(',', ';')),
+      '*',
     ),
 
     match_stmt: $ => seq(
@@ -479,6 +533,7 @@ module.exports = grammar({
       $.new_expr,
       $.sizeof_expr,
       $.fn_expr,
+      $.macro_var_expr,
       $.identifier_expr,
       $.number_literal,
       $.float_literal,
@@ -487,6 +542,11 @@ module.exports = grammar({
       $.bool_literal,
       $.null_literal,
     ),
+
+    // `$ident` placeholder inside a macro body. Outside a macro body this
+    // would be a parse error in Glide proper; we accept it here so highlighting
+    // stays sane while authoring.
+    macro_var_expr: $ => seq('$', field('name', $.identifier)),
 
     fn_expr: $ => seq(
       optional('move'),

@@ -29,6 +29,7 @@
   "extern"
   "c_include"
   "c_link"
+  "macro"
 ] @keyword
 
 ; Built-in / known primitive types
@@ -113,3 +114,28 @@
 (path_macro_call type: (identifier) @type
                  name: (identifier) @function.macro
                  "!" @function.macro)
+
+; Macro definition: `macro name!(matchers) { body }`
+(macro_def name: (identifier) @function.macro
+           "!" @function.macro)
+
+; Matcher binders: `$x:expr` and the `$($x:expr),*` form
+(macro_matcher_var
+  "$" @punctuation.special
+  name: (identifier) @variable.parameter
+  kind: (identifier) @type.builtin)
+
+(macro_matcher_rep
+  "$" @punctuation.special
+  name: (identifier) @variable.parameter
+  kind: (identifier) @type.builtin
+  "*" @punctuation.special)
+
+; Body placeholder `$x` and repetition `$( ... );*`
+(macro_var_expr
+  "$" @punctuation.special
+  name: (identifier) @variable.parameter)
+
+(macro_rep_stmt
+  "$" @punctuation.special
+  "*" @punctuation.special)
