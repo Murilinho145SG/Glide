@@ -1,0 +1,18 @@
+struct Point { x: int, y: int }
+
+fn consume(p: *Point) -> int { return p.x; }
+
+// Should fail: moving owned local to another binding (double-free risk).
+fn alias_move() -> int {
+    let p: *Point = Point { x: 1, y: 2 };
+    let q: *Point = p;
+    return q.x;
+}
+
+// Should fail: passing owned local by value to *T param.
+fn move_to_call() -> int {
+    let p: *Point = Point { x: 1, y: 2 };
+    return consume(p);
+}
+
+fn main() -> int { return 0; }

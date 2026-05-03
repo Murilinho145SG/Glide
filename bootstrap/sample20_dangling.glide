@@ -1,0 +1,7 @@
+// Should fail: returning a borrow of a local.
+fn dangle() -> &int {
+    let x: int = 5;
+    return &x;
+}
+
+fn main() -> int { return 0; }

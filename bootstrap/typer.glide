@@ -79,6 +79,7 @@ pub struct Typer {
     fns: *HashMap<FnSig>,
     structs: *HashMap<bool>,        // just registry of names for now
     scope: *HashMap<Type>,          // current scope: name -> Type (heap-alloc'd)
+    owned_locals: *HashMap<bool>,   // names that must not escape (auto-drop)
     current_ret: *Type,
     error_count: int,
 }
@@ -89,9 +90,11 @@ impl Typer {
         let fns: *HashMap<FnSig> = HashMap::new();
         let structs: *HashMap<bool> = HashMap::new();
         let scope: *HashMap<Type> = HashMap::new();
+        let owned: *HashMap<bool> = HashMap::new();
         t.fns = fns;
         t.structs = structs;
         t.scope = scope;
+        t.owned_locals = owned;
         t.current_ret = null;
         t.error_count = 0;
         return t;
@@ -101,6 +104,7 @@ impl Typer {
         self.fns.free();
         self.structs.free();
         self.scope.free();
+        self.owned_locals.free();
         free(self as *void);
     }
 
@@ -203,9 +207,12 @@ fn check_top(t: *Typer, s: *Stmt) {
 
 fn check_fn(t: *Typer, s: *Stmt) {
     let saved_scope: *HashMap<Type> = t.scope;
+    let saved_owned: *HashMap<bool> = t.owned_locals;
     let saved_ret: *Type = t.current_ret;
     let new_scope: *HashMap<Type> = HashMap::new();
+    let new_owned: *HashMap<bool> = HashMap::new();
     t.scope = new_scope;
+    t.owned_locals = new_owned;
     t.current_ret = s.fn_ret_ty;
 
     if s.fn_params != null {
@@ -225,7 +232,9 @@ fn check_fn(t: *Typer, s: *Stmt) {
     }
 
     t.scope.free();
+    t.owned_locals.free();
     t.scope = saved_scope;
+    t.owned_locals = saved_owned;
     t.current_ret = saved_ret;
 }
 
@@ -305,6 +314,28 @@ fn check_stmt(t: *Typer, s: *Stmt) {
 
 fn check_let_or_const(t: *Typer, s: *Stmt) {
     let mut final_ty: *Type = s.let_ty;
+
+    // Borrow rule: rebinding an owned local would double-free at scope end.
+    if s.let_value != null && s.let_value.kind == EX_IDENT {
+        let src: string = s.let_value.str_val;
+        if t.owned_locals.contains(src) {
+            t.err(s.line, s.column,
+                "cannot move owned value `".concat(src)
+                .concat("` into another binding (auto-drop conflict)"));
+        }
+    }
+
+    // Detect auto-drop pattern: `let p: *T = T { ... };` (annot is `*T` and
+    // the RHS is a struct literal of `T`). The codegen rewrites this to
+    // malloc + auto-free; the typer marks the binding as owned-local.
+    let mut is_auto_owned: bool = false;
+    if s.kind == ST_LET && final_ty != null && final_ty.kind == TY_POINTER
+        && s.let_value != null && s.let_value.kind == EX_STRUCT_LIT
+        && final_ty.inner != null && final_ty.inner.kind == TY_NAMED
+        && final_ty.inner.name.eq(s.let_value.str_val) {
+        is_auto_owned = true;
+    }
+
     if s.let_value != null {
         let val_ty: *Type = infer_expr(t, s.let_value);
         if final_ty != null {
@@ -319,6 +350,7 @@ fn check_let_or_const(t: *Typer, s: *Stmt) {
     }
     if final_ty != null {
         t.scope.insert(s.name, *final_ty);
+        if is_auto_owned { t.owned_locals.insert(s.name, true); }
     }
 }
 
@@ -329,7 +361,35 @@ fn check_return(t: *Typer, s: *Stmt) {
         }
         return;
     }
-    let vt: *Type = infer_expr(t, s.expr_value);
+    let e: *Expr = s.expr_value;
+
+    // Borrow rule: cannot return an owned local (auto-drop would free it).
+    if e.kind == EX_IDENT && t.owned_locals.contains(e.str_val) {
+        t.err(s.line, s.column,
+            "cannot return owned value `".concat(e.str_val)
+            .concat("` (auto-drop would free it)"));
+    }
+    // Borrow rule: cannot return `&local` / `&mut local`. Pass-through of a
+    // borrow-typed param is allowed since the borrow's lifetime extends
+    // beyond this fn.
+    if e.kind == EX_UNARY && (e.op_code == UN_ADDR || e.op_code == UN_ADDR_MUT)
+        && e.operand != null && e.operand.kind == EX_IDENT {
+        let n: string = e.operand.str_val;
+        let mut is_param_borrow: bool = false;
+        if t.scope.contains(n) {
+            let st: Type = t.scope.get(n);
+            if st.kind == TY_BORROW || st.kind == TY_BORROW_MUT {
+                is_param_borrow = true;
+            }
+        }
+        if !is_param_borrow {
+            t.err(s.line, s.column,
+                "cannot return borrow of local `".concat(n)
+                .concat("` (would dangle after function returns)"));
+        }
+    }
+
+    let vt: *Type = infer_expr(t, e);
     if t.current_ret == null {
         t.err(s.line, s.column, "return with value in fn declared without ret type");
         return;
@@ -426,6 +486,15 @@ pub fn infer_expr(t: *Typer, e: *Expr) -> *Type {
                         for let i: int = 0; i < sig.params.len(); i++ {
                             let p: Param = sig.params.get(i);
                             let a: Expr = e.args.get(i);
+                            // Borrow rule: passing an owned local by value to a
+                            // *T param would move ownership and conflict with
+                            // auto-drop. Pass via & / &mut instead.
+                            if a.kind == EX_IDENT && t.owned_locals.contains(a.str_val)
+                                && p.ty != null && p.ty.kind == TY_POINTER {
+                                t.err(a.line, a.column,
+                                    "cannot move owned value `".concat(a.str_val)
+                                    .concat("` into `*T` parameter (auto-drop conflict)"));
+                            }
                             let at: *Type = infer_expr(t, &a);
                             if !types_compat(p.ty, at) {
                                 t.err(a.line, a.column,

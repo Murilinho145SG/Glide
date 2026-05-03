@@ -1,0 +1,10 @@
+// Should pass: returning a pass-through borrow (param is already a borrow).
+fn forward(r: &int) -> &int {
+    return r;
+}
+
+fn main() -> int {
+    let x: int = 7;
+    let r: &int = forward(&x);
+    return *r;
+}
