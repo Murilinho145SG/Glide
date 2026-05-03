@@ -1255,8 +1255,13 @@ fn list_methods_for_type(stmts: *Vector<Stmt>, type_name: string,
                 seen.insert(m.name, true);
                 json_arr_push(items, completion_item(m.name, 2, fn_signature(&m)));
             } else if m.kind == ST_MACRO_DEF {
-                // Type-attached macros are callable both as `v.name!(...)` and
-                // `Type::name!(recv, ...)`. Surface them in both contexts.
+                // Mirror the fn filter: instance macros (body uses `self`)
+                // belong to `v.` completion; static-in-impl macros (no self)
+                // belong to `Type::` completion. Calling the wrong shape
+                // works but produces awkward sites, so we hide them.
+                let uses_self: bool = body_references_self(m.then_body);
+                if want_self && !uses_self { continue; }
+                if !want_self && uses_self { continue; }
                 let label: string = m.name.concat("!");
                 if seen.contains(label) { continue; }
                 seen.insert(label, true);
