@@ -28,6 +28,7 @@ pub struct LspDoc {
     uri: string,
     text: string,
     version: int,
+    stmts: *Vector<Stmt>,
 }
 
 pub struct LspState {
@@ -116,7 +117,9 @@ fn handle_initialize(req: *JsonValue) {
     let caps: *JsonValue = json_object();
     // textDocumentSync: 1 = Full sync. We re-parse on every change.
     json_obj_set(caps, "textDocumentSync", json_int(1));
-    // Future capabilities (off for now): hoverProvider, definitionProvider, completionProvider.
+    json_obj_set(caps, "hoverProvider", json_bool(true));
+    json_obj_set(caps, "documentSymbolProvider", json_bool(true));
+    json_obj_set(caps, "definitionProvider", json_bool(true));
     json_obj_set(result, "capabilities", caps);
     let info: *JsonValue = json_object();
     json_obj_set(info, "name", json_string("glide-lsp"));
@@ -156,30 +159,27 @@ fn diag_to_json(d: *DiagEntry) -> *JsonValue {
     return dj;
 }
 
-fn run_analysis_and_publish(uri: string, text: string) {
-    // Parse the user's source. No imports / no stdlib autoload here — for
-    // editor responsiveness we keep the analysis local. This means the typer
-    // will sometimes flag identifiers that are actually defined in stdlib
-    // or in imported files. That's fine for v1; future versions will resolve
-    // imports relative to the URI.
+fn run_analysis_and_publish(uri: string, text: string, state: *LspState) {
     let lex: *Lexer = Lexer::new(text);
     let p: *Parser = Parser::new(lex);
     let stmts: *Vector<Stmt> = parse_program(p);
 
-    // Type check.
     let t: *Typer = Typer::new();
     check_program(t, stmts);
+    run_extra_analyses(t, stmts);
 
-    // Run extra analysis passes.
-    analysis_unused_vars(t, stmts);
-    analysis_arena_not_freed(t, stmts);
-    analysis_large_return(t, stmts);
+    // Save the parsed stmts on the doc so hover / document symbol / goto can
+    // query them without re-parsing.
+    if state.docs.contains(uri) {
+        let mut d: LspDoc = state.docs.get(uri);
+        d.stmts = stmts;
+        state.docs.insert(uri, d);
+    }
 
-    // Build diagnostics array.
     let arr: *JsonValue = json_array();
     for let i: int = 0; i < t.diagnostics.len(); i++ {
-        let d: DiagEntry = t.diagnostics.get(i);
-        json_arr_push(arr, diag_to_json(&d));
+        let de: DiagEntry = t.diagnostics.get(i);
+        json_arr_push(arr, diag_to_json(&de));
     }
 
     let params: *JsonValue = json_object();
@@ -196,9 +196,10 @@ fn handle_did_open(req: *JsonValue, state: *LspState) {
     let uri: string = json_as_string(json_get(td, "uri"));
     let text: string = json_as_string(json_get(td, "text"));
     let version: int = json_as_int(json_get(td, "version"));
-    let doc: LspDoc = LspDoc { uri: uri, text: text, version: version };
+    let empty_stmts: *Vector<Stmt> = Vector::new();
+    let doc: LspDoc = LspDoc { uri: uri, text: text, version: version, stmts: empty_stmts };
     state.docs.insert(uri, doc);
-    run_analysis_and_publish(uri, text);
+    run_analysis_and_publish(uri, text, state);
 }
 
 fn handle_did_change(req: *JsonValue, state: *LspState) {
@@ -214,9 +215,10 @@ fn handle_did_change(req: *JsonValue, state: *LspState) {
         // didChange w/ empty diff in incremental mode would land here; ignore.
         return;
     }
-    let doc: LspDoc = LspDoc { uri: uri, text: text, version: version };
+    let empty_stmts: *Vector<Stmt> = Vector::new();
+    let doc: LspDoc = LspDoc { uri: uri, text: text, version: version, stmts: empty_stmts };
     state.docs.insert(uri, doc);
-    run_analysis_and_publish(uri, text);
+    run_analysis_and_publish(uri, text, state);
 }
 
 fn handle_did_close(req: *JsonValue, state: *LspState) {
@@ -229,6 +231,205 @@ fn handle_did_close(req: *JsonValue, state: *LspState) {
     json_obj_set(p, "uri", json_string(uri));
     json_obj_set(p, "diagnostics", json_array());
     lsp_send_notification("textDocument/publishDiagnostics", p);
+}
+
+// Bundle of all extra-pass analyses. Both LSP and `glide check` call this.
+pub fn run_extra_analyses(t: *Typer, stmts: *Vector<Stmt>) {
+    analysis_unused_vars(t, stmts);
+    analysis_unused_params(t, stmts);
+    analysis_unused_fn(t, stmts);
+    analysis_unnecessary_mut(t, stmts);
+    analysis_arena_not_freed(t, stmts);
+    analysis_addr_of_temporary(t, stmts);
+    analysis_dead_code(t, stmts);
+    analysis_missing_return(t, stmts);
+    analysis_large_return(t, stmts);
+}
+
+// ---- Position-based features: hover / symbols / goto ------------------
+
+fn type_to_string_pretty(t: *Type) -> string {
+    if t == null { return ""; }
+    return type_to_string(t);
+}
+
+fn fn_signature(s: *Stmt) -> string {
+    let mut sig: string = "fn ".concat(s.name).concat("(");
+    if s.fn_params != null {
+        for let i: int = 0; i < s.fn_params.len(); i++ {
+            if i > 0 { sig = sig.concat(", "); }
+            let p: Param = s.fn_params.get(i);
+            sig = sig.concat(p.name).concat(": ").concat(type_to_string_pretty(p.ty));
+        }
+    }
+    sig = sig.concat(")");
+    if s.fn_ret_ty != null { sig = sig.concat(" -> ").concat(type_to_string_pretty(s.fn_ret_ty)); }
+    return sig;
+}
+
+// Walk top-level looking for a name match. Returns the declaring stmt or null.
+fn find_top_decl(stmts: *Vector<Stmt>, name: string) -> *Stmt {
+    if stmts == null { return null; }
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if (s.kind == ST_FN || s.kind == ST_STRUCT || s.kind == ST_ENUM || s.kind == ST_CONST)
+           && s.name.eq(name) {
+            let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+            *p = s;
+            return p;
+        }
+    }
+    return null;
+}
+
+// Crude "word at position": lex once, find the token whose range contains the
+// (line0, col0) — both 0-indexed from the LSP. Returns the token's lexeme or "".
+fn word_at(text: string, line0: int, col0: int) -> string {
+    let lex: *Lexer = Lexer::new(text);
+    while true {
+        let tok: Token = lex.next_token();
+        if tok.kind == TOK_EOF { return ""; }
+        if tok.kind != TOK_IDENT && tok.kind != TOK_KEYWORD { continue; }
+        // Lexer line/col is 1-indexed.
+        let tline: int = tok.line - 1;
+        let tcol: int = tok.column - 1;
+        let len: int = tok.lexeme.len();
+        if tline == line0 && col0 >= tcol && col0 <= tcol + len {
+            return tok.lexeme;
+        }
+    }
+    return "";
+}
+
+fn handle_hover(req: *JsonValue, state: *LspState) {
+    let id: *JsonValue = json_get(req, "id");
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    let pos: *JsonValue = json_get(params, "position");
+    let line0: int = json_as_int(json_get(pos, "line"));
+    let col0: int = json_as_int(json_get(pos, "character"));
+
+    if !state.docs.contains(uri) { lsp_send_response(id, json_null()); return; }
+    let doc: LspDoc = state.docs.get(uri);
+
+    let word: string = word_at(doc.text, line0, col0);
+    if word.eq("") { lsp_send_response(id, json_null()); return; }
+
+    let decl: *Stmt = find_top_decl(doc.stmts, word);
+    let mut content: string = "";
+    if decl != null {
+        if decl.kind == ST_FN { content = "```glide\n".concat(fn_signature(decl)).concat("\n```"); }
+        else if decl.kind == ST_STRUCT {
+            content = "```glide\nstruct ".concat(decl.name).concat("\n```");
+        }
+        else if decl.kind == ST_ENUM {
+            content = "```glide\nenum ".concat(decl.name).concat("\n```");
+        }
+        else if decl.kind == ST_CONST {
+            content = "```glide\nconst ".concat(decl.name);
+            if decl.let_ty != null { content = content.concat(": ").concat(type_to_string_pretty(decl.let_ty)); }
+            content = content.concat("\n```");
+        }
+    }
+
+    if content.eq("") {
+        // Built-in keywords / types fallback.
+        if word.eq("int") || word.eq("uint") || word.eq("long") || word.eq("ulong")
+           || word.eq("float") || word.eq("bool") || word.eq("string") || word.eq("char")
+           || word.eq("usize") || word.eq("isize")
+           || word.eq("i8") || word.eq("i16") || word.eq("i32") || word.eq("i64")
+           || word.eq("u8") || word.eq("u16") || word.eq("u32") || word.eq("u64")
+           || word.eq("f32") || word.eq("f64") {
+            content = "```glide\n// built-in type: ".concat(word).concat("\n```");
+        }
+    }
+
+    if content.eq("") { lsp_send_response(id, json_null()); return; }
+
+    let result: *JsonValue = json_object();
+    let contents: *JsonValue = json_object();
+    json_obj_set(contents, "kind", json_string("markdown"));
+    json_obj_set(contents, "value", json_string(content));
+    json_obj_set(result, "contents", contents);
+    lsp_send_response(id, result);
+}
+
+// LSP SymbolKind values:
+//   12 = Function, 13 = Variable, 14 = Constant, 22 = Struct, 10 = Enum, 9 = Constructor
+fn symbol_kind_for(s: *Stmt) -> int {
+    if s.kind == ST_FN { return 12; }
+    if s.kind == ST_STRUCT { return 22; }
+    if s.kind == ST_ENUM { return 10; }
+    if s.kind == ST_CONST { return 14; }
+    return 13;
+}
+
+fn position_to_json(line1: int, col1: int) -> *JsonValue {
+    let p: *JsonValue = json_object();
+    let mut l: int = line1 - 1; if l < 0 { l = 0; }
+    let mut c: int = col1 - 1; if c < 0 { c = 0; }
+    json_obj_set(p, "line", json_int(l));
+    json_obj_set(p, "character", json_int(c));
+    return p;
+}
+
+fn range_for_stmt(s: *Stmt) -> *JsonValue {
+    let r: *JsonValue = json_object();
+    json_obj_set(r, "start", position_to_json(s.line, s.column));
+    // End is approximate — use a reasonable cursor position.
+    json_obj_set(r, "end", position_to_json(s.line, s.column + 1));
+    return r;
+}
+
+fn handle_document_symbol(req: *JsonValue, state: *LspState) {
+    let id: *JsonValue = json_get(req, "id");
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
+    let doc: LspDoc = state.docs.get(uri);
+    let arr: *JsonValue = json_array();
+    if doc.stmts != null {
+        for let i: int = 0; i < doc.stmts.len(); i++ {
+            let s: Stmt = doc.stmts.get(i);
+            if s.kind != ST_FN && s.kind != ST_STRUCT && s.kind != ST_ENUM && s.kind != ST_CONST {
+                continue;
+            }
+            let sym: *JsonValue = json_object();
+            json_obj_set(sym, "name", json_string(s.name));
+            let mut detail: string = "";
+            if s.kind == ST_FN { detail = fn_signature(&s); }
+            json_obj_set(sym, "detail", json_string(detail));
+            json_obj_set(sym, "kind", json_int(symbol_kind_for(&s)));
+            json_obj_set(sym, "range", range_for_stmt(&s));
+            json_obj_set(sym, "selectionRange", range_for_stmt(&s));
+            json_arr_push(arr, sym);
+        }
+    }
+    lsp_send_response(id, arr);
+}
+
+fn handle_definition(req: *JsonValue, state: *LspState) {
+    let id: *JsonValue = json_get(req, "id");
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    let pos: *JsonValue = json_get(params, "position");
+    let line0: int = json_as_int(json_get(pos, "line"));
+    let col0: int = json_as_int(json_get(pos, "character"));
+
+    if !state.docs.contains(uri) { lsp_send_response(id, json_null()); return; }
+    let doc: LspDoc = state.docs.get(uri);
+    let word: string = word_at(doc.text, line0, col0);
+    if word.eq("") { lsp_send_response(id, json_null()); return; }
+    let decl: *Stmt = find_top_decl(doc.stmts, word);
+    if decl == null { lsp_send_response(id, json_null()); return; }
+
+    let loc: *JsonValue = json_object();
+    json_obj_set(loc, "uri", json_string(uri));
+    json_obj_set(loc, "range", range_for_stmt(decl));
+    lsp_send_response(id, loc);
 }
 
 // ---- Custom analysis passes --------------------------------------------
@@ -390,6 +591,320 @@ fn expr_calls_method(e: *Expr, var: string, method: string) -> bool {
     return false;
 }
 
+// Returning the address of a temporary value is a dangling-pointer bug:
+//   fn make() -> *Vec2 { return &Vec2 { x: 1, y: 2 }; }
+// The temporary lives in `make`'s frame; its address is invalid the moment
+// `make` returns. Code is `addr-of-temporary`.
+pub fn analysis_addr_of_temporary(t: *Typer, program: *Vector<Stmt>) {
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN && s.fn_body != null {
+            check_addr_temp_body(t, s.fn_body);
+        }
+        if s.kind == ST_IMPL && s.impl_methods != null {
+            for let j: int = 0; j < s.impl_methods.len(); j++ {
+                let m: Stmt = s.impl_methods.get(j);
+                if m.fn_body != null { check_addr_temp_body(t, m.fn_body); }
+            }
+        }
+    }
+}
+
+fn check_addr_temp_body(t: *Typer, body: *Vector<Stmt>) {
+    for let i: int = 0; i < body.len(); i++ {
+        let s: Stmt = body.get(i);
+        if s.kind == ST_RETURN && s.expr_value != null {
+            let e: *Expr = s.expr_value;
+            if e.kind == EX_UNARY && (e.op_code == UN_ADDR || e.op_code == UN_ADDR_MUT)
+               && e.operand != null
+               && (e.operand.kind == EX_STRUCT_LIT || e.operand.kind == EX_NEW) {
+                t.err_code(s.line, s.column, "addr-of-temporary",
+                    "cannot return address of a temporary value (would dangle); use `new T { ... }` to heap-allocate or return by value");
+            }
+        }
+        if s.then_body != null { check_addr_temp_body(t, s.then_body); }
+        if s.else_body != null { check_addr_temp_body(t, s.else_body); }
+    }
+}
+
+// Statements after a terminator (return / break / continue) are unreachable.
+// Only the first one is flagged.
+pub fn analysis_dead_code(t: *Typer, program: *Vector<Stmt>) {
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN && s.fn_body != null { check_dead_code_body(t, s.fn_body); }
+        if s.kind == ST_IMPL && s.impl_methods != null {
+            for let j: int = 0; j < s.impl_methods.len(); j++ {
+                let m: Stmt = s.impl_methods.get(j);
+                if m.fn_body != null { check_dead_code_body(t, m.fn_body); }
+            }
+        }
+    }
+}
+
+fn check_dead_code_body(t: *Typer, body: *Vector<Stmt>) {
+    let n: int = body.len();
+    let mut terminated: bool = false;
+    for let i: int = 0; i < n; i++ {
+        let s: Stmt = body.get(i);
+        if terminated {
+            t.warn(s.line, s.column, "dead-code",
+                "unreachable code after return / break / continue");
+            return;     // flag only the first dead stmt per block
+        }
+        if s.kind == ST_RETURN || s.kind == ST_BREAK || s.kind == ST_CONTINUE {
+            terminated = true;
+        }
+        // Recurse into nested bodies regardless.
+        if s.then_body != null { check_dead_code_body(t, s.then_body); }
+        if s.else_body != null { check_dead_code_body(t, s.else_body); }
+    }
+}
+
+// Top-level fn that's not pub, not `main`, never called from anywhere.
+// Builds a call set from every reachable expression.
+pub fn analysis_unused_fn(t: *Typer, program: *Vector<Stmt>) {
+    let called: *HashMap<bool> = HashMap::new();
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN && s.fn_body != null { collect_calls_body(s.fn_body, called); }
+        if s.kind == ST_IMPL && s.impl_methods != null {
+            for let j: int = 0; j < s.impl_methods.len(); j++ {
+                let m: Stmt = s.impl_methods.get(j);
+                if m.fn_body != null { collect_calls_body(m.fn_body, called); }
+            }
+        }
+    }
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind != ST_FN { continue; }
+        if s.fn_body == null { continue; }                      // extern
+        if s.is_pub { continue; }                                // public API
+        if s.name.eq("main") { continue; }
+        if s.type_params != null && s.type_params.len() > 0 { continue; }   // generic, may be referenced indirectly
+        if called.contains(s.name) { continue; }
+        t.warn(s.line, s.column, "unused-fn",
+            "function `".concat(s.name).concat("` is never called"));
+    }
+    called.free();
+}
+
+fn collect_calls_body(body: *Vector<Stmt>, out: *HashMap<bool>) {
+    for let i: int = 0; i < body.len(); i++ {
+        let s: Stmt = body.get(i);
+        collect_calls_stmt(&s, out);
+    }
+}
+
+fn collect_calls_stmt(s: *Stmt, out: *HashMap<bool>) {
+    if s == null { return; }
+    if s.let_value != null { collect_calls_expr(s.let_value, out); }
+    if s.expr_value != null { collect_calls_expr(s.expr_value, out); }
+    if s.cond != null { collect_calls_expr(s.cond, out); }
+    if s.for_step != null { collect_calls_expr(s.for_step, out); }
+    if s.for_init != null { collect_calls_stmt(s.for_init, out); }
+    if s.then_body != null {
+        for let i: int = 0; i < s.then_body.len(); i++ {
+            let b: Stmt = s.then_body.get(i);
+            collect_calls_stmt(&b, out);
+        }
+    }
+    if s.else_body != null {
+        for let i: int = 0; i < s.else_body.len(); i++ {
+            let b: Stmt = s.else_body.get(i);
+            collect_calls_stmt(&b, out);
+        }
+    }
+}
+
+fn collect_calls_expr(e: *Expr, out: *HashMap<bool>) {
+    if e == null { return; }
+    if e.kind == EX_CALL && e.lhs != null {
+        if e.lhs.kind == EX_IDENT { out.insert(e.lhs.str_val, true); }
+        if e.lhs.kind == EX_PATH {
+            out.insert(e.lhs.str_val.concat("_").concat(e.lhs.field), true);
+            out.insert(e.lhs.field, true);
+        }
+        if e.lhs.kind == EX_MEMBER { out.insert(e.lhs.field, true); }
+    }
+    if e.lhs != null { collect_calls_expr(e.lhs, out); }
+    if e.rhs != null { collect_calls_expr(e.rhs, out); }
+    if e.operand != null { collect_calls_expr(e.operand, out); }
+    if e.args != null {
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            collect_calls_expr(&a, out);
+        }
+    }
+}
+
+// `let mut x` where x is never reassigned. The `mut` is noise.
+pub fn analysis_unnecessary_mut(t: *Typer, program: *Vector<Stmt>) {
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN && s.fn_body != null { check_mut_body(t, s.fn_body); }
+        if s.kind == ST_IMPL && s.impl_methods != null {
+            for let j: int = 0; j < s.impl_methods.len(); j++ {
+                let m: Stmt = s.impl_methods.get(j);
+                if m.fn_body != null { check_mut_body(t, m.fn_body); }
+            }
+        }
+    }
+}
+
+fn check_mut_body(t: *Typer, body: *Vector<Stmt>) {
+    let n: int = body.len();
+    for let i: int = 0; i < n; i++ {
+        let s: Stmt = body.get(i);
+        if s.kind == ST_LET && s.is_mut {
+            let mut reassigned: bool = false;
+            for let j: int = i + 1; j < n; j++ {
+                let s2: Stmt = body.get(j);
+                if stmt_reassigns(&s2, s.name) { reassigned = true; break; }
+            }
+            if !reassigned {
+                t.warn(s.line, s.column, "unnecessary-mut",
+                    "`mut` on `".concat(s.name).concat("` is unnecessary; binding is never reassigned"));
+            }
+        }
+        if s.then_body != null { check_mut_body(t, s.then_body); }
+        if s.else_body != null { check_mut_body(t, s.else_body); }
+    }
+}
+
+fn stmt_reassigns(s: *Stmt, name: string) -> bool {
+    if s == null { return false; }
+    if s.expr_value != null && expr_reassigns(s.expr_value, name) { return true; }
+    if s.let_value != null && expr_reassigns(s.let_value, name) { return true; }
+    if s.cond != null && expr_reassigns(s.cond, name) { return true; }
+    if s.for_step != null && expr_reassigns(s.for_step, name) { return true; }
+    if s.then_body != null {
+        for let i: int = 0; i < s.then_body.len(); i++ {
+            let b: Stmt = s.then_body.get(i);
+            if stmt_reassigns(&b, name) { return true; }
+        }
+    }
+    if s.else_body != null {
+        for let i: int = 0; i < s.else_body.len(); i++ {
+            let b: Stmt = s.else_body.get(i);
+            if stmt_reassigns(&b, name) { return true; }
+        }
+    }
+    return false;
+}
+
+fn expr_reassigns(e: *Expr, name: string) -> bool {
+    if e == null { return false; }
+    if e.kind == EX_ASSIGN && e.lhs != null && e.lhs.kind == EX_IDENT
+       && e.lhs.str_val.eq(name) {
+        return true;
+    }
+    if (e.kind == EX_POSTINC || e.kind == EX_POSTDEC)
+       && e.lhs != null && e.lhs.kind == EX_IDENT
+       && e.lhs.str_val.eq(name) {
+        return true;
+    }
+    if e.lhs != null && expr_reassigns(e.lhs, name) { return true; }
+    if e.rhs != null && expr_reassigns(e.rhs, name) { return true; }
+    if e.operand != null && expr_reassigns(e.operand, name) { return true; }
+    if e.args != null {
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            if expr_reassigns(&a, name) { return true; }
+        }
+    }
+    return false;
+}
+
+// Function declared `-> T` (non-void) where some path doesn't return.
+// Conservative: walks the body, checks the LAST stmt of each branch.
+pub fn analysis_missing_return(t: *Typer, program: *Vector<Stmt>) {
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind != ST_FN { continue; }
+        if s.fn_body == null { continue; }
+        if s.fn_ret_ty == null { continue; }                 // void -> ok
+        // Bool ret is okay-ish but still must return; same logic.
+        if !body_always_returns(s.fn_body) {
+            t.warn(s.line, s.column, "missing-return",
+                "function `".concat(s.name)
+                .concat("` declared `-> ").concat(type_to_string(s.fn_ret_ty))
+                .concat("` may exit without returning a value"));
+        }
+    }
+}
+
+fn body_always_returns(body: *Vector<Stmt>) -> bool {
+    let n: int = body.len();
+    if n == 0 { return false; }
+    let last: Stmt = body.get(n - 1);
+    return stmt_terminates(&last);
+}
+
+fn stmt_terminates(s: *Stmt) -> bool {
+    if s == null { return false; }
+    if s.kind == ST_RETURN { return true; }
+    if s.kind == ST_BREAK || s.kind == ST_CONTINUE { return true; }
+    if s.kind == ST_BLOCK {
+        if s.then_body != null { return body_always_returns(s.then_body); }
+        return false;
+    }
+    if s.kind == ST_IF {
+        if s.then_body != null && s.else_body != null {
+            return body_always_returns(s.then_body) && body_always_returns(s.else_body);
+        }
+        return false;
+    }
+    if s.kind == ST_MATCH {
+        if s.arms == null { return false; }
+        let mut all: bool = true;
+        let mut has_default: bool = false;
+        for let i: int = 0; i < s.arms.len(); i++ {
+            let a: MatchArm = s.arms.get(i);
+            if a.variant.eq("_") { has_default = true; }
+            if a.body == null || !body_always_returns(a.body) { all = false; break; }
+        }
+        return all && has_default;
+    }
+    return false;
+}
+
+// Unused fn parameter (skip names starting with `_`). Reports at the fn
+// declaration line since Param has no position info.
+pub fn analysis_unused_params(t: *Typer, program: *Vector<Stmt>) {
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_FN { check_unused_params_fn(t, &s); }
+        if s.kind == ST_IMPL && s.impl_methods != null {
+            for let j: int = 0; j < s.impl_methods.len(); j++ {
+                let m: Stmt = s.impl_methods.get(j);
+                check_unused_params_fn(t, &m);
+            }
+        }
+    }
+}
+
+fn check_unused_params_fn(t: *Typer, fnstmt: *Stmt) {
+    if fnstmt == null { return; }
+    if fnstmt.fn_body == null { return; }
+    if fnstmt.fn_params == null { return; }
+    for let i: int = 0; i < fnstmt.fn_params.len(); i++ {
+        let p: Param = fnstmt.fn_params.get(i);
+        if p.name.eq("self") { continue; }
+        if p.name.len() > 0 && p.name.at(0).to_int() == 95 { continue; }
+        let mut used: bool = false;
+        for let j: int = 0; j < fnstmt.fn_body.len(); j++ {
+            let b: Stmt = fnstmt.fn_body.get(j);
+            if stmt_uses_name(&b, p.name) { used = true; break; }
+        }
+        if !used {
+            t.warn(fnstmt.line, fnstmt.column, "unused-param",
+                "parameter `".concat(p.name).concat("` of `")
+                .concat(fnstmt.name).concat("` is never used (prefix with `_` to silence)"));
+        }
+    }
+}
+
 // Estimate a type's size in bytes. Approximate (no alignment / padding) but
 // good enough to spot "I'm returning a 2KB struct by value" anti-patterns.
 fn type_size_bytes(t: *Type, structs: *HashMap<Stmt>) -> int {
@@ -477,6 +992,9 @@ pub fn lsp_main() -> int {
         if method.eq("textDocument/didOpen") { handle_did_open(req, state); continue; }
         if method.eq("textDocument/didChange") { handle_did_change(req, state); continue; }
         if method.eq("textDocument/didClose") { handle_did_close(req, state); continue; }
+        if method.eq("textDocument/hover") { handle_hover(req, state); continue; }
+        if method.eq("textDocument/documentSymbol") { handle_document_symbol(req, state); continue; }
+        if method.eq("textDocument/definition") { handle_definition(req, state); continue; }
         // Any unhandled request gets an empty-result reply so clients don't hang.
         let id: *JsonValue = json_get(req, "id");
         if id != null { lsp_send_response(id, json_null()); }

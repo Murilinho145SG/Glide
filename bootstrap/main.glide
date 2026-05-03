@@ -328,6 +328,7 @@ fn main() -> int {
     if mode == MODE_CHECK {
         let t: *Typer = Typer::new();
         check_program(t, stmts);
+        run_extra_analyses(t, stmts);
         for let i: int = 0; i < t.diagnostics.len(); i++ {
             let d: DiagEntry = t.diagnostics.get(i);
             let mut tag: string = "error";

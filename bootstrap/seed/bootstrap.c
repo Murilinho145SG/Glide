@@ -546,6 +546,7 @@ typedef struct  LspDoc  {
      const char*   uri;
      const char*   text;
      int   version;
+     Vector__Stmt*   stmts;
 }  LspDoc ;
 
 typedef struct  LspState  {
@@ -834,10 +835,21 @@ void   lsp_send_notification (const char*   method, JsonValue*   params);
 void   handle_initialize (JsonValue*   req);
 void   handle_shutdown (JsonValue*   req, LspState*   state);
 JsonValue*   diag_to_json (DiagEntry*   d);
-void   run_analysis_and_publish (const char*   uri, const char*   text);
+void   run_analysis_and_publish (const char*   uri, const char*   text, LspState*   state);
 void   handle_did_open (JsonValue*   req, LspState*   state);
 void   handle_did_change (JsonValue*   req, LspState*   state);
 void   handle_did_close (JsonValue*   req, LspState*   state);
+void   run_extra_analyses (Typer*   t, Vector__Stmt*   stmts);
+const char*   type_to_string_pretty (Type*   t);
+const char*   fn_signature (Stmt*   s);
+Stmt*   find_top_decl (Vector__Stmt*   stmts, const char*   name);
+const char*   word_at (const char*   text, int   line0, int   col0);
+void   handle_hover (JsonValue*   req, LspState*   state);
+int   symbol_kind_for (Stmt*   s);
+JsonValue*   position_to_json (int   line1, int   col1);
+JsonValue*   range_for_stmt (Stmt*   s);
+void   handle_document_symbol (JsonValue*   req, LspState*   state);
+void   handle_definition (JsonValue*   req, LspState*   state);
 void   analysis_unused_vars (Typer*   t, Vector__Stmt*   program);
 void   check_unused_in_body (Typer*   t, Vector__Stmt*   body);
 bool   stmt_uses_name (Stmt*   s, const char*   name);
@@ -847,6 +859,23 @@ void   check_arena_in_body (Typer*   t, Vector__Stmt*   body);
 bool   arena_is_freed_in_body (const char*   name, Vector__Stmt*   body, int   start);
 bool   stmt_calls_method (Stmt*   s, const char*   var, const char*   method);
 bool   expr_calls_method (Expr*   e, const char*   var, const char*   method);
+void   analysis_addr_of_temporary (Typer*   t, Vector__Stmt*   program);
+void   check_addr_temp_body (Typer*   t, Vector__Stmt*   body);
+void   analysis_dead_code (Typer*   t, Vector__Stmt*   program);
+void   check_dead_code_body (Typer*   t, Vector__Stmt*   body);
+void   analysis_unused_fn (Typer*   t, Vector__Stmt*   program);
+void   collect_calls_body (Vector__Stmt*   body, HashMap__bool*   out);
+void   collect_calls_stmt (Stmt*   s, HashMap__bool*   out);
+void   collect_calls_expr (Expr*   e, HashMap__bool*   out);
+void   analysis_unnecessary_mut (Typer*   t, Vector__Stmt*   program);
+void   check_mut_body (Typer*   t, Vector__Stmt*   body);
+bool   stmt_reassigns (Stmt*   s, const char*   name);
+bool   expr_reassigns (Expr*   e, const char*   name);
+void   analysis_missing_return (Typer*   t, Vector__Stmt*   program);
+bool   body_always_returns (Vector__Stmt*   body);
+bool   stmt_terminates (Stmt*   s);
+void   analysis_unused_params (Typer*   t, Vector__Stmt*   program);
+void   check_unused_params_fn (Typer*   t, Stmt*   fnstmt);
 int   type_size_bytes (Type*   t, HashMap__Stmt*   structs);
 void   analysis_large_return (Typer*   t, Vector__Stmt*   program);
 int   lsp_main (void);
@@ -953,9 +982,11 @@ void   Vector_push__JsonValue (Vector__JsonValue*   self, JsonValue   x);
 JsonValue   Vector_get__JsonValue (Vector__JsonValue*   self, int   i);
 int   Vector_len__JsonValue (Vector__JsonValue*   self);
 HashMap__LspDoc*   HashMap_new__LspDoc (void);
+bool   HashMap_contains__LspDoc (HashMap__LspDoc*   self, const char*   k);
+LspDoc   HashMap_get__LspDoc (HashMap__LspDoc*   self, const char*   k);
+void   HashMap_insert__LspDoc (HashMap__LspDoc*   self, const char*   k, LspDoc   v);
 int   Vector_len__DiagEntry (Vector__DiagEntry*   self);
 DiagEntry   Vector_get__DiagEntry (Vector__DiagEntry*   self, int   i);
-void   HashMap_insert__LspDoc (HashMap__LspDoc*   self, const char*   k, LspDoc   v);
 bool   HashMap_remove__LspDoc (HashMap__LspDoc*   self, const char*   k);
 void   HashMap_resize__FnSig (HashMap__FnSig*   self, int   new_cap);
 int   HashMap_slot__FnSig (HashMap__FnSig*   self, const char*   k);
@@ -965,8 +996,8 @@ void   HashMap_resize__Type (HashMap__Type*   self, int   new_cap);
 int   HashMap_slot__Type (HashMap__Type*   self, const char*   k);
 int   HashMap_slot__Stmt (HashMap__Stmt*   self, const char*   k);
 void   HashMap_resize__Stmt (HashMap__Stmt*   self, int   new_cap);
-void   HashMap_resize__LspDoc (HashMap__LspDoc*   self, int   new_cap);
 int   HashMap_slot__LspDoc (HashMap__LspDoc*   self, const char*   k);
+void   HashMap_resize__LspDoc (HashMap__LspDoc*   self, int   new_cap);
 int   HashMap_hash_key__FnSig (HashMap__FnSig*   self, const char*   k);
 int   HashMap_hash_key__bool (HashMap__bool*   self, const char*   k);
 int   HashMap_hash_key__Type (HashMap__Type*   self, const char*   k);
@@ -7463,6 +7494,9 @@ void   handle_initialize (JsonValue*   req) {
     JsonValue*   result = json_object();
     JsonValue*   caps = json_object();
     json_obj_set(caps, "textDocumentSync", json_int(1));
+    json_obj_set(caps, "hoverProvider", json_bool(true));
+    json_obj_set(caps, "documentSymbolProvider", json_bool(true));
+    json_obj_set(caps, "definitionProvider", json_bool(true));
     json_obj_set(result, "capabilities", caps);
     JsonValue*   info = json_object();
     json_obj_set(info, "name", json_string("glide-lsp"));
@@ -7514,19 +7548,22 @@ JsonValue*   diag_to_json (DiagEntry*   d) {
     return dj;
 }
 
-void   run_analysis_and_publish (const char*   uri, const char*   text) {
+void   run_analysis_and_publish (const char*   uri, const char*   text, LspState*   state) {
     Lexer*   lex = Lexer_new(text);
     Parser*   p = Parser_new(lex);
     Vector__Stmt*   stmts = parse_program(p);
     Typer*   t = Typer_new();
     check_program(t, stmts);
-    analysis_unused_vars(t, stmts);
-    analysis_arena_not_freed(t, stmts);
-    analysis_large_return(t, stmts);
+    run_extra_analyses(t, stmts);
+    if (HashMap_contains__LspDoc((state-> docs ), uri)) {
+        LspDoc   d = HashMap_get__LspDoc((state-> docs ), uri);
+        ((d. stmts )  =  stmts);
+        HashMap_insert__LspDoc((state-> docs ), uri, d);
+    }
     JsonValue*   arr = json_array();
     for (int   i = 0; (i  <  Vector_len__DiagEntry((t-> diagnostics ))); i++) {
-        DiagEntry   d = Vector_get__DiagEntry((t-> diagnostics ), i);
-        json_arr_push(arr, diag_to_json((&d)));
+        DiagEntry   de = Vector_get__DiagEntry((t-> diagnostics ), i);
+        json_arr_push(arr, diag_to_json((&de)));
     }
     JsonValue*   params = json_object();
     json_obj_set(params, "uri", json_string(uri));
@@ -7541,9 +7578,10 @@ void   handle_did_open (JsonValue*   req, LspState*   state) {
     const char*   uri = json_as_string(json_get(td, "uri"));
     const char*   text = json_as_string(json_get(td, "text"));
     int   version = json_as_int(json_get(td, "version"));
-    LspDoc   doc = (( LspDoc ){. uri  = uri, . text  = text, . version  = version});
+    Vector__Stmt*   empty_stmts = Vector_new__Stmt();
+    LspDoc   doc = (( LspDoc ){. uri  = uri, . text  = text, . version  = version, . stmts  = empty_stmts});
     HashMap_insert__LspDoc((state-> docs ), uri, doc);
-    run_analysis_and_publish(uri, text);
+    run_analysis_and_publish(uri, text, state);
 }
 
 void   handle_did_change (JsonValue*   req, LspState*   state) {
@@ -7557,9 +7595,10 @@ void   handle_did_change (JsonValue*   req, LspState*   state) {
     if (__glide_string_eq(text, "")) {
         return;
     }
-    LspDoc   doc = (( LspDoc ){. uri  = uri, . text  = text, . version  = version});
+    Vector__Stmt*   empty_stmts = Vector_new__Stmt();
+    LspDoc   doc = (( LspDoc ){. uri  = uri, . text  = text, . version  = version, . stmts  = empty_stmts});
     HashMap_insert__LspDoc((state-> docs ), uri, doc);
-    run_analysis_and_publish(uri, text);
+    run_analysis_and_publish(uri, text, state);
 }
 
 void   handle_did_close (JsonValue*   req, LspState*   state) {
@@ -7571,6 +7610,236 @@ void   handle_did_close (JsonValue*   req, LspState*   state) {
     json_obj_set(p, "uri", json_string(uri));
     json_obj_set(p, "diagnostics", json_array());
     lsp_send_notification("textDocument/publishDiagnostics", p);
+}
+
+void   run_extra_analyses (Typer*   t, Vector__Stmt*   stmts) {
+    analysis_unused_vars(t, stmts);
+    analysis_unused_params(t, stmts);
+    analysis_unused_fn(t, stmts);
+    analysis_unnecessary_mut(t, stmts);
+    analysis_arena_not_freed(t, stmts);
+    analysis_addr_of_temporary(t, stmts);
+    analysis_dead_code(t, stmts);
+    analysis_missing_return(t, stmts);
+    analysis_large_return(t, stmts);
+}
+
+const char*   type_to_string_pretty (Type*   t) {
+    if ((t  ==  NULL)) {
+        return "";
+    }
+    return type_to_string(t);
+}
+
+const char*   fn_signature (Stmt*   s) {
+    const char*   sig = __glide_string_concat(__glide_string_concat("fn ", (s-> name )), "(");
+    if (((s-> fn_params )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Param((s-> fn_params ))); i++) {
+            if ((i  >  0)) {
+                (sig  =  __glide_string_concat(sig, ", "));
+            }
+            Param   p = Vector_get__Param((s-> fn_params ), i);
+            (sig  =  __glide_string_concat(__glide_string_concat(__glide_string_concat(sig, (p. name )), ": "), type_to_string_pretty((p. ty ))));
+        }
+    }
+    (sig  =  __glide_string_concat(sig, ")"));
+    if (((s-> fn_ret_ty )  !=  NULL)) {
+        (sig  =  __glide_string_concat(__glide_string_concat(sig, " -> "), type_to_string_pretty((s-> fn_ret_ty ))));
+    }
+    return sig;
+}
+
+Stmt*   find_top_decl (Vector__Stmt*   stmts, const char*   name) {
+    if ((stmts  ==  NULL)) {
+        return NULL;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(stmts)); i++) {
+        Stmt   s = Vector_get__Stmt(stmts, i);
+        if (((((((s. kind )  ==  ST_FN)  ||  ((s. kind )  ==  ST_STRUCT))  ||  ((s. kind )  ==  ST_ENUM))  ||  ((s. kind )  ==  ST_CONST))  &&  __glide_string_eq((s. name ), name))) {
+            Stmt*   p = (( Stmt* )malloc(sizeof( Stmt )));
+            ((*p)  =  s);
+            return p;
+        }
+    }
+    return NULL;
+}
+
+const char*   word_at (const char*   text, int   line0, int   col0) {
+    Lexer*   lex = Lexer_new(text);
+    while (true) {
+        Token   tok = Lexer_next_token(lex);
+        if (((tok. kind )  ==  TOK_EOF)) {
+            return "";
+        }
+        if ((((tok. kind )  !=  TOK_IDENT)  &&  ((tok. kind )  !=  TOK_KEYWORD))) {
+            continue;
+        }
+        int   tline = ((tok. line )  -  1);
+        int   tcol = ((tok. column )  -  1);
+        int   len = __glide_string_len((tok. lexeme ));
+        if ((((tline  ==  line0)  &&  (col0  >=  tcol))  &&  (col0  <=  (tcol  +  len)))) {
+            return (tok. lexeme );
+        }
+    }
+    return "";
+}
+
+void   handle_hover (JsonValue*   req, LspState*   state) {
+    JsonValue*   id = json_get(req, "id");
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    JsonValue*   pos = json_get(params, "position");
+    int   line0 = json_as_int(json_get(pos, "line"));
+    int   col0 = json_as_int(json_get(pos, "character"));
+    if ((!HashMap_contains__LspDoc((state-> docs ), uri))) {
+        lsp_send_response(id, json_null());
+        return;
+    }
+    LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    const char*   word = word_at((doc. text ), line0, col0);
+    if (__glide_string_eq(word, "")) {
+        lsp_send_response(id, json_null());
+        return;
+    }
+    Stmt*   decl = find_top_decl((doc. stmts ), word);
+    const char*   content = "";
+    if ((decl  !=  NULL)) {
+        if (((decl-> kind )  ==  ST_FN)) {
+            (content  =  __glide_string_concat(__glide_string_concat("```glide\n", fn_signature(decl)), "\n```"));
+        } else {
+            if (((decl-> kind )  ==  ST_STRUCT)) {
+                (content  =  __glide_string_concat(__glide_string_concat("```glide\nstruct ", (decl-> name )), "\n```"));
+            } else {
+                if (((decl-> kind )  ==  ST_ENUM)) {
+                    (content  =  __glide_string_concat(__glide_string_concat("```glide\nenum ", (decl-> name )), "\n```"));
+                } else {
+                    if (((decl-> kind )  ==  ST_CONST)) {
+                        (content  =  __glide_string_concat("```glide\nconst ", (decl-> name )));
+                        if (((decl-> let_ty )  !=  NULL)) {
+                            (content  =  __glide_string_concat(__glide_string_concat(content, ": "), type_to_string_pretty((decl-> let_ty ))));
+                        }
+                        (content  =  __glide_string_concat(content, "\n```"));
+                    }
+                }
+            }
+        }
+    }
+    if (__glide_string_eq(content, "")) {
+        if ((((((((((((((((((((__glide_string_eq(word, "int")  ||  __glide_string_eq(word, "uint"))  ||  __glide_string_eq(word, "long"))  ||  __glide_string_eq(word, "ulong"))  ||  __glide_string_eq(word, "float"))  ||  __glide_string_eq(word, "bool"))  ||  __glide_string_eq(word, "string"))  ||  __glide_string_eq(word, "char"))  ||  __glide_string_eq(word, "usize"))  ||  __glide_string_eq(word, "isize"))  ||  __glide_string_eq(word, "i8"))  ||  __glide_string_eq(word, "i16"))  ||  __glide_string_eq(word, "i32"))  ||  __glide_string_eq(word, "i64"))  ||  __glide_string_eq(word, "u8"))  ||  __glide_string_eq(word, "u16"))  ||  __glide_string_eq(word, "u32"))  ||  __glide_string_eq(word, "u64"))  ||  __glide_string_eq(word, "f32"))  ||  __glide_string_eq(word, "f64"))) {
+            (content  =  __glide_string_concat(__glide_string_concat("```glide\n// built-in type: ", word), "\n```"));
+        }
+    }
+    if (__glide_string_eq(content, "")) {
+        lsp_send_response(id, json_null());
+        return;
+    }
+    JsonValue*   result = json_object();
+    JsonValue*   contents = json_object();
+    json_obj_set(contents, "kind", json_string("markdown"));
+    json_obj_set(contents, "value", json_string(content));
+    json_obj_set(result, "contents", contents);
+    lsp_send_response(id, result);
+}
+
+int   symbol_kind_for (Stmt*   s) {
+    if (((s-> kind )  ==  ST_FN)) {
+        return 12;
+    }
+    if (((s-> kind )  ==  ST_STRUCT)) {
+        return 22;
+    }
+    if (((s-> kind )  ==  ST_ENUM)) {
+        return 10;
+    }
+    if (((s-> kind )  ==  ST_CONST)) {
+        return 14;
+    }
+    return 13;
+}
+
+JsonValue*   position_to_json (int   line1, int   col1) {
+    JsonValue*   p = json_object();
+    int   l = (line1  -  1);
+    if ((l  <  0)) {
+        (l  =  0);
+    }
+    int   c = (col1  -  1);
+    if ((c  <  0)) {
+        (c  =  0);
+    }
+    json_obj_set(p, "line", json_int(l));
+    json_obj_set(p, "character", json_int(c));
+    return p;
+}
+
+JsonValue*   range_for_stmt (Stmt*   s) {
+    JsonValue*   r = json_object();
+    json_obj_set(r, "start", position_to_json((s-> line ), (s-> column )));
+    json_obj_set(r, "end", position_to_json((s-> line ), ((s-> column )  +  1)));
+    return r;
+}
+
+void   handle_document_symbol (JsonValue*   req, LspState*   state) {
+    JsonValue*   id = json_get(req, "id");
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    if ((!HashMap_contains__LspDoc((state-> docs ), uri))) {
+        lsp_send_response(id, json_array());
+        return;
+    }
+    LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    JsonValue*   arr = json_array();
+    if (((doc. stmts )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((doc. stmts ))); i++) {
+            Stmt   s = Vector_get__Stmt((doc. stmts ), i);
+            if ((((((s. kind )  !=  ST_FN)  &&  ((s. kind )  !=  ST_STRUCT))  &&  ((s. kind )  !=  ST_ENUM))  &&  ((s. kind )  !=  ST_CONST))) {
+                continue;
+            }
+            JsonValue*   sym = json_object();
+            json_obj_set(sym, "name", json_string((s. name )));
+            const char*   detail = "";
+            if (((s. kind )  ==  ST_FN)) {
+                (detail  =  fn_signature((&s)));
+            }
+            json_obj_set(sym, "detail", json_string(detail));
+            json_obj_set(sym, "kind", json_int(symbol_kind_for((&s))));
+            json_obj_set(sym, "range", range_for_stmt((&s)));
+            json_obj_set(sym, "selectionRange", range_for_stmt((&s)));
+            json_arr_push(arr, sym);
+        }
+    }
+    lsp_send_response(id, arr);
+}
+
+void   handle_definition (JsonValue*   req, LspState*   state) {
+    JsonValue*   id = json_get(req, "id");
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    JsonValue*   pos = json_get(params, "position");
+    int   line0 = json_as_int(json_get(pos, "line"));
+    int   col0 = json_as_int(json_get(pos, "character"));
+    if ((!HashMap_contains__LspDoc((state-> docs ), uri))) {
+        lsp_send_response(id, json_null());
+        return;
+    }
+    LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    const char*   word = word_at((doc. text ), line0, col0);
+    if (__glide_string_eq(word, "")) {
+        lsp_send_response(id, json_null());
+        return;
+    }
+    Stmt*   decl = find_top_decl((doc. stmts ), word);
+    if ((decl  ==  NULL)) {
+        lsp_send_response(id, json_null());
+        return;
+    }
+    JsonValue*   loc = json_object();
+    json_obj_set(loc, "uri", json_string(uri));
+    json_obj_set(loc, "range", range_for_stmt(decl));
+    lsp_send_response(id, loc);
 }
 
 void   analysis_unused_vars (Typer*   t, Vector__Stmt*   program) {
@@ -7782,6 +8051,418 @@ bool   expr_calls_method (Expr*   e, const char*   var, const char*   method) {
     return false;
 }
 
+void   analysis_addr_of_temporary (Typer*   t, Vector__Stmt*   program) {
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if ((((s. kind )  ==  ST_FN)  &&  ((s. fn_body )  !=  NULL))) {
+            check_addr_temp_body(t, (s. fn_body ));
+        }
+        if ((((s. kind )  ==  ST_IMPL)  &&  ((s. impl_methods )  !=  NULL))) {
+            for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
+                Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
+                if (((m. fn_body )  !=  NULL)) {
+                    check_addr_temp_body(t, (m. fn_body ));
+                }
+            }
+        }
+    }
+}
+
+void   check_addr_temp_body (Typer*   t, Vector__Stmt*   body) {
+    for (int   i = 0; (i  <  Vector_len__Stmt(body)); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        if ((((s. kind )  ==  ST_RETURN)  &&  ((s. expr_value )  !=  NULL))) {
+            Expr*   e = (s. expr_value );
+            if ((((((e-> kind )  ==  EX_UNARY)  &&  (((e-> op_code )  ==  UN_ADDR)  ||  ((e-> op_code )  ==  UN_ADDR_MUT)))  &&  ((e-> operand )  !=  NULL))  &&  ((((e-> operand )-> kind )  ==  EX_STRUCT_LIT)  ||  (((e-> operand )-> kind )  ==  EX_NEW)))) {
+                Typer_err_code(t, (s. line ), (s. column ), "addr-of-temporary", "cannot return address of a temporary value (would dangle); use `new T { ... }` to heap-allocate or return by value");
+            }
+        }
+        if (((s. then_body )  !=  NULL)) {
+            check_addr_temp_body(t, (s. then_body ));
+        }
+        if (((s. else_body )  !=  NULL)) {
+            check_addr_temp_body(t, (s. else_body ));
+        }
+    }
+}
+
+void   analysis_dead_code (Typer*   t, Vector__Stmt*   program) {
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if ((((s. kind )  ==  ST_FN)  &&  ((s. fn_body )  !=  NULL))) {
+            check_dead_code_body(t, (s. fn_body ));
+        }
+        if ((((s. kind )  ==  ST_IMPL)  &&  ((s. impl_methods )  !=  NULL))) {
+            for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
+                Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
+                if (((m. fn_body )  !=  NULL)) {
+                    check_dead_code_body(t, (m. fn_body ));
+                }
+            }
+        }
+    }
+}
+
+void   check_dead_code_body (Typer*   t, Vector__Stmt*   body) {
+    int   n = Vector_len__Stmt(body);
+    bool   terminated = false;
+    for (int   i = 0; (i  <  n); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        if (terminated) {
+            Typer_warn(t, (s. line ), (s. column ), "dead-code", "unreachable code after return / break / continue");
+            return;
+        }
+        if (((((s. kind )  ==  ST_RETURN)  ||  ((s. kind )  ==  ST_BREAK))  ||  ((s. kind )  ==  ST_CONTINUE))) {
+            (terminated  =  true);
+        }
+        if (((s. then_body )  !=  NULL)) {
+            check_dead_code_body(t, (s. then_body ));
+        }
+        if (((s. else_body )  !=  NULL)) {
+            check_dead_code_body(t, (s. else_body ));
+        }
+    }
+}
+
+void   analysis_unused_fn (Typer*   t, Vector__Stmt*   program) {
+    HashMap__bool*   called = HashMap_new__bool();
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if ((((s. kind )  ==  ST_FN)  &&  ((s. fn_body )  !=  NULL))) {
+            collect_calls_body((s. fn_body ), called);
+        }
+        if ((((s. kind )  ==  ST_IMPL)  &&  ((s. impl_methods )  !=  NULL))) {
+            for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
+                Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
+                if (((m. fn_body )  !=  NULL)) {
+                    collect_calls_body((m. fn_body ), called);
+                }
+            }
+        }
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if (((s. kind )  !=  ST_FN)) {
+            continue;
+        }
+        if (((s. fn_body )  ==  NULL)) {
+            continue;
+        }
+        if ((s. is_pub )) {
+            continue;
+        }
+        if (__glide_string_eq((s. name ), "main")) {
+            continue;
+        }
+        if ((((s. type_params )  !=  NULL)  &&  (Vector_len__string((s. type_params ))  >  0))) {
+            continue;
+        }
+        if (HashMap_contains__bool(called, (s. name ))) {
+            continue;
+        }
+        Typer_warn(t, (s. line ), (s. column ), "unused-fn", __glide_string_concat(__glide_string_concat("function `", (s. name )), "` is never called"));
+    }
+    HashMap_free__bool(called);
+}
+
+void   collect_calls_body (Vector__Stmt*   body, HashMap__bool*   out) {
+    for (int   i = 0; (i  <  Vector_len__Stmt(body)); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        collect_calls_stmt((&s), out);
+    }
+}
+
+void   collect_calls_stmt (Stmt*   s, HashMap__bool*   out) {
+    if ((s  ==  NULL)) {
+        return;
+    }
+    if (((s-> let_value )  !=  NULL)) {
+        collect_calls_expr((s-> let_value ), out);
+    }
+    if (((s-> expr_value )  !=  NULL)) {
+        collect_calls_expr((s-> expr_value ), out);
+    }
+    if (((s-> cond )  !=  NULL)) {
+        collect_calls_expr((s-> cond ), out);
+    }
+    if (((s-> for_step )  !=  NULL)) {
+        collect_calls_expr((s-> for_step ), out);
+    }
+    if (((s-> for_init )  !=  NULL)) {
+        collect_calls_stmt((s-> for_init ), out);
+    }
+    if (((s-> then_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> then_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> then_body ), i);
+            collect_calls_stmt((&b), out);
+        }
+    }
+    if (((s-> else_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> else_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> else_body ), i);
+            collect_calls_stmt((&b), out);
+        }
+    }
+}
+
+void   collect_calls_expr (Expr*   e, HashMap__bool*   out) {
+    if ((e  ==  NULL)) {
+        return;
+    }
+    if ((((e-> kind )  ==  EX_CALL)  &&  ((e-> lhs )  !=  NULL))) {
+        if ((((e-> lhs )-> kind )  ==  EX_IDENT)) {
+            HashMap_insert__bool(out, ((e-> lhs )-> str_val ), true);
+        }
+        if ((((e-> lhs )-> kind )  ==  EX_PATH)) {
+            HashMap_insert__bool(out, __glide_string_concat(__glide_string_concat(((e-> lhs )-> str_val ), "_"), ((e-> lhs )-> field )), true);
+            HashMap_insert__bool(out, ((e-> lhs )-> field ), true);
+        }
+        if ((((e-> lhs )-> kind )  ==  EX_MEMBER)) {
+            HashMap_insert__bool(out, ((e-> lhs )-> field ), true);
+        }
+    }
+    if (((e-> lhs )  !=  NULL)) {
+        collect_calls_expr((e-> lhs ), out);
+    }
+    if (((e-> rhs )  !=  NULL)) {
+        collect_calls_expr((e-> rhs ), out);
+    }
+    if (((e-> operand )  !=  NULL)) {
+        collect_calls_expr((e-> operand ), out);
+    }
+    if (((e-> args )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
+            Expr   a = Vector_get__Expr((e-> args ), i);
+            collect_calls_expr((&a), out);
+        }
+    }
+}
+
+void   analysis_unnecessary_mut (Typer*   t, Vector__Stmt*   program) {
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if ((((s. kind )  ==  ST_FN)  &&  ((s. fn_body )  !=  NULL))) {
+            check_mut_body(t, (s. fn_body ));
+        }
+        if ((((s. kind )  ==  ST_IMPL)  &&  ((s. impl_methods )  !=  NULL))) {
+            for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
+                Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
+                if (((m. fn_body )  !=  NULL)) {
+                    check_mut_body(t, (m. fn_body ));
+                }
+            }
+        }
+    }
+}
+
+void   check_mut_body (Typer*   t, Vector__Stmt*   body) {
+    int   n = Vector_len__Stmt(body);
+    for (int   i = 0; (i  <  n); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        if ((((s. kind )  ==  ST_LET)  &&  (s. is_mut ))) {
+            bool   reassigned = false;
+            for (int   j = (i  +  1); (j  <  n); j++) {
+                Stmt   s2 = Vector_get__Stmt(body, j);
+                if (stmt_reassigns((&s2), (s. name ))) {
+                    (reassigned  =  true);
+                    break;
+                }
+            }
+            if ((!reassigned)) {
+                Typer_warn(t, (s. line ), (s. column ), "unnecessary-mut", __glide_string_concat(__glide_string_concat("`mut` on `", (s. name )), "` is unnecessary; binding is never reassigned"));
+            }
+        }
+        if (((s. then_body )  !=  NULL)) {
+            check_mut_body(t, (s. then_body ));
+        }
+        if (((s. else_body )  !=  NULL)) {
+            check_mut_body(t, (s. else_body ));
+        }
+    }
+}
+
+bool   stmt_reassigns (Stmt*   s, const char*   name) {
+    if ((s  ==  NULL)) {
+        return false;
+    }
+    if ((((s-> expr_value )  !=  NULL)  &&  expr_reassigns((s-> expr_value ), name))) {
+        return true;
+    }
+    if ((((s-> let_value )  !=  NULL)  &&  expr_reassigns((s-> let_value ), name))) {
+        return true;
+    }
+    if ((((s-> cond )  !=  NULL)  &&  expr_reassigns((s-> cond ), name))) {
+        return true;
+    }
+    if ((((s-> for_step )  !=  NULL)  &&  expr_reassigns((s-> for_step ), name))) {
+        return true;
+    }
+    if (((s-> then_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> then_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> then_body ), i);
+            if (stmt_reassigns((&b), name)) {
+                return true;
+            }
+        }
+    }
+    if (((s-> else_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> else_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> else_body ), i);
+            if (stmt_reassigns((&b), name)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool   expr_reassigns (Expr*   e, const char*   name) {
+    if ((e  ==  NULL)) {
+        return false;
+    }
+    if ((((((e-> kind )  ==  EX_ASSIGN)  &&  ((e-> lhs )  !=  NULL))  &&  (((e-> lhs )-> kind )  ==  EX_IDENT))  &&  __glide_string_eq(((e-> lhs )-> str_val ), name))) {
+        return true;
+    }
+    if (((((((e-> kind )  ==  EX_POSTINC)  ||  ((e-> kind )  ==  EX_POSTDEC))  &&  ((e-> lhs )  !=  NULL))  &&  (((e-> lhs )-> kind )  ==  EX_IDENT))  &&  __glide_string_eq(((e-> lhs )-> str_val ), name))) {
+        return true;
+    }
+    if ((((e-> lhs )  !=  NULL)  &&  expr_reassigns((e-> lhs ), name))) {
+        return true;
+    }
+    if ((((e-> rhs )  !=  NULL)  &&  expr_reassigns((e-> rhs ), name))) {
+        return true;
+    }
+    if ((((e-> operand )  !=  NULL)  &&  expr_reassigns((e-> operand ), name))) {
+        return true;
+    }
+    if (((e-> args )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
+            Expr   a = Vector_get__Expr((e-> args ), i);
+            if (expr_reassigns((&a), name)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void   analysis_missing_return (Typer*   t, Vector__Stmt*   program) {
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if (((s. kind )  !=  ST_FN)) {
+            continue;
+        }
+        if (((s. fn_body )  ==  NULL)) {
+            continue;
+        }
+        if (((s. fn_ret_ty )  ==  NULL)) {
+            continue;
+        }
+        if ((!body_always_returns((s. fn_body )))) {
+            Typer_warn(t, (s. line ), (s. column ), "missing-return", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("function `", (s. name )), "` declared `-> "), type_to_string((s. fn_ret_ty ))), "` may exit without returning a value"));
+        }
+    }
+}
+
+bool   body_always_returns (Vector__Stmt*   body) {
+    int   n = Vector_len__Stmt(body);
+    if ((n  ==  0)) {
+        return false;
+    }
+    Stmt   last = Vector_get__Stmt(body, (n  -  1));
+    return stmt_terminates((&last));
+}
+
+bool   stmt_terminates (Stmt*   s) {
+    if ((s  ==  NULL)) {
+        return false;
+    }
+    if (((s-> kind )  ==  ST_RETURN)) {
+        return true;
+    }
+    if ((((s-> kind )  ==  ST_BREAK)  ||  ((s-> kind )  ==  ST_CONTINUE))) {
+        return true;
+    }
+    if (((s-> kind )  ==  ST_BLOCK)) {
+        if (((s-> then_body )  !=  NULL)) {
+            return body_always_returns((s-> then_body ));
+        }
+        return false;
+    }
+    if (((s-> kind )  ==  ST_IF)) {
+        if ((((s-> then_body )  !=  NULL)  &&  ((s-> else_body )  !=  NULL))) {
+            return (body_always_returns((s-> then_body ))  &&  body_always_returns((s-> else_body )));
+        }
+        return false;
+    }
+    if (((s-> kind )  ==  ST_MATCH)) {
+        if (((s-> arms )  ==  NULL)) {
+            return false;
+        }
+        bool   all = true;
+        bool   has_default = false;
+        for (int   i = 0; (i  <  Vector_len__MatchArm((s-> arms ))); i++) {
+            MatchArm   a = Vector_get__MatchArm((s-> arms ), i);
+            if (__glide_string_eq((a. variant ), "_")) {
+                (has_default  =  true);
+            }
+            if ((((a. body )  ==  NULL)  ||  (!body_always_returns((a. body ))))) {
+                (all  =  false);
+                break;
+            }
+        }
+        return (all  &&  has_default);
+    }
+    return false;
+}
+
+void   analysis_unused_params (Typer*   t, Vector__Stmt*   program) {
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if (((s. kind )  ==  ST_FN)) {
+            check_unused_params_fn(t, (&s));
+        }
+        if ((((s. kind )  ==  ST_IMPL)  &&  ((s. impl_methods )  !=  NULL))) {
+            for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
+                Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
+                check_unused_params_fn(t, (&m));
+            }
+        }
+    }
+}
+
+void   check_unused_params_fn (Typer*   t, Stmt*   fnstmt) {
+    if ((fnstmt  ==  NULL)) {
+        return;
+    }
+    if (((fnstmt-> fn_body )  ==  NULL)) {
+        return;
+    }
+    if (((fnstmt-> fn_params )  ==  NULL)) {
+        return;
+    }
+    for (int   i = 0; (i  <  Vector_len__Param((fnstmt-> fn_params ))); i++) {
+        Param   p = Vector_get__Param((fnstmt-> fn_params ), i);
+        if (__glide_string_eq((p. name ), "self")) {
+            continue;
+        }
+        if (((__glide_string_len((p. name ))  >  0)  &&  (__glide_char_to_int(__glide_string_at((p. name ), 0))  ==  95))) {
+            continue;
+        }
+        bool   used = false;
+        for (int   j = 0; (j  <  Vector_len__Stmt((fnstmt-> fn_body ))); j++) {
+            Stmt   b = Vector_get__Stmt((fnstmt-> fn_body ), j);
+            if (stmt_uses_name((&b), (p. name ))) {
+                (used  =  true);
+                break;
+            }
+        }
+        if ((!used)) {
+            Typer_warn(t, (fnstmt-> line ), (fnstmt-> column ), "unused-param", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("parameter `", (p. name )), "` of `"), (fnstmt-> name )), "` is never used (prefix with `_` to silence)"));
+        }
+    }
+}
+
 int   type_size_bytes (Type*   t, HashMap__Stmt*   structs) {
     if ((t  ==  NULL)) {
         return 0;
@@ -7905,6 +8586,18 @@ int   lsp_main (void) {
         }
         if (__glide_string_eq(method, "textDocument/didClose")) {
             handle_did_close(req, state);
+            continue;
+        }
+        if (__glide_string_eq(method, "textDocument/hover")) {
+            handle_hover(req, state);
+            continue;
+        }
+        if (__glide_string_eq(method, "textDocument/documentSymbol")) {
+            handle_document_symbol(req, state);
+            continue;
+        }
+        if (__glide_string_eq(method, "textDocument/definition")) {
+            handle_definition(req, state);
             continue;
         }
         JsonValue*   id = json_get(req, "id");
@@ -8294,6 +8987,7 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
     if ((mode  ==  MODE_CHECK)) {
         Typer*   t = Typer_new();
         check_program(t, stmts);
+        run_extra_analyses(t, stmts);
         for (int   i = 0; (i  <  Vector_len__DiagEntry((t-> diagnostics ))); i++) {
             DiagEntry   d = Vector_get__DiagEntry((t-> diagnostics ), i);
             const char*   tag = "error";
@@ -8385,21 +9079,6 @@ int   HashMap_hash_key__FnSig (HashMap__FnSig*   self, const char*   k) {
     return h;
 }
 
-int   HashMap_slot__LspDoc (HashMap__LspDoc*   self, const char*   k) {
-    if (((self-> cap )  ==  0)) {
-        return (-1);
-    }
-    int   mask = ((self-> cap )  -  1);
-    int   i = (HashMap_hash_key__LspDoc(self, k)  &  mask);
-    while ((self-> occupied )[i]) {
-        if (__glide_string_eq((self-> keys )[i], k)) {
-            return i;
-        }
-        (i  =  ((i  +  1)  &  mask));
-    }
-    return i;
-}
-
 void   HashMap_resize__LspDoc (HashMap__LspDoc*   self, int   new_cap) {
     const char**   old_keys = (self-> keys );
     LspDoc*   old_values = (self-> values );
@@ -8423,6 +9102,21 @@ void   HashMap_resize__LspDoc (HashMap__LspDoc*   self, int   new_cap) {
         free((( void* )old_values));
         free((( void* )old_occupied));
     }
+}
+
+int   HashMap_slot__LspDoc (HashMap__LspDoc*   self, const char*   k) {
+    if (((self-> cap )  ==  0)) {
+        return (-1);
+    }
+    int   mask = ((self-> cap )  -  1);
+    int   i = (HashMap_hash_key__LspDoc(self, k)  &  mask);
+    while ((self-> occupied )[i]) {
+        if (__glide_string_eq((self-> keys )[i], k)) {
+            return i;
+        }
+        (i  =  ((i  +  1)  &  mask));
+    }
+    return i;
 }
 
 void   HashMap_resize__Stmt (HashMap__Stmt*   self, int   new_cap) {
@@ -8611,6 +9305,14 @@ bool   HashMap_remove__LspDoc (HashMap__LspDoc*   self, const char*   k) {
     return true;
 }
 
+DiagEntry   Vector_get__DiagEntry (Vector__DiagEntry*   self, int   i) {
+    return (self-> data )[i];
+}
+
+int   Vector_len__DiagEntry (Vector__DiagEntry*   self) {
+    return (self-> len );
+}
+
 void   HashMap_insert__LspDoc (HashMap__LspDoc*   self, const char*   k, LspDoc   v) {
     if (((self-> cap )  ==  0)) {
         HashMap_resize__LspDoc(self, 8);
@@ -8628,12 +9330,17 @@ void   HashMap_insert__LspDoc (HashMap__LspDoc*   self, const char*   k, LspDoc 
     ((self-> values )[i]  =  v);
 }
 
-DiagEntry   Vector_get__DiagEntry (Vector__DiagEntry*   self, int   i) {
-    return (self-> data )[i];
+LspDoc   HashMap_get__LspDoc (HashMap__LspDoc*   self, const char*   k) {
+    int   i = HashMap_slot__LspDoc(self, k);
+    return (self-> values )[i];
 }
 
-int   Vector_len__DiagEntry (Vector__DiagEntry*   self) {
-    return (self-> len );
+bool   HashMap_contains__LspDoc (HashMap__LspDoc*   self, const char*   k) {
+    int   i = HashMap_slot__LspDoc(self, k);
+    if ((i  <  0)) {
+        return false;
+    }
+    return ((self-> occupied )[i]  &&  __glide_string_eq((self-> keys )[i], k));
 }
 
 HashMap__LspDoc*   HashMap_new__LspDoc (void) {
