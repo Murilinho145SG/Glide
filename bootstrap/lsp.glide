@@ -411,6 +411,122 @@ fn builtin_macro_doc(name: string) -> string {
     return "";
 }
 
+// Hover docs for reserved keywords. Each returns markdown with a one-line
+// summary plus a small worked example. Empty string = not a keyword we
+// document (caller falls back to other lookups).
+fn keyword_doc(name: string) -> string {
+    // Bindings.
+    if name.eq("let") {
+        return "```glide\nlet name [: T] = expr;\n```\n\n---\n\nDeclares an immutable local binding. Add `mut` to allow reassignment, drop the type annotation when it can be inferred from the initializer.\n\n```glide\nlet x: int = 42;\nlet v = Vector::new();          // type inferred\nlet mut count: int = 0;\n```";
+    }
+    if name.eq("mut") {
+        return "```glide\nlet mut name = expr;\n```\n\n---\n\nMarks a `let` binding as reassignable. Without `mut`, the binding is immutable.\n\n```glide\nlet mut n: int = 0;\nn = n + 1;                       // ok\n```";
+    }
+    if name.eq("const") {
+        return "```glide\nconst NAME [: T] = expr;\n```\n\n---\n\nFile-scope constant. Lowered to a `#define` in C. The initializer must be a compile-time literal.\n\n```glide\nconst MAX: int = 1024;\nconst NAME: string = \"glide\";\n```";
+    }
+
+    // Types and items.
+    if name.eq("fn") {
+        return "```glide\nfn name(params) [-> T] { body }\n```\n\n---\n\nDeclare a function. Params are `name: type`. Omit `-> T` for void.\n\n```glide\nfn add(a: int, b: int) -> int {\n    return a + b;\n}\n```";
+    }
+    if name.eq("struct") {
+        return "```glide\nstruct Name { field: T, ... }\n```\n\n---\n\nDeclare a value-type record. Fields are `name: type`, comma-separated.\n\n```glide\nstruct Point { x: int, y: int }\nlet p: Point = Point { x: 1, y: 2 };\n```";
+    }
+    if name.eq("enum") {
+        return "```glide\nenum Name { Variant, Variant(T1, T2), ... }\n```\n\n---\n\nTagged union. Each variant can carry zero or more positional payloads.\n\n```glide\nenum Shape { Circle(float), Square(int) }\nlet s: Shape = Shape::Circle(3.14);\n```";
+    }
+    if name.eq("impl") {
+        return "```glide\nimpl T { fn method(self: *T, ...) { ... } }\n```\n\n---\n\nAttach methods (and macros) to a type. The first param `self: *T` makes the method instance-callable as `value.method(args)`.\n\n```glide\nimpl Counter {\n    fn bump(self: *Counter) { self.n = self.n + 1; }\n}\n```";
+    }
+    if name.eq("interface") {
+        return "```glide\ninterface Name { fn method(self: *Self, ...) -> T; }\n```\n\n---\n\nDeclare a set of method signatures that types can implement.";
+    }
+    if name.eq("type") {
+        return "```glide\ntype Alias = ExistingType;\n```\n\n---\n\nDefine a type alias. Resolved transparently — the alias and the original are interchangeable.\n\n```glide\ntype Bytes = []u8;\n```";
+    }
+    if name.eq("macro") {
+        return "```glide\nmacro name!(matchers) { body }\n```\n\n---\n\nDeclare a `macro_rules`-style macro. Matchers use `$x:expr` and the variadic form `$($x:expr),*`. Inside an `impl`, body referring to `self` makes it instance-style.\n\n```glide\nmacro vec_of!($($x:expr),*) {\n    let v: *Vector<int> = Vector::new();\n    $( v.push($x); )*\n}\n```";
+    }
+
+    // Control flow.
+    if name.eq("if") {
+        return "```glide\nif cond { ... } else if cond { ... } else { ... }\n```\n\n---\n\nBranch on a `bool`. Braces are required; the trailing `else` is optional.";
+    }
+    if name.eq("else") {
+        return "```glide\nif cond { ... } else { ... }\n```\n\n---\n\nFalse-branch of an `if`. Can chain via `else if`.";
+    }
+    if name.eq("while") {
+        return "```glide\nwhile cond { ... }\n```\n\n---\n\nLoop while `cond` evaluates to `true`. Use `break` / `continue` to control flow.\n\n```glide\nwhile !done { step(); }\n```";
+    }
+    if name.eq("for") {
+        return "```glide\nfor IDENT in lo..hi { ... }      // exclusive range\nfor IDENT in lo..=hi { ... }     // inclusive range\nfor IDENT in collection { ... }  // any value with .len() / .get(i)\nfor let i = 0; i < n; i++ { ... } // C-style\n```\n\n---\n\nThree shapes share the keyword: range loops, collection iteration, and C-style.\n\n```glide\nfor i in 0..10 { println!(i); }\nfor x in v { println!(x); }\n```";
+    }
+    if name.eq("in") {
+        return "```glide\nfor IDENT in EXPR { ... }\n```\n\n---\n\nBinder keyword used by the `for` shape. Has no other meaning outside `for`.";
+    }
+    if name.eq("return") {
+        return "```glide\nreturn expr;     // value\nreturn;          // void\n```\n\n---\n\nLeave the enclosing function. The expression must match the declared return type.";
+    }
+    if name.eq("break") {
+        return "```glide\nbreak;\n```\n\n---\n\nLeave the innermost loop (`for` or `while`).";
+    }
+    if name.eq("continue") {
+        return "```glide\ncontinue;\n```\n\n---\n\nSkip to the next iteration of the innermost loop.";
+    }
+    if name.eq("match") {
+        return "```glide\nmatch expr {\n    Variant1(payload) => { ... }\n    Variant2          => { ... }\n    _                 => { ... }\n}\n```\n\n---\n\nPattern-match an enum value. Each arm receives the variant's payload as bindings. `_` is the wildcard.";
+    }
+
+    // Memory & runtime.
+    if name.eq("defer") {
+        return "```glide\ndefer expr;\n```\n\n---\n\nRun `expr` at function exit (LIFO with other defers, before any `return`). Used for cleanup.\n\n```glide\nlet v: *Vector<int> = Vector::new();\ndefer v.free();\n```";
+    }
+    if name.eq("spawn") {
+        return "```glide\nspawn fn_call(args);\n```\n\n---\n\nRun the call on a new pthread. Detached — no join handle.\n\n```glide\nspawn worker(c);\n```";
+    }
+    if name.eq("chan") {
+        return "```glide\nlet c: chan<T> = make_chan(cap);\n```\n\n---\n\nTyped concurrent channel. Pair with `send(c, x)`, `recv(c)`, `close(c)`.";
+    }
+    if name.eq("move") {
+        return "```glide\nmove fn(args) -> ret { body }\n```\n\n---\n\nClosure prefix that captures referenced locals by move (one-shot, releases the source). Without `move`, an `fn` expression with captures isn't allowed.";
+    }
+    if name.eq("new") {
+        return "```glide\nlet p: *T = new T { field: value, ... };\n```\n\n---\n\nHeap-allocate a struct (raw — no auto-drop). Pair with `free` later.\n\nFor auto-dropped allocation use `let p: *T = T { ... };` (no `new`) instead.";
+    }
+    if name.eq("as") {
+        return "```glide\nexpr as T\n```\n\n---\n\nExplicit cast between numeric types or pointer types. Compiles to a C cast.\n\n```glide\nlet n: int = some_long as int;\nlet p: *void = buf as *void;\n```";
+    }
+    if name.eq("sizeof") {
+        return "```glide\nsizeof(T)\n```\n\n---\n\nByte size of a type, like C's `sizeof`. Returns `usize`.";
+    }
+
+    // Modules / FFI.
+    if name.eq("pub") {
+        return "```glide\npub fn ...     pub struct ...     pub const ...\n```\n\n---\n\nMakes a top-level item visible across files. Default visibility is file-local.";
+    }
+    if name.eq("import") {
+        return "```glide\nimport \"path/to/file.glide\";\n```\n\n---\n\nLoad another `.glide` source file into this compilation. Resolved relative to the current file. Cycle-safe.";
+    }
+    if name.eq("extern") {
+        return "```glide\nextern fn name(args) -> T;\nextern type Name;\nextern type Name = \"struct foo\";\n```\n\n---\n\nDeclare a foreign C symbol that codegen will reference but not define. Pair with `c_link` to add the library at link time.";
+    }
+    if name.eq("c_include") {
+        return "```glide\nc_include \"<header.h>\";\nc_include \"local.h\";\n```\n\n---\n\nInject a literal `#include` into the generated C. Use to expose types and prototypes for `extern` declarations.";
+    }
+    if name.eq("c_link") {
+        return "```glide\nc_link \"name\";\n```\n\n---\n\nAdd `-lname` to the linker command. Use to pull in a library that backs `extern fn` declarations.";
+    }
+
+    // Literals.
+    if name.eq("true")  { return "```glide\ntrue\n```\n\n---\n\nThe `true` boolean literal. `bool` in Glide maps to C's `_Bool`."; }
+    if name.eq("false") { return "```glide\nfalse\n```\n\n---\n\nThe `false` boolean literal."; }
+    if name.eq("null")  { return "```glide\nnull\n```\n\n---\n\nNull pointer. Compatible with any `*T` / `&T` / `&mut T`."; }
+    if name.eq("self")  { return "```glide\nself: *T\n```\n\n---\n\nReceiver parameter inside an `impl` method. Convention: declare as `self: *T`, callers use `value.method(args)`."; }
+
+    return "";
+}
+
 // Scan every `impl Type { ... }` block for a method whose name matches; return
 // the first hit. Used by hover when the user points at an impl-method name and
 // we don't have a receiver type to disambiguate.
@@ -847,6 +963,12 @@ fn handle_hover(req: *JsonValue, state: *LspState) {
     if content.eq("") {
         let bd: string = builtin_macro_doc(word);
         if !bd.eq("") { content = bd; }
+    }
+
+    // Reserved-word docs (`fn`, `let`, `for`, etc).
+    if content.eq("") {
+        let kd: string = keyword_doc(word);
+        if !kd.eq("") { content = kd; }
     }
 
     if content.eq("") {
