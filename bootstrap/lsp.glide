@@ -211,8 +211,10 @@ fn run_analysis_and_publish(uri: string, text: string, state: *LspState) {
     let stmts: *Vector<Stmt> = Vector::new();
     let loaded: *HashMap<bool> = HashMap::new();
 
-    // Auto-prepend stdlib so Vector<T> and HashMap<V> methods resolve.
+    // Auto-prepend stdlib so Vector<T> and HashMap<V> methods resolve, plus
+    // builtin macro / printf stubs so hover and goto find them.
     let prefix: string = find_stdlib_root();
+    load_into(stmts, prefix.concat("stdlib/builtins.glide"), loaded);
     load_into(stmts, prefix.concat("stdlib/vector.glide"), loaded);
     load_into(stmts, prefix.concat("stdlib/hashmap.glide"), loaded);
 

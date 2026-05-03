@@ -331,13 +331,16 @@ fn parse_program_into(stmts: *Vector<Stmt>, path: string) -> bool {
     // Stdlib auto-prepend. Try cwd first, then the dir next to the glide exe.
     let v_path: string = "stdlib/vector.glide";
     let h_path: string = "stdlib/hashmap.glide";
+    let b_path: string = "stdlib/builtins.glide";
     if read_file(v_path).eq("") {
         let exe_dir: string = __glide_exe_dir();
         if !exe_dir.eq("") {
             v_path = exe_dir.concat("/stdlib/vector.glide");
             h_path = exe_dir.concat("/stdlib/hashmap.glide");
+            b_path = exe_dir.concat("/stdlib/builtins.glide");
         }
     }
+    load_into(stmts, b_path, loaded);
     load_into(stmts, v_path, loaded);
     load_into(stmts, h_path, loaded);
     load_into_str(stmts, src, path, loaded);

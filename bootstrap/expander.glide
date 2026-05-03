@@ -171,6 +171,7 @@ fn try_expand_call(call: *Expr, sm: *HashMap<Stmt>, tm: *Vector<TypeMacro>) -> *
         for let i: int = 0; i < tm.len(); i++ {
             let entry: TypeMacro = tm.get(i);
             if entry.owner.eq(call.macro_owner) && entry.name.eq(call.str_val) {
+                if entry.def.then_body == null { return null; }
                 let uses_self: bool = body_references_self(entry.def.then_body);
                 if !uses_self {
                     return expand_with_def_recv(call, &entry.def, null);
@@ -200,6 +201,7 @@ fn try_expand_call(call: *Expr, sm: *HashMap<Stmt>, tm: *Vector<TypeMacro>) -> *
         for let i: int = 0; i < tm.len(); i++ {
             let entry: TypeMacro = tm.get(i);
             if entry.name.eq(call.str_val) {
+                if entry.def.then_body == null { return null; }
                 let uses_self: bool = body_references_self(entry.def.then_body);
                 let mut recv_for: *Expr = null;
                 if uses_self { recv_for = call.macro_recv; }
@@ -210,6 +212,9 @@ fn try_expand_call(call: *Expr, sm: *HashMap<Stmt>, tm: *Vector<TypeMacro>) -> *
     }
     if !sm.contains(call.str_val) { return null; }
     let def: Stmt = sm.get(call.str_val);
+    // Body-less stub (`macro name!(matchers);`) — declared for docs / LSP
+    // only. Skip expansion so codegen's native handling can fire.
+    if def.then_body == null { return null; }
     return expand_with_def_recv(call, &def, null);
 }
 

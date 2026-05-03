@@ -132,6 +132,11 @@ pub struct Expr {
     // form. Plain str_val still holds the macro name regardless.
     macro_recv: *Expr,
     macro_owner: string,
+
+    // EX_FLOAT: source lexeme (e.g. "3.14"). Stored as a string so we don't
+    // need a Glide-side double payload — the lexeme is already a valid C
+    // float literal.
+    float_val: string,
 }
 
 // ---- Stmt kinds ----------------------------------------------------------
@@ -242,6 +247,11 @@ pub struct Stmt {
     // and macro_rep_sep holds the separator literal.
     macro_params: *Vector<MacroParam>,
     macro_rep_sep: string,
+
+    // Fn (ST_FN) flag: trailing `...` after the regular params (C-style
+    // variadic). Typer skips the arg-count / arg-type check past `len(params)`
+    // so callers can pass any extra args (used for `extern fn printf(...)`).
+    is_variadic: bool,
 }
 
 // ---- Constructors --------------------------------------------------------
@@ -275,6 +285,15 @@ pub fn expr_int(n: int, line: int, col: int) -> *Expr {
     e.line = line;
     e.column = col;
     e.int_val = n;
+    return e;
+}
+
+pub fn expr_float(lexeme: string, line: int, col: int) -> *Expr {
+    let e: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+    e.kind = EX_FLOAT;
+    e.line = line;
+    e.column = col;
+    e.float_val = lexeme;
     return e;
 }
 

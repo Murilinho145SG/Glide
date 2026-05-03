@@ -1668,7 +1668,7 @@ fn ind(n: int) {
 pub fn emit_expr(g: *CG, e: *Expr) {
     if e == null { print!("/* null */"); return; }
     if e.kind == EX_INT { print!(e.int_val); return; }
-    if e.kind == EX_FLOAT { print!(e.int_val); return; }   // float not modelled in payload yet
+    if e.kind == EX_FLOAT { print!(e.float_val); return; }
     if e.kind == EX_STRING { print!("\""); print!(e.str_val); print!("\""); return; }
     if e.kind == EX_CHAR {
         // Emit as `(char)NNN` decimal — C interprets `'\xNN'` as hex digits,
@@ -2439,13 +2439,15 @@ fn emit_fn_signature(s: *Stmt) {
     }
     print!(type_to_c(s.fn_ret_ty), " ", s.name, "(");
     if s.fn_params == null || s.fn_params.len() == 0 {
-        print!("void");
+        if s.is_variadic { print!("..."); }
+        else             { print!("void"); }
     } else {
         for let i: int = 0; i < s.fn_params.len(); i++ {
             if i > 0 { print!(", "); }
             let p: Param = s.fn_params.get(i);
             print!(type_to_c(p.ty), " ", p.name);
         }
+        if s.is_variadic { print!(", ..."); }
     }
     print!(")");
 }

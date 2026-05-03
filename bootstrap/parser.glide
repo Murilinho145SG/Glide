@@ -145,6 +145,8 @@ pub fn parse_top_stmt(p: *Parser) -> *Stmt {
 }
 
 // `macro name!($x:expr, $($y:expr),*) { body }`
+// or, for builtins / docs-only stubs: `macro name!(matchers);` (no body — the
+// expander leaves the call alone so codegen's native handling can run).
 fn parse_macro_def(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
@@ -157,7 +159,12 @@ fn parse_macro_def(p: *Parser) -> *Stmt {
     p.expect_op("(");
     let params: *Vector<MacroParam> = parse_macro_matchers(p);
     p.expect_op(")");
-    let body: *Vector<Stmt> = parse_block(p);
+    let mut body: *Vector<Stmt> = null;
+    if p.eat_op(";") {
+        // Body-less stub.
+    } else {
+        body = parse_block(p);
+    }
     let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_MACRO_DEF;
     s.line = line;
@@ -225,7 +232,15 @@ fn parse_fn(p: *Parser) -> *Stmt {
 
     p.expect_op("(");
     let params: *Vector<Param> = Vector::new();
+    let mut variadic: bool = false;
     while !p.at_op(")") && !p.at_eof() {
+        if p.at_op("...") {
+            // C-style variadic — must be the last position. Consumed without
+            // adding a regular param.
+            p.advance();
+            variadic = true;
+            break;
+        }
         let pname: string = p.expect_ident();
         p.expect_op(":");
         let pty: *Type = parse_type(p);
@@ -241,13 +256,19 @@ fn parse_fn(p: *Parser) -> *Stmt {
     // Bodyless form: `fn name(args) -> ret;` (used after `extern`).
     if p.eat_op(";") {
         let s: *Stmt = stmt_fn(name, params, ret_ty, null, line, col);
-        if s != null { s.type_params = tps; s.name_line = nline; s.name_col = ncol; s.name_len = nlen; }
+        if s != null {
+            s.type_params = tps; s.name_line = nline; s.name_col = ncol; s.name_len = nlen;
+            s.is_variadic = variadic;
+        }
         return s;
     }
 
     let body: *Vector<Stmt> = parse_block(p);
     let s: *Stmt = stmt_fn(name, params, ret_ty, body, line, col);
-    if s != null { s.type_params = tps; s.name_line = nline; s.name_col = ncol; s.name_len = nlen; }
+    if s != null {
+        s.type_params = tps; s.name_line = nline; s.name_col = ncol; s.name_len = nlen;
+        s.is_variadic = variadic;
+    }
     return s;
 }
 
@@ -930,6 +951,10 @@ fn parse_prefix(p: *Parser) -> *Expr {
     if tok.kind == TOK_INT {
         p.advance();
         return expr_int(parse_int_lexeme(tok.lexeme), line, col);
+    }
+    if tok.kind == TOK_FLOAT {
+        p.advance();
+        return expr_float(tok.lexeme, line, col);
     }
     if tok.kind == TOK_STRING {
         p.advance();

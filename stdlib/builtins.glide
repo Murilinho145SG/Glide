@@ -1,0 +1,73 @@
+// Stub declarations for compiler builtins. Loaded by `glide build` and the
+// LSP so that hover / goto / completion find these symbols, but the bodies
+// are intentionally empty - the codegen lowers each call site directly to
+// the equivalent C without going through the macro expander.
+
+/// Print every argument separated by a single space, terminated with `\n`.
+/// The format spec is inferred per arg from its type, so most values just
+/// work without manual formatting.
+///
+/// # Examples
+///
+/// ```glide
+/// println!("hello");                       // hello
+/// println!("x =", 42);                     // x = 42
+/// println!("v has", v.len(), "items");     // v has 3 items
+/// ```
+///
+/// For a single-line variant without the trailing newline use `print!`.
+/// To build a string instead of printing it use `format!`.
+macro println!($($arg:expr),*);
+
+/// Like `println!` but without the trailing newline. Useful for prompts and
+/// for composing one logical line out of several `print!` calls.
+///
+/// # Examples
+///
+/// ```glide
+/// print!("loading");
+/// for _ in 0..3 {
+///     print!(".");
+/// }
+/// println!(" done");                       // loading... done
+/// ```
+macro print!($($arg:expr),*);
+
+/// Build a `string` by interpolating `{}` placeholders in the literal first
+/// argument with the remaining arguments. Returns the formatted string
+/// (heap-allocated; the user owns it).
+///
+/// Each `{}` consumes one extra arg; the format spec is inferred from the
+/// arg's type just like `println!`.
+///
+/// # Examples
+///
+/// ```glide
+/// let s: string = format!("hello, {}!", "world");
+/// let n: int = 7;
+/// let label: string = format!("count: {}, double: {}", n, n * 2);
+/// ```
+///
+/// Glide doesn't currently expose a `free` helper for the returned string,
+/// so treat lifetimes the same way you would any heap pointer for now.
+macro format!($($arg:expr),*);
+
+/// Raw libc `printf`. Variadic in C terms - takes a `const char *` format
+/// followed by any number of values that match the format specifiers.
+///
+/// Most code should reach for `print!` / `println!` instead, since those
+/// pick the format spec for you and respect Glide types. `printf` is the
+/// escape hatch for when you genuinely want C's format string behaviour
+/// (precision modifiers, width, hex, scientific, etc.):
+///
+/// # Examples
+///
+/// ```glide
+/// printf("hex: %08x\n", 255);              // hex: 000000ff
+/// printf("pi ~= %.4f\n", 3.14159);         // pi ~= 3.1416
+/// printf("%-10s | %5d\n", "items", 42);    // items      |    42
+/// ```
+///
+/// **Caveat:** mismatched specifiers vs argument types are undefined
+/// behaviour at the C level. Glide doesn't validate the format string.
+extern fn printf(fmt: string, ...) -> int;
