@@ -1832,6 +1832,13 @@ static const char* __glide_getenv(const char* name) {
     return v ? v : "";
 }
 
+static bool __glide_file_exists(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
 static int __glide_is_windows(void) {
 #ifdef _WIN32
     return 1;

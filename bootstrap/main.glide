@@ -150,6 +150,7 @@ extern fn __glide_exe_path() -> string;
 extern fn __glide_exe_dir() -> string;
 extern fn __glide_getenv(name: string) -> string;
 extern fn __glide_is_windows() -> int;
+extern fn __glide_file_exists(path: string) -> bool;
 
 const MODE_EMIT: int = 0;
 const MODE_BUILD: int = 1;
@@ -188,15 +189,16 @@ fn parse_program_into(stmts: *Vector<Stmt>, path: string) -> bool {
     return true;
 }
 
-// Pick a C compiler. Prefers the bundled Zig CC inside the install dir;
-// falls back to whatever `cc` is on PATH.
+// Pick a C compiler. Prefers the bundled Zig CC under runtime/zig/ next to
+// the glide executable; falls back to $CC, then to plain `cc` on PATH.
 fn pick_cc() -> string {
     let exe_dir: string = __glide_exe_dir();
     if !exe_dir.eq("") {
-        let candidate: string = exe_dir.concat("/runtime/zig/zig");
-        // Best-effort existence check via read_file (returns "" on missing).
-        let probe: string = read_file(candidate);
-        if !probe.eq("") { return candidate.concat(" cc"); }
+        let mut zig: string = exe_dir.concat("/runtime/zig/zig");
+        if __glide_is_windows() != 0 { zig = zig.concat(".exe"); }
+        if __glide_file_exists(zig) {
+            return "\"".concat(zig).concat("\" cc");
+        }
     }
     let env: string = __glide_getenv("CC");
     if !env.eq("") { return env; }
@@ -223,9 +225,17 @@ fn run_build(src_path: string, out_path: string, target: string, then_run: bool)
     let mut cmd: string = cc;
     cmd = cmd.concat(" \"").concat(tmp_c).concat("\"");
     cmd = cmd.concat(" -o \"").concat(out_path).concat("\"");
-    cmd = cmd.concat(" -O2 -lpthread -lm");
+    cmd = cmd.concat(" -O2 -w -lpthread -lm");
     if !target.eq("") {
         cmd = cmd.concat(" --target=").concat(target);
+    }
+
+    // On Windows, system() runs the command via `cmd.exe /c <cmd>`. When the
+    // command itself starts with a quoted path containing backslashes / spaces,
+    // cmd.exe's parser strips outer quotes inconsistently. Wrap the whole
+    // thing in an extra layer so /c sees it as one argument.
+    if __glide_is_windows() != 0 {
+        cmd = "\"".concat(cmd).concat("\"");
     }
 
     let rc: int = __glide_shell(cmd);
@@ -238,7 +248,10 @@ fn run_build(src_path: string, out_path: string, target: string, then_run: bool)
     if then_run {
         let mut prefix: string = "./";
         if __glide_is_windows() != 0 { prefix = ".\\"; }
-        let run_cmd: string = "\"".concat(prefix).concat(out_path).concat("\"");
+        let mut run_cmd: string = "\"".concat(prefix).concat(out_path).concat("\"");
+        if __glide_is_windows() != 0 {
+            run_cmd = "\"".concat(run_cmd).concat("\"");
+        }
         return __glide_shell(run_cmd);
     }
     return 0;

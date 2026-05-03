@@ -567,6 +567,9 @@ fn emit_stdlib_runtime() {
     println!("}");
     println!("static int __glide_shell(const char* cmd) { return system(cmd); }");
     println!("static const char* __glide_getenv(const char* name) { const char* v = getenv(name); return v ? v : \"\"; }");
+    println!("static bool __glide_file_exists(const char* path) {");
+    println!("    FILE* f = fopen(path, \"rb\"); if (!f) return false; fclose(f); return true;");
+    println!("}");
     println!("static int __glide_is_windows(void) {");
     println!("#ifdef _WIN32");
     println!("    return 1;");
@@ -1932,9 +1935,12 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
                 s.expr_value.lhs.str_val = "__glide_err_".concat(m);
             }
         }
-        // If there's a value, capture it in a temp first so deferred exprs
-        // can run before the return without affecting the value.
-        if s.expr_value != null && g.defer_stack.len() > 0 {
+        // If there's a value AND there are pending cleanups (auto-drop or
+        // explicit defer), capture the value in a temp BEFORE running cleanups
+        // so e.g. `return v.get(0)` doesn't read freed memory after auto-drop
+        // of v fires.
+        let has_cleanup: bool = g.defer_stack.len() > 0 || g.auto_drop_stack.len() > 0;
+        if s.expr_value != null && has_cleanup {
             ind(depth);
             print!("__typeof__(");
             emit_expr(g, s.expr_value);
@@ -2908,6 +2914,12 @@ fn emit_struct_mono(g: *CG, t: *Type) {
     if !g.generic_structs.contains(t.name) { return; }
     let template: Stmt = g.generic_structs.get(t.name);
     let mangled: string = mangle_generic(t.name, t.args);
+    // Dedup: the same mono can appear many times in the collected uses; the
+    // earlier typedef pass already inserted into emitted_monos, but here we
+    // need our own marker for "body emitted".
+    let body_key: string = mangled.concat("__body");
+    if g.emitted_monos.contains(body_key) { return; }
+    g.emitted_monos.insert(body_key, true);
     println!("struct ", mangled, " {");
     if template.struct_fields != null && template.type_params != null {
         for let i: int = 0; i < template.struct_fields.len(); i++ {
