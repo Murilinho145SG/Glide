@@ -1,0 +1,483 @@
+// Glide source formatter: AST -> canonical text.
+//
+// Style:
+//   * 4-space indent, K&R braces, LF line endings
+//   * spaces around binary operators, after `,` and `:`
+//   * one statement per line, blank line between top-level decls
+//   * struct fields & enum variants one per line with trailing comma
+//
+// Limitation (v1): comments are dropped because the lexer doesn't surface
+// them. `glide fmt --write` is opt-in for that reason. Comment preservation
+// is the next iteration.
+
+import "ast.glide";
+
+const FMT_INDENT: string = "    ";
+
+fn fmt_indent(depth: int) -> string {
+    let mut s: string = "";
+    for let i: int = 0; i < depth; i++ { s = s.concat(FMT_INDENT); }
+    return s;
+}
+
+// ---- Types ------------------------------------------------------------
+
+pub fn fmt_type(t: *Type) -> string {
+    if t == null { return ""; }
+    if t.kind == TY_NAMED { return t.name; }
+    if t.kind == TY_POINTER { return "*".concat(fmt_type(t.inner)); }
+    if t.kind == TY_BORROW { return "&".concat(fmt_type(t.inner)); }
+    if t.kind == TY_BORROW_MUT { return "&mut ".concat(fmt_type(t.inner)); }
+    if t.kind == TY_SLICE { return "[]".concat(fmt_type(t.inner)); }
+    if t.kind == TY_RESULT { return "!".concat(fmt_type(t.inner)); }
+    if t.kind == TY_GENERIC {
+        let mut out: string = t.name.concat("<");
+        if t.args != null {
+            for let i: int = 0; i < t.args.len(); i++ {
+                if i > 0 { out = out.concat(", "); }
+                let a: Type = t.args.get(i);
+                out = out.concat(fmt_type(&a));
+            }
+        }
+        return out.concat(">");
+    }
+    if t.kind == TY_FNPTR {
+        let mut out: string = "fn(";
+        if t.args != null {
+            for let i: int = 0; i < t.args.len(); i++ {
+                if i > 0 { out = out.concat(", "); }
+                let a: Type = t.args.get(i);
+                out = out.concat(fmt_type(&a));
+            }
+        }
+        out = out.concat(")");
+        if t.fnptr_ret != null { out = out.concat(" -> ").concat(fmt_type(t.fnptr_ret)); }
+        return out;
+    }
+    return "?";
+}
+
+// Render a char literal back to Glide source. Common escapes get their
+// canonical form; printable ASCII is emitted literally where possible;
+// anything else uses `'\\xNN'` two-digit lowercase hex.
+fn fmt_char_lit(n: int) -> string {
+    if n == 39 { return "'\\''"; }
+    if n == 92 { return "'\\\\'"; }
+    if n == 10 { return "'\\n'"; }
+    if n == 9  { return "'\\t'"; }
+    if n == 13 { return "'\\r'"; }
+    if n == 0  { return "'\\0'"; }
+    let hex: string = "0123456789abcdef";
+    let mut high: int = (n / 16) % 16; if high < 0 { high = 0; }
+    let mut low: int = n % 16; if low < 0 { low = 0; }
+    return "'\\x".concat(hex.substring(high, high + 1))
+                 .concat(hex.substring(low, low + 1)).concat("'");
+}
+
+// ---- Operators --------------------------------------------------------
+
+fn fmt_binop(op: int) -> string {
+    if op == OP_ADD { return "+"; } if op == OP_SUB { return "-"; }
+    if op == OP_MUL { return "*"; } if op == OP_DIV { return "/"; }
+    if op == OP_MOD { return "%"; }
+    if op == OP_EQ { return "=="; } if op == OP_NE { return "!="; }
+    if op == OP_LT { return "<"; } if op == OP_LE { return "<="; }
+    if op == OP_GT { return ">"; } if op == OP_GE { return ">="; }
+    if op == OP_AND { return "&&"; } if op == OP_OR { return "||"; }
+    if op == OP_BIT_AND { return "&"; } if op == OP_BIT_OR { return "|"; }
+    if op == OP_BIT_XOR { return "^"; }
+    if op == OP_SHL { return "<<"; } if op == OP_SHR { return ">>"; }
+    if op == OP_ASSIGN { return "="; }
+    if op == OP_PLUS_ASSIGN { return "+="; } if op == OP_MINUS_ASSIGN { return "-="; }
+    if op == OP_STAR_ASSIGN { return "*="; } if op == OP_SLASH_ASSIGN { return "/="; }
+    return "?";
+}
+
+fn fmt_unop(op: int) -> string {
+    if op == UN_NEG { return "-"; }
+    if op == UN_NOT { return "!"; }
+    if op == UN_DEREF { return "*"; }
+    if op == UN_ADDR { return "&"; }
+    if op == UN_ADDR_MUT { return "&mut "; }
+    if op == UN_BIT_NOT { return "~"; }
+    return "";
+}
+
+// ---- Expressions ------------------------------------------------------
+
+pub fn fmt_expr(e: *Expr) -> string {
+    if e == null { return ""; }
+    if e.kind == EX_INT { return int_to_str(e.int_val); }
+    if e.kind == EX_FLOAT { return int_to_str(e.int_val); }
+    if e.kind == EX_STRING { return "\"".concat(e.str_val).concat("\""); }
+    if e.kind == EX_BOOL { if e.bool_val { return "true"; } return "false"; }
+    if e.kind == EX_NULL { return "null"; }
+    if e.kind == EX_IDENT { return e.str_val; }
+    if e.kind == EX_CHAR {
+        return fmt_char_lit(e.int_val);
+    }
+    if e.kind == EX_BINARY {
+        return "(".concat(fmt_expr(e.lhs)).concat(" ").concat(fmt_binop(e.op_code))
+            .concat(" ").concat(fmt_expr(e.rhs)).concat(")");
+    }
+    if e.kind == EX_UNARY {
+        if e.op_code == UN_TRY { return fmt_expr(e.operand).concat("?"); }
+        return "(".concat(fmt_unop(e.op_code)).concat(fmt_expr(e.operand)).concat(")");
+    }
+    if e.kind == EX_ASSIGN {
+        return fmt_expr(e.lhs).concat(" ").concat(fmt_binop(e.op_code))
+            .concat(" ").concat(fmt_expr(e.rhs));
+    }
+    if e.kind == EX_CALL {
+        let mut out: string = fmt_expr(e.lhs).concat("(");
+        if e.args != null {
+            for let i: int = 0; i < e.args.len(); i++ {
+                if i > 0 { out = out.concat(", "); }
+                let a: Expr = e.args.get(i);
+                out = out.concat(fmt_expr(&a));
+            }
+        }
+        return out.concat(")");
+    }
+    if e.kind == EX_MEMBER {
+        return fmt_expr(e.lhs).concat(".").concat(e.field);
+    }
+    if e.kind == EX_INDEX {
+        return fmt_expr(e.lhs).concat("[").concat(fmt_expr(e.rhs)).concat("]");
+    }
+    if e.kind == EX_CAST {
+        return fmt_expr(e.lhs).concat(" as ").concat(fmt_type(e.cast_to));
+    }
+    if e.kind == EX_PATH {
+        return e.str_val.concat("::").concat(e.field);
+    }
+    if e.kind == EX_POSTINC { return fmt_expr(e.lhs).concat("++"); }
+    if e.kind == EX_POSTDEC { return fmt_expr(e.lhs).concat("--"); }
+    if e.kind == EX_MACRO {
+        let mut out: string = e.str_val.concat("!(");
+        if e.args != null {
+            for let i: int = 0; i < e.args.len(); i++ {
+                if i > 0 { out = out.concat(", "); }
+                let a: Expr = e.args.get(i);
+                out = out.concat(fmt_expr(&a));
+            }
+        }
+        return out.concat(")");
+    }
+    if e.kind == EX_SIZEOF { return "sizeof(".concat(fmt_type(e.cast_to)).concat(")"); }
+    if e.kind == EX_NEW {
+        return fmt_struct_lit(e, "new ");
+    }
+    if e.kind == EX_STRUCT_LIT {
+        return fmt_struct_lit(e, "");
+    }
+    if e.kind == EX_FNEXPR {
+        let mut out: string = "fn(";
+        if e.fn_expr_params != null {
+            for let i: int = 0; i < e.fn_expr_params.len(); i++ {
+                if i > 0 { out = out.concat(", "); }
+                let p: Param = e.fn_expr_params.get(i);
+                out = out.concat(p.name).concat(": ").concat(fmt_type(p.ty));
+            }
+        }
+        out = out.concat(")");
+        if e.cast_to != null { out = out.concat(" -> ").concat(fmt_type(e.cast_to)); }
+        out = out.concat(" { ");
+        if e.fn_expr_body != null {
+            for let i: int = 0; i < e.fn_expr_body.len(); i++ {
+                if i > 0 { out = out.concat(" "); }
+                let b: Stmt = e.fn_expr_body.get(i);
+                out = out.concat(fmt_stmt_inline(&b));
+            }
+        }
+        return out.concat(" }");
+    }
+    return "/* fmt: unknown expr */";
+}
+
+fn fmt_struct_lit(e: *Expr, prefix: string) -> string {
+    let mut out: string = prefix.concat(e.str_val).concat(" {");
+    if e.field_names != null && e.args != null && e.args.len() > 0 {
+        out = out.concat(" ");
+        for let i: int = 0; i < e.args.len(); i++ {
+            if i > 0 { out = out.concat(", "); }
+            out = out.concat(e.field_names.get(i)).concat(": ");
+            let v: Expr = e.args.get(i);
+            out = out.concat(fmt_expr(&v));
+        }
+        out = out.concat(" ");
+    }
+    return out.concat("}");
+}
+
+// Inline form of a stmt for single-line bodies (e.g. closure bodies).
+fn fmt_stmt_inline(s: *Stmt) -> string {
+    if s == null { return ""; }
+    if s.kind == ST_RETURN {
+        if s.expr_value != null { return "return ".concat(fmt_expr(s.expr_value)).concat(";"); }
+        return "return;";
+    }
+    if s.kind == ST_EXPR { return fmt_expr(s.expr_value).concat(";"); }
+    if s.kind == ST_LET || s.kind == ST_CONST {
+        return fmt_let_const_inline(s);
+    }
+    return fmt_stmt(s, 0);
+}
+
+fn fmt_let_const_inline(s: *Stmt) -> string {
+    let mut out: string = "";
+    if s.kind == ST_CONST { out = "const "; } else { out = "let "; }
+    if s.is_mut { out = out.concat("mut "); }
+    out = out.concat(s.name);
+    if s.is_auto_owned { out = out.concat("*"); }
+    if s.let_ty != null { out = out.concat(": ").concat(fmt_type(s.let_ty)); }
+    if s.let_value != null { out = out.concat(" = ").concat(fmt_expr(s.let_value)); }
+    return out.concat(";");
+}
+
+// ---- Statements -------------------------------------------------------
+
+pub fn fmt_stmt(s: *Stmt, depth: int) -> string {
+    if s == null { return ""; }
+    let pad: string = fmt_indent(depth);
+
+    if s.kind == ST_LET || s.kind == ST_CONST {
+        return pad.concat(fmt_let_const_inline(s)).concat("\n");
+    }
+    if s.kind == ST_RETURN {
+        if s.expr_value != null {
+            return pad.concat("return ").concat(fmt_expr(s.expr_value)).concat(";\n");
+        }
+        return pad.concat("return;\n");
+    }
+    if s.kind == ST_EXPR {
+        return pad.concat(fmt_expr(s.expr_value)).concat(";\n");
+    }
+    if s.kind == ST_BREAK { return pad.concat("break;\n"); }
+    if s.kind == ST_CONTINUE { return pad.concat("continue;\n"); }
+    if s.kind == ST_DEFER {
+        return pad.concat("defer ").concat(fmt_expr(s.expr_value)).concat(";\n");
+    }
+    if s.kind == ST_SPAWN {
+        return pad.concat("spawn ").concat(fmt_expr(s.expr_value)).concat(";\n");
+    }
+    if s.kind == ST_IMPORT {
+        return pad.concat("import ").concat(s.import_path).concat(";\n");
+    }
+    if s.kind == ST_IF {
+        let mut out: string = pad.concat("if ").concat(fmt_expr(s.cond)).concat(" {\n");
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                out = out.concat(fmt_stmt(&b, depth + 1));
+            }
+        }
+        if s.else_body != null {
+            out = out.concat(pad).concat("} else {\n");
+            for let i: int = 0; i < s.else_body.len(); i++ {
+                let b: Stmt = s.else_body.get(i);
+                out = out.concat(fmt_stmt(&b, depth + 1));
+            }
+        }
+        return out.concat(pad).concat("}\n");
+    }
+    if s.kind == ST_WHILE {
+        let mut out: string = pad.concat("while ").concat(fmt_expr(s.cond)).concat(" {\n");
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                out = out.concat(fmt_stmt(&b, depth + 1));
+            }
+        }
+        return out.concat(pad).concat("}\n");
+    }
+    if s.kind == ST_FOR {
+        let mut out: string = pad.concat("for ");
+        if s.for_init != null {
+            out = out.concat(fmt_for_init(s.for_init));
+        }
+        out = out.concat("; ");
+        if s.cond != null { out = out.concat(fmt_expr(s.cond)); }
+        out = out.concat("; ");
+        if s.for_step != null { out = out.concat(fmt_expr(s.for_step)); }
+        out = out.concat(" {\n");
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                out = out.concat(fmt_stmt(&b, depth + 1));
+            }
+        }
+        return out.concat(pad).concat("}\n");
+    }
+    if s.kind == ST_BLOCK {
+        let mut out: string = pad.concat("{\n");
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                out = out.concat(fmt_stmt(&b, depth + 1));
+            }
+        }
+        return out.concat(pad).concat("}\n");
+    }
+    if s.kind == ST_FN { return fmt_fn(s, depth); }
+    if s.kind == ST_STRUCT { return fmt_struct(s, depth); }
+    if s.kind == ST_ENUM { return fmt_enum(s, depth); }
+    if s.kind == ST_IMPL { return fmt_impl(s, depth); }
+    if s.kind == ST_MATCH { return fmt_match(s, depth); }
+
+    return pad.concat("/* fmt: unknown stmt */\n");
+}
+
+fn fmt_for_init(s: *Stmt) -> string {
+    if s == null { return ""; }
+    if s.kind == ST_LET { return fmt_let_const_inline(s).substring(0, fmt_let_const_inline(s).len() - 1); }
+    if s.kind == ST_EXPR { return fmt_expr(s.expr_value); }
+    return "";
+}
+
+fn fmt_type_params(s: *Stmt) -> string {
+    if s.type_params == null || s.type_params.len() == 0 { return ""; }
+    let mut out: string = "<";
+    for let i: int = 0; i < s.type_params.len(); i++ {
+        if i > 0 { out = out.concat(", "); }
+        out = out.concat(s.type_params.get(i));
+    }
+    return out.concat(">");
+}
+
+fn fmt_fn(s: *Stmt, depth: int) -> string {
+    let pad: string = fmt_indent(depth);
+    let mut head: string = pad;
+    if s.is_pub { head = head.concat("pub "); }
+    head = head.concat("fn ").concat(s.name).concat(fmt_type_params(s)).concat("(");
+    if s.fn_params != null {
+        for let i: int = 0; i < s.fn_params.len(); i++ {
+            if i > 0 { head = head.concat(", "); }
+            let p: Param = s.fn_params.get(i);
+            head = head.concat(p.name).concat(": ").concat(fmt_type(p.ty));
+        }
+    }
+    head = head.concat(")");
+    if s.fn_ret_ty != null { head = head.concat(" -> ").concat(fmt_type(s.fn_ret_ty)); }
+    if s.fn_body == null { return head.concat(";\n"); }
+    let mut out: string = head.concat(" {\n");
+    for let i: int = 0; i < s.fn_body.len(); i++ {
+        let b: Stmt = s.fn_body.get(i);
+        out = out.concat(fmt_stmt(&b, depth + 1));
+    }
+    return out.concat(pad).concat("}\n");
+}
+
+fn fmt_struct(s: *Stmt, depth: int) -> string {
+    let pad: string = fmt_indent(depth);
+    let mut head: string = pad;
+    if s.is_pub { head = head.concat("pub "); }
+    head = head.concat("struct ").concat(s.name).concat(fmt_type_params(s));
+    if s.struct_fields == null || s.struct_fields.len() == 0 {
+        return head.concat(" {}\n");
+    }
+    let mut out: string = head.concat(" {\n");
+    let inner: string = fmt_indent(depth + 1);
+    for let i: int = 0; i < s.struct_fields.len(); i++ {
+        let f: Field = s.struct_fields.get(i);
+        out = out.concat(inner).concat(f.name).concat(": ").concat(fmt_type(f.ty)).concat(",\n");
+    }
+    return out.concat(pad).concat("}\n");
+}
+
+fn fmt_enum(s: *Stmt, depth: int) -> string {
+    let pad: string = fmt_indent(depth);
+    let mut head: string = pad;
+    if s.is_pub { head = head.concat("pub "); }
+    head = head.concat("enum ").concat(s.name);
+    if s.enum_variants == null || s.enum_variants.len() == 0 {
+        return head.concat(" {}\n");
+    }
+    let mut out: string = head.concat(" {\n");
+    let inner: string = fmt_indent(depth + 1);
+    for let i: int = 0; i < s.enum_variants.len(); i++ {
+        let v: EnumVariant = s.enum_variants.get(i);
+        out = out.concat(inner).concat(v.name);
+        if v.fields != null && v.fields.len() > 0 {
+            out = out.concat("(");
+            for let j: int = 0; j < v.fields.len(); j++ {
+                if j > 0 { out = out.concat(", "); }
+                let ty: Type = v.fields.get(j);
+                out = out.concat(fmt_type(&ty));
+            }
+            out = out.concat(")");
+        }
+        out = out.concat(",\n");
+    }
+    return out.concat(pad).concat("}\n");
+}
+
+fn fmt_impl(s: *Stmt, depth: int) -> string {
+    let pad: string = fmt_indent(depth);
+    let mut head: string = pad.concat("impl");
+    head = head.concat(fmt_type_params(s));
+    head = head.concat(" ").concat(fmt_type(s.impl_target));
+    if s.impl_methods == null || s.impl_methods.len() == 0 {
+        return head.concat(" {}\n");
+    }
+    let mut out: string = head.concat(" {\n");
+    for let i: int = 0; i < s.impl_methods.len(); i++ {
+        if i > 0 { out = out.concat("\n"); }
+        let m: Stmt = s.impl_methods.get(i);
+        out = out.concat(fmt_fn(&m, depth + 1));
+    }
+    return out.concat(pad).concat("}\n");
+}
+
+fn fmt_match(s: *Stmt, depth: int) -> string {
+    let pad: string = fmt_indent(depth);
+    let mut out: string = pad.concat("match ").concat(fmt_expr(s.scrutinee)).concat(" {\n");
+    let inner: string = fmt_indent(depth + 1);
+    if s.arms != null {
+        for let i: int = 0; i < s.arms.len(); i++ {
+            let a: MatchArm = s.arms.get(i);
+            out = out.concat(inner).concat(a.variant);
+            if a.bindings != null && a.bindings.len() > 0 {
+                out = out.concat("(");
+                for let j: int = 0; j < a.bindings.len(); j++ {
+                    if j > 0 { out = out.concat(", "); }
+                    out = out.concat(a.bindings.get(j));
+                }
+                out = out.concat(")");
+            }
+            out = out.concat(" => {\n");
+            if a.body != null {
+                for let j: int = 0; j < a.body.len(); j++ {
+                    let b: Stmt = a.body.get(j);
+                    out = out.concat(fmt_stmt(&b, depth + 2));
+                }
+            }
+            out = out.concat(inner).concat("}\n");
+        }
+    }
+    return out.concat(pad).concat("}\n");
+}
+
+// ---- Top level --------------------------------------------------------
+
+pub fn fmt_program(stmts: *Vector<Stmt>) -> string {
+    let mut out: string = "";
+    let mut prev_kind: int = -1;
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        // Blank line between top-level decls (but not before the first).
+        if i > 0 && needs_blank_line(prev_kind, s.kind) {
+            out = out.concat("\n");
+        }
+        out = out.concat(fmt_stmt(&s, 0));
+        prev_kind = s.kind;
+    }
+    return out;
+}
+
+fn needs_blank_line(prev: int, curr: int) -> bool {
+    // Group consecutive imports / consts together. Otherwise insert a blank.
+    if prev == ST_IMPORT && curr == ST_IMPORT { return false; }
+    if prev == ST_CONST && curr == ST_CONST { return false; }
+    return true;
+}

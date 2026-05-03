@@ -7,6 +7,7 @@ import "parser.glide";
 import "typer.glide";
 import "codegen.glide";
 import "json.glide";
+import "fmt.glide";
 import "lsp.glide";
 
 fn print_indent(n: int) {
@@ -153,11 +154,13 @@ extern fn __glide_exe_dir() -> string;
 extern fn __glide_getenv(name: string) -> string;
 extern fn __glide_is_windows() -> int;
 extern fn __glide_file_exists(path: string) -> bool;
+extern fn write_file(path: string, content: string) -> bool;
 
 const MODE_EMIT: int = 0;
 const MODE_BUILD: int = 1;
 const MODE_RUN: int = 2;
 const MODE_CHECK: int = 3;
+const MODE_FMT: int = 4;
 
 fn print_usage() {
     println!("Glide compiler");
@@ -166,6 +169,7 @@ fn print_usage() {
     println!("  glide run <file>");
     println!("  glide emit <file>          (print generated C to stdout)");
     println!("  glide check <file>         (parse + type-check, no codegen)");
+    println!("  glide fmt <file> [--write] (pretty-print to stdout, or rewrite in place)");
     println!("  glide lsp                  (language server on stdio)");
 }
 
@@ -277,6 +281,7 @@ fn main() -> int {
     else if cmd.eq("run") { mode = MODE_RUN; }
     else if cmd.eq("emit") { mode = MODE_EMIT; }
     else if cmd.eq("check") { mode = MODE_CHECK; }
+    else if cmd.eq("fmt") { mode = MODE_FMT; }
     else {
         // Backward-compat: `glide [--emit] file.glide` (old positional form).
         src_arg_idx = 1;
@@ -291,15 +296,16 @@ fn main() -> int {
     }
     let src_path: string = args_at(src_arg_idx);
 
-    // Parse remaining flags: -o <out>, --target=<triple>
+    // Parse remaining flags: -o <out>, --target=<triple>, --write
     let mut out_path: string = "";
     let mut target: string = "";
+    let mut write_in_place: bool = false;
     for let i: int = src_arg_idx + 1; i < argc; i++ {
         let a: string = args_at(i);
         if a.eq("-o") && (i + 1) < argc {
             out_path = args_at(i + 1);
         }
-        // --target=triple
+        if a.eq("--write") { write_in_place = true; }
         if a.len() > 9 {
             let prefix: string = a.substring(0, 9);
             if prefix.eq("--target=") {
@@ -319,6 +325,27 @@ fn main() -> int {
             if __glide_is_windows() != 0 { out_path = "__glide_run_tmp.exe"; } else { out_path = "__glide_run_tmp"; }
         }
         return run_build(src_path, out_path, target, true);
+    }
+
+    if mode == MODE_FMT {
+        // Parse only the user's file (no stdlib autoload — we want to format
+        // exactly what's on disk, nothing more).
+        let src: string = read_file(src_path);
+        if src.eq("") { println!("could not read or empty file:", src_path); return 1; }
+        let lex: *Lexer = Lexer::new(src);
+        let p: *Parser = Parser::new(lex);
+        let parsed: *Vector<Stmt> = parse_program(p);
+        let formatted: string = fmt_program(parsed);
+        if write_in_place {
+            if !write_file(src_path, formatted) {
+                println!("could not write:", src_path);
+                return 1;
+            }
+            return 0;
+        }
+        __glide_write_str(formatted);
+        __glide_flush_stdout();
+        return 0;
     }
 
     // emit / check / fallback

@@ -660,10 +660,12 @@ typedef struct  UseSite  {
 #define  JSON_STRING  3
 #define  JSON_ARRAY  4
 #define  JSON_OBJECT  5
+static const const char*   FMT_INDENT = "    ";
 #define  MODE_EMIT  0
 #define  MODE_BUILD  1
 #define  MODE_RUN  2
 #define  MODE_CHECK  3
+#define  MODE_FMT  4
 
 bool   is_keyword (const char*   s);
 const char*   token_kind_name (int   k);
@@ -833,6 +835,25 @@ JsonValue*   jp_number (JsonParser*   p);
 JsonValue*   json_parse (const char*   src);
 const char*   json_escape (const char*   s);
 const char*   json_emit (JsonValue*   v);
+const char*   fmt_indent (int   depth);
+const char*   fmt_type (Type*   t);
+const char*   fmt_char_lit (int   n);
+const char*   fmt_binop (int   op);
+const char*   fmt_unop (int   op);
+const char*   fmt_expr (Expr*   e);
+const char*   fmt_struct_lit (Expr*   e, const char*   prefix);
+const char*   fmt_stmt_inline (Stmt*   s);
+const char*   fmt_let_const_inline (Stmt*   s);
+const char*   fmt_stmt (Stmt*   s, int   depth);
+const char*   fmt_for_init (Stmt*   s);
+const char*   fmt_type_params (Stmt*   s);
+const char*   fmt_fn (Stmt*   s, int   depth);
+const char*   fmt_struct (Stmt*   s, int   depth);
+const char*   fmt_enum (Stmt*   s, int   depth);
+const char*   fmt_impl (Stmt*   s, int   depth);
+const char*   fmt_match (Stmt*   s, int   depth);
+const char*   fmt_program (Vector__Stmt*   stmts);
+bool   needs_blank_line (int   prev, int   curr);
 const char*   __glide_read_line (void);
 const char*   __glide_read_bytes (int   n);
 void   __glide_write_str (const char*   s);
@@ -875,6 +896,8 @@ JsonValue*   use_to_range (UseSite*   u, int   name_len);
 void   handle_references (JsonValue*   req, LspState*   state);
 void   handle_document_highlight (JsonValue*   req, LspState*   state);
 void   handle_rename (JsonValue*   req, LspState*   state);
+int   count_lines (const char*   s);
+void   handle_formatting (JsonValue*   req, LspState*   state);
 void   analysis_unused_vars (Typer*   t, Vector__Stmt*   program);
 void   check_unused_in_body (Typer*   t, Vector__Stmt*   body);
 bool   stmt_uses_name (Stmt*   s, const char*   name);
@@ -922,6 +945,7 @@ const char*   __glide_exe_dir (void);
 const char*   __glide_getenv (const char*   name);
 int   __glide_is_windows (void);
 bool   __glide_file_exists (const char*   path);
+bool   write_file (const char*   path, const char*   content);
 void   print_usage (void);
 bool   parse_program_into (Vector__Stmt*   stmts, const char*   path);
 const char*   pick_cc (void);
@@ -7438,6 +7462,668 @@ const char*   json_emit (JsonValue*   v) {
     return "null";
 }
 
+const char*   fmt_indent (int   depth) {
+    const char*   s = "";
+    for (int   i = 0; (i  <  depth); i++) {
+        (s  =  __glide_string_concat(s, FMT_INDENT));
+    }
+    return s;
+}
+
+const char*   fmt_type (Type*   t) {
+    if ((t  ==  NULL)) {
+        return "";
+    }
+    if (((t-> kind )  ==  TY_NAMED)) {
+        return (t-> name );
+    }
+    if (((t-> kind )  ==  TY_POINTER)) {
+        return __glide_string_concat("*", fmt_type((t-> inner )));
+    }
+    if (((t-> kind )  ==  TY_BORROW)) {
+        return __glide_string_concat("&", fmt_type((t-> inner )));
+    }
+    if (((t-> kind )  ==  TY_BORROW_MUT)) {
+        return __glide_string_concat("&mut ", fmt_type((t-> inner )));
+    }
+    if (((t-> kind )  ==  TY_SLICE)) {
+        return __glide_string_concat("[]", fmt_type((t-> inner )));
+    }
+    if (((t-> kind )  ==  TY_RESULT)) {
+        return __glide_string_concat("!", fmt_type((t-> inner )));
+    }
+    if (((t-> kind )  ==  TY_GENERIC)) {
+        const char*   out = __glide_string_concat((t-> name ), "<");
+        if (((t-> args )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Type((t-> args ))); i++) {
+                if ((i  >  0)) {
+                    (out  =  __glide_string_concat(out, ", "));
+                }
+                Type   a = Vector_get__Type((t-> args ), i);
+                (out  =  __glide_string_concat(out, fmt_type((&a))));
+            }
+        }
+        return __glide_string_concat(out, ">");
+    }
+    if (((t-> kind )  ==  TY_FNPTR)) {
+        const char*   out = "fn(";
+        if (((t-> args )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Type((t-> args ))); i++) {
+                if ((i  >  0)) {
+                    (out  =  __glide_string_concat(out, ", "));
+                }
+                Type   a = Vector_get__Type((t-> args ), i);
+                (out  =  __glide_string_concat(out, fmt_type((&a))));
+            }
+        }
+        (out  =  __glide_string_concat(out, ")"));
+        if (((t-> fnptr_ret )  !=  NULL)) {
+            (out  =  __glide_string_concat(__glide_string_concat(out, " -> "), fmt_type((t-> fnptr_ret ))));
+        }
+        return out;
+    }
+    return "?";
+}
+
+const char*   fmt_char_lit (int   n) {
+    if ((n  ==  39)) {
+        return "'\\''";
+    }
+    if ((n  ==  92)) {
+        return "'\\\\'";
+    }
+    if ((n  ==  10)) {
+        return "'\\n'";
+    }
+    if ((n  ==  9)) {
+        return "'\\t'";
+    }
+    if ((n  ==  13)) {
+        return "'\\r'";
+    }
+    if ((n  ==  0)) {
+        return "'\\0'";
+    }
+    const char*   hex = "0123456789abcdef";
+    int   high = ((n  /  16)  %  16);
+    if ((high  <  0)) {
+        (high  =  0);
+    }
+    int   low = (n  %  16);
+    if ((low  <  0)) {
+        (low  =  0);
+    }
+    return __glide_string_concat(__glide_string_concat(__glide_string_concat("'\\x", __glide_string_substring(hex, high, (high  +  1))), __glide_string_substring(hex, low, (low  +  1))), "'");
+}
+
+const char*   fmt_binop (int   op) {
+    if ((op  ==  OP_ADD)) {
+        return "+";
+    }
+    if ((op  ==  OP_SUB)) {
+        return "-";
+    }
+    if ((op  ==  OP_MUL)) {
+        return "*";
+    }
+    if ((op  ==  OP_DIV)) {
+        return "/";
+    }
+    if ((op  ==  OP_MOD)) {
+        return "%";
+    }
+    if ((op  ==  OP_EQ)) {
+        return "==";
+    }
+    if ((op  ==  OP_NE)) {
+        return "!=";
+    }
+    if ((op  ==  OP_LT)) {
+        return "<";
+    }
+    if ((op  ==  OP_LE)) {
+        return "<=";
+    }
+    if ((op  ==  OP_GT)) {
+        return ">";
+    }
+    if ((op  ==  OP_GE)) {
+        return ">=";
+    }
+    if ((op  ==  OP_AND)) {
+        return "&&";
+    }
+    if ((op  ==  OP_OR)) {
+        return "||";
+    }
+    if ((op  ==  OP_BIT_AND)) {
+        return "&";
+    }
+    if ((op  ==  OP_BIT_OR)) {
+        return "|";
+    }
+    if ((op  ==  OP_BIT_XOR)) {
+        return "^";
+    }
+    if ((op  ==  OP_SHL)) {
+        return "<<";
+    }
+    if ((op  ==  OP_SHR)) {
+        return ">>";
+    }
+    if ((op  ==  OP_ASSIGN)) {
+        return "=";
+    }
+    if ((op  ==  OP_PLUS_ASSIGN)) {
+        return "+=";
+    }
+    if ((op  ==  OP_MINUS_ASSIGN)) {
+        return "-=";
+    }
+    if ((op  ==  OP_STAR_ASSIGN)) {
+        return "*=";
+    }
+    if ((op  ==  OP_SLASH_ASSIGN)) {
+        return "/=";
+    }
+    return "?";
+}
+
+const char*   fmt_unop (int   op) {
+    if ((op  ==  UN_NEG)) {
+        return "-";
+    }
+    if ((op  ==  UN_NOT)) {
+        return "!";
+    }
+    if ((op  ==  UN_DEREF)) {
+        return "*";
+    }
+    if ((op  ==  UN_ADDR)) {
+        return "&";
+    }
+    if ((op  ==  UN_ADDR_MUT)) {
+        return "&mut ";
+    }
+    if ((op  ==  UN_BIT_NOT)) {
+        return "~";
+    }
+    return "";
+}
+
+const char*   fmt_expr (Expr*   e) {
+    if ((e  ==  NULL)) {
+        return "";
+    }
+    if (((e-> kind )  ==  EX_INT)) {
+        return int_to_str((e-> int_val ));
+    }
+    if (((e-> kind )  ==  EX_FLOAT)) {
+        return int_to_str((e-> int_val ));
+    }
+    if (((e-> kind )  ==  EX_STRING)) {
+        return __glide_string_concat(__glide_string_concat("\"", (e-> str_val )), "\"");
+    }
+    if (((e-> kind )  ==  EX_BOOL)) {
+        if ((e-> bool_val )) {
+            return "true";
+        }
+        return "false";
+    }
+    if (((e-> kind )  ==  EX_NULL)) {
+        return "null";
+    }
+    if (((e-> kind )  ==  EX_IDENT)) {
+        return (e-> str_val );
+    }
+    if (((e-> kind )  ==  EX_CHAR)) {
+        return fmt_char_lit((e-> int_val ));
+    }
+    if (((e-> kind )  ==  EX_BINARY)) {
+        return __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("(", fmt_expr((e-> lhs ))), " "), fmt_binop((e-> op_code ))), " "), fmt_expr((e-> rhs ))), ")");
+    }
+    if (((e-> kind )  ==  EX_UNARY)) {
+        if (((e-> op_code )  ==  UN_TRY)) {
+            return __glide_string_concat(fmt_expr((e-> operand )), "?");
+        }
+        return __glide_string_concat(__glide_string_concat(__glide_string_concat("(", fmt_unop((e-> op_code ))), fmt_expr((e-> operand ))), ")");
+    }
+    if (((e-> kind )  ==  EX_ASSIGN)) {
+        return __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(fmt_expr((e-> lhs )), " "), fmt_binop((e-> op_code ))), " "), fmt_expr((e-> rhs )));
+    }
+    if (((e-> kind )  ==  EX_CALL)) {
+        const char*   out = __glide_string_concat(fmt_expr((e-> lhs )), "(");
+        if (((e-> args )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
+                if ((i  >  0)) {
+                    (out  =  __glide_string_concat(out, ", "));
+                }
+                Expr   a = Vector_get__Expr((e-> args ), i);
+                (out  =  __glide_string_concat(out, fmt_expr((&a))));
+            }
+        }
+        return __glide_string_concat(out, ")");
+    }
+    if (((e-> kind )  ==  EX_MEMBER)) {
+        return __glide_string_concat(__glide_string_concat(fmt_expr((e-> lhs )), "."), (e-> field ));
+    }
+    if (((e-> kind )  ==  EX_INDEX)) {
+        return __glide_string_concat(__glide_string_concat(__glide_string_concat(fmt_expr((e-> lhs )), "["), fmt_expr((e-> rhs ))), "]");
+    }
+    if (((e-> kind )  ==  EX_CAST)) {
+        return __glide_string_concat(__glide_string_concat(fmt_expr((e-> lhs )), " as "), fmt_type((e-> cast_to )));
+    }
+    if (((e-> kind )  ==  EX_PATH)) {
+        return __glide_string_concat(__glide_string_concat((e-> str_val ), "::"), (e-> field ));
+    }
+    if (((e-> kind )  ==  EX_POSTINC)) {
+        return __glide_string_concat(fmt_expr((e-> lhs )), "++");
+    }
+    if (((e-> kind )  ==  EX_POSTDEC)) {
+        return __glide_string_concat(fmt_expr((e-> lhs )), "--");
+    }
+    if (((e-> kind )  ==  EX_MACRO)) {
+        const char*   out = __glide_string_concat((e-> str_val ), "!(");
+        if (((e-> args )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
+                if ((i  >  0)) {
+                    (out  =  __glide_string_concat(out, ", "));
+                }
+                Expr   a = Vector_get__Expr((e-> args ), i);
+                (out  =  __glide_string_concat(out, fmt_expr((&a))));
+            }
+        }
+        return __glide_string_concat(out, ")");
+    }
+    if (((e-> kind )  ==  EX_SIZEOF)) {
+        return __glide_string_concat(__glide_string_concat("sizeof(", fmt_type((e-> cast_to ))), ")");
+    }
+    if (((e-> kind )  ==  EX_NEW)) {
+        return fmt_struct_lit(e, "new ");
+    }
+    if (((e-> kind )  ==  EX_STRUCT_LIT)) {
+        return fmt_struct_lit(e, "");
+    }
+    if (((e-> kind )  ==  EX_FNEXPR)) {
+        const char*   out = "fn(";
+        if (((e-> fn_expr_params )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Param((e-> fn_expr_params ))); i++) {
+                if ((i  >  0)) {
+                    (out  =  __glide_string_concat(out, ", "));
+                }
+                Param   p = Vector_get__Param((e-> fn_expr_params ), i);
+                (out  =  __glide_string_concat(__glide_string_concat(__glide_string_concat(out, (p. name )), ": "), fmt_type((p. ty ))));
+            }
+        }
+        (out  =  __glide_string_concat(out, ")"));
+        if (((e-> cast_to )  !=  NULL)) {
+            (out  =  __glide_string_concat(__glide_string_concat(out, " -> "), fmt_type((e-> cast_to ))));
+        }
+        (out  =  __glide_string_concat(out, " { "));
+        if (((e-> fn_expr_body )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Stmt((e-> fn_expr_body ))); i++) {
+                if ((i  >  0)) {
+                    (out  =  __glide_string_concat(out, " "));
+                }
+                Stmt   b = Vector_get__Stmt((e-> fn_expr_body ), i);
+                (out  =  __glide_string_concat(out, fmt_stmt_inline((&b))));
+            }
+        }
+        return __glide_string_concat(out, " }");
+    }
+    return "/* fmt: unknown expr */";
+}
+
+const char*   fmt_struct_lit (Expr*   e, const char*   prefix) {
+    const char*   out = __glide_string_concat(__glide_string_concat(prefix, (e-> str_val )), " {");
+    if (((((e-> field_names )  !=  NULL)  &&  ((e-> args )  !=  NULL))  &&  (Vector_len__Expr((e-> args ))  >  0))) {
+        (out  =  __glide_string_concat(out, " "));
+        for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
+            if ((i  >  0)) {
+                (out  =  __glide_string_concat(out, ", "));
+            }
+            (out  =  __glide_string_concat(__glide_string_concat(out, Vector_get__string((e-> field_names ), i)), ": "));
+            Expr   v = Vector_get__Expr((e-> args ), i);
+            (out  =  __glide_string_concat(out, fmt_expr((&v))));
+        }
+        (out  =  __glide_string_concat(out, " "));
+    }
+    return __glide_string_concat(out, "}");
+}
+
+const char*   fmt_stmt_inline (Stmt*   s) {
+    if ((s  ==  NULL)) {
+        return "";
+    }
+    if (((s-> kind )  ==  ST_RETURN)) {
+        if (((s-> expr_value )  !=  NULL)) {
+            return __glide_string_concat(__glide_string_concat("return ", fmt_expr((s-> expr_value ))), ";");
+        }
+        return "return;";
+    }
+    if (((s-> kind )  ==  ST_EXPR)) {
+        return __glide_string_concat(fmt_expr((s-> expr_value )), ";");
+    }
+    if ((((s-> kind )  ==  ST_LET)  ||  ((s-> kind )  ==  ST_CONST))) {
+        return fmt_let_const_inline(s);
+    }
+    return fmt_stmt(s, 0);
+}
+
+const char*   fmt_let_const_inline (Stmt*   s) {
+    const char*   out = "";
+    if (((s-> kind )  ==  ST_CONST)) {
+        (out  =  "const ");
+    } else {
+        (out  =  "let ");
+    }
+    if ((s-> is_mut )) {
+        (out  =  __glide_string_concat(out, "mut "));
+    }
+    (out  =  __glide_string_concat(out, (s-> name )));
+    if ((s-> is_auto_owned )) {
+        (out  =  __glide_string_concat(out, "*"));
+    }
+    if (((s-> let_ty )  !=  NULL)) {
+        (out  =  __glide_string_concat(__glide_string_concat(out, ": "), fmt_type((s-> let_ty ))));
+    }
+    if (((s-> let_value )  !=  NULL)) {
+        (out  =  __glide_string_concat(__glide_string_concat(out, " = "), fmt_expr((s-> let_value ))));
+    }
+    return __glide_string_concat(out, ";");
+}
+
+const char*   fmt_stmt (Stmt*   s, int   depth) {
+    if ((s  ==  NULL)) {
+        return "";
+    }
+    const char*   pad = fmt_indent(depth);
+    if ((((s-> kind )  ==  ST_LET)  ||  ((s-> kind )  ==  ST_CONST))) {
+        return __glide_string_concat(__glide_string_concat(pad, fmt_let_const_inline(s)), "\n");
+    }
+    if (((s-> kind )  ==  ST_RETURN)) {
+        if (((s-> expr_value )  !=  NULL)) {
+            return __glide_string_concat(__glide_string_concat(__glide_string_concat(pad, "return "), fmt_expr((s-> expr_value ))), ";\n");
+        }
+        return __glide_string_concat(pad, "return;\n");
+    }
+    if (((s-> kind )  ==  ST_EXPR)) {
+        return __glide_string_concat(__glide_string_concat(pad, fmt_expr((s-> expr_value ))), ";\n");
+    }
+    if (((s-> kind )  ==  ST_BREAK)) {
+        return __glide_string_concat(pad, "break;\n");
+    }
+    if (((s-> kind )  ==  ST_CONTINUE)) {
+        return __glide_string_concat(pad, "continue;\n");
+    }
+    if (((s-> kind )  ==  ST_DEFER)) {
+        return __glide_string_concat(__glide_string_concat(__glide_string_concat(pad, "defer "), fmt_expr((s-> expr_value ))), ";\n");
+    }
+    if (((s-> kind )  ==  ST_SPAWN)) {
+        return __glide_string_concat(__glide_string_concat(__glide_string_concat(pad, "spawn "), fmt_expr((s-> expr_value ))), ";\n");
+    }
+    if (((s-> kind )  ==  ST_IMPORT)) {
+        return __glide_string_concat(__glide_string_concat(__glide_string_concat(pad, "import "), (s-> import_path )), ";\n");
+    }
+    if (((s-> kind )  ==  ST_IF)) {
+        const char*   out = __glide_string_concat(__glide_string_concat(__glide_string_concat(pad, "if "), fmt_expr((s-> cond ))), " {\n");
+        if (((s-> then_body )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Stmt((s-> then_body ))); i++) {
+                Stmt   b = Vector_get__Stmt((s-> then_body ), i);
+                (out  =  __glide_string_concat(out, fmt_stmt((&b), (depth  +  1))));
+            }
+        }
+        if (((s-> else_body )  !=  NULL)) {
+            (out  =  __glide_string_concat(__glide_string_concat(out, pad), "} else {\n"));
+            for (int   i = 0; (i  <  Vector_len__Stmt((s-> else_body ))); i++) {
+                Stmt   b = Vector_get__Stmt((s-> else_body ), i);
+                (out  =  __glide_string_concat(out, fmt_stmt((&b), (depth  +  1))));
+            }
+        }
+        return __glide_string_concat(__glide_string_concat(out, pad), "}\n");
+    }
+    if (((s-> kind )  ==  ST_WHILE)) {
+        const char*   out = __glide_string_concat(__glide_string_concat(__glide_string_concat(pad, "while "), fmt_expr((s-> cond ))), " {\n");
+        if (((s-> then_body )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Stmt((s-> then_body ))); i++) {
+                Stmt   b = Vector_get__Stmt((s-> then_body ), i);
+                (out  =  __glide_string_concat(out, fmt_stmt((&b), (depth  +  1))));
+            }
+        }
+        return __glide_string_concat(__glide_string_concat(out, pad), "}\n");
+    }
+    if (((s-> kind )  ==  ST_FOR)) {
+        const char*   out = __glide_string_concat(pad, "for ");
+        if (((s-> for_init )  !=  NULL)) {
+            (out  =  __glide_string_concat(out, fmt_for_init((s-> for_init ))));
+        }
+        (out  =  __glide_string_concat(out, "; "));
+        if (((s-> cond )  !=  NULL)) {
+            (out  =  __glide_string_concat(out, fmt_expr((s-> cond ))));
+        }
+        (out  =  __glide_string_concat(out, "; "));
+        if (((s-> for_step )  !=  NULL)) {
+            (out  =  __glide_string_concat(out, fmt_expr((s-> for_step ))));
+        }
+        (out  =  __glide_string_concat(out, " {\n"));
+        if (((s-> then_body )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Stmt((s-> then_body ))); i++) {
+                Stmt   b = Vector_get__Stmt((s-> then_body ), i);
+                (out  =  __glide_string_concat(out, fmt_stmt((&b), (depth  +  1))));
+            }
+        }
+        return __glide_string_concat(__glide_string_concat(out, pad), "}\n");
+    }
+    if (((s-> kind )  ==  ST_BLOCK)) {
+        const char*   out = __glide_string_concat(pad, "{\n");
+        if (((s-> then_body )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Stmt((s-> then_body ))); i++) {
+                Stmt   b = Vector_get__Stmt((s-> then_body ), i);
+                (out  =  __glide_string_concat(out, fmt_stmt((&b), (depth  +  1))));
+            }
+        }
+        return __glide_string_concat(__glide_string_concat(out, pad), "}\n");
+    }
+    if (((s-> kind )  ==  ST_FN)) {
+        return fmt_fn(s, depth);
+    }
+    if (((s-> kind )  ==  ST_STRUCT)) {
+        return fmt_struct(s, depth);
+    }
+    if (((s-> kind )  ==  ST_ENUM)) {
+        return fmt_enum(s, depth);
+    }
+    if (((s-> kind )  ==  ST_IMPL)) {
+        return fmt_impl(s, depth);
+    }
+    if (((s-> kind )  ==  ST_MATCH)) {
+        return fmt_match(s, depth);
+    }
+    return __glide_string_concat(pad, "/* fmt: unknown stmt */\n");
+}
+
+const char*   fmt_for_init (Stmt*   s) {
+    if ((s  ==  NULL)) {
+        return "";
+    }
+    if (((s-> kind )  ==  ST_LET)) {
+        return __glide_string_substring(fmt_let_const_inline(s), 0, (__glide_string_len(fmt_let_const_inline(s))  -  1));
+    }
+    if (((s-> kind )  ==  ST_EXPR)) {
+        return fmt_expr((s-> expr_value ));
+    }
+    return "";
+}
+
+const char*   fmt_type_params (Stmt*   s) {
+    if ((((s-> type_params )  ==  NULL)  ||  (Vector_len__string((s-> type_params ))  ==  0))) {
+        return "";
+    }
+    const char*   out = "<";
+    for (int   i = 0; (i  <  Vector_len__string((s-> type_params ))); i++) {
+        if ((i  >  0)) {
+            (out  =  __glide_string_concat(out, ", "));
+        }
+        (out  =  __glide_string_concat(out, Vector_get__string((s-> type_params ), i)));
+    }
+    return __glide_string_concat(out, ">");
+}
+
+const char*   fmt_fn (Stmt*   s, int   depth) {
+    const char*   pad = fmt_indent(depth);
+    const char*   head = pad;
+    if ((s-> is_pub )) {
+        (head  =  __glide_string_concat(head, "pub "));
+    }
+    (head  =  __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(head, "fn "), (s-> name )), fmt_type_params(s)), "("));
+    if (((s-> fn_params )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Param((s-> fn_params ))); i++) {
+            if ((i  >  0)) {
+                (head  =  __glide_string_concat(head, ", "));
+            }
+            Param   p = Vector_get__Param((s-> fn_params ), i);
+            (head  =  __glide_string_concat(__glide_string_concat(__glide_string_concat(head, (p. name )), ": "), fmt_type((p. ty ))));
+        }
+    }
+    (head  =  __glide_string_concat(head, ")"));
+    if (((s-> fn_ret_ty )  !=  NULL)) {
+        (head  =  __glide_string_concat(__glide_string_concat(head, " -> "), fmt_type((s-> fn_ret_ty ))));
+    }
+    if (((s-> fn_body )  ==  NULL)) {
+        return __glide_string_concat(head, ";\n");
+    }
+    const char*   out = __glide_string_concat(head, " {\n");
+    for (int   i = 0; (i  <  Vector_len__Stmt((s-> fn_body ))); i++) {
+        Stmt   b = Vector_get__Stmt((s-> fn_body ), i);
+        (out  =  __glide_string_concat(out, fmt_stmt((&b), (depth  +  1))));
+    }
+    return __glide_string_concat(__glide_string_concat(out, pad), "}\n");
+}
+
+const char*   fmt_struct (Stmt*   s, int   depth) {
+    const char*   pad = fmt_indent(depth);
+    const char*   head = pad;
+    if ((s-> is_pub )) {
+        (head  =  __glide_string_concat(head, "pub "));
+    }
+    (head  =  __glide_string_concat(__glide_string_concat(__glide_string_concat(head, "struct "), (s-> name )), fmt_type_params(s)));
+    if ((((s-> struct_fields )  ==  NULL)  ||  (Vector_len__Field((s-> struct_fields ))  ==  0))) {
+        return __glide_string_concat(head, " {}\n");
+    }
+    const char*   out = __glide_string_concat(head, " {\n");
+    const char*   inner = fmt_indent((depth  +  1));
+    for (int   i = 0; (i  <  Vector_len__Field((s-> struct_fields ))); i++) {
+        Field   f = Vector_get__Field((s-> struct_fields ), i);
+        (out  =  __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(out, inner), (f. name )), ": "), fmt_type((f. ty ))), ",\n"));
+    }
+    return __glide_string_concat(__glide_string_concat(out, pad), "}\n");
+}
+
+const char*   fmt_enum (Stmt*   s, int   depth) {
+    const char*   pad = fmt_indent(depth);
+    const char*   head = pad;
+    if ((s-> is_pub )) {
+        (head  =  __glide_string_concat(head, "pub "));
+    }
+    (head  =  __glide_string_concat(__glide_string_concat(head, "enum "), (s-> name )));
+    if ((((s-> enum_variants )  ==  NULL)  ||  (Vector_len__EnumVariant((s-> enum_variants ))  ==  0))) {
+        return __glide_string_concat(head, " {}\n");
+    }
+    const char*   out = __glide_string_concat(head, " {\n");
+    const char*   inner = fmt_indent((depth  +  1));
+    for (int   i = 0; (i  <  Vector_len__EnumVariant((s-> enum_variants ))); i++) {
+        EnumVariant   v = Vector_get__EnumVariant((s-> enum_variants ), i);
+        (out  =  __glide_string_concat(__glide_string_concat(out, inner), (v. name )));
+        if ((((v. fields )  !=  NULL)  &&  (Vector_len__Type((v. fields ))  >  0))) {
+            (out  =  __glide_string_concat(out, "("));
+            for (int   j = 0; (j  <  Vector_len__Type((v. fields ))); j++) {
+                if ((j  >  0)) {
+                    (out  =  __glide_string_concat(out, ", "));
+                }
+                Type   ty = Vector_get__Type((v. fields ), j);
+                (out  =  __glide_string_concat(out, fmt_type((&ty))));
+            }
+            (out  =  __glide_string_concat(out, ")"));
+        }
+        (out  =  __glide_string_concat(out, ",\n"));
+    }
+    return __glide_string_concat(__glide_string_concat(out, pad), "}\n");
+}
+
+const char*   fmt_impl (Stmt*   s, int   depth) {
+    const char*   pad = fmt_indent(depth);
+    const char*   head = __glide_string_concat(pad, "impl");
+    (head  =  __glide_string_concat(head, fmt_type_params(s)));
+    (head  =  __glide_string_concat(__glide_string_concat(head, " "), fmt_type((s-> impl_target ))));
+    if ((((s-> impl_methods )  ==  NULL)  ||  (Vector_len__Stmt((s-> impl_methods ))  ==  0))) {
+        return __glide_string_concat(head, " {}\n");
+    }
+    const char*   out = __glide_string_concat(head, " {\n");
+    for (int   i = 0; (i  <  Vector_len__Stmt((s-> impl_methods ))); i++) {
+        if ((i  >  0)) {
+            (out  =  __glide_string_concat(out, "\n"));
+        }
+        Stmt   m = Vector_get__Stmt((s-> impl_methods ), i);
+        (out  =  __glide_string_concat(out, fmt_fn((&m), (depth  +  1))));
+    }
+    return __glide_string_concat(__glide_string_concat(out, pad), "}\n");
+}
+
+const char*   fmt_match (Stmt*   s, int   depth) {
+    const char*   pad = fmt_indent(depth);
+    const char*   out = __glide_string_concat(__glide_string_concat(__glide_string_concat(pad, "match "), fmt_expr((s-> scrutinee ))), " {\n");
+    const char*   inner = fmt_indent((depth  +  1));
+    if (((s-> arms )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__MatchArm((s-> arms ))); i++) {
+            MatchArm   a = Vector_get__MatchArm((s-> arms ), i);
+            (out  =  __glide_string_concat(__glide_string_concat(out, inner), (a. variant )));
+            if ((((a. bindings )  !=  NULL)  &&  (Vector_len__string((a. bindings ))  >  0))) {
+                (out  =  __glide_string_concat(out, "("));
+                for (int   j = 0; (j  <  Vector_len__string((a. bindings ))); j++) {
+                    if ((j  >  0)) {
+                        (out  =  __glide_string_concat(out, ", "));
+                    }
+                    (out  =  __glide_string_concat(out, Vector_get__string((a. bindings ), j)));
+                }
+                (out  =  __glide_string_concat(out, ")"));
+            }
+            (out  =  __glide_string_concat(out, " => {\n"));
+            if (((a. body )  !=  NULL)) {
+                for (int   j = 0; (j  <  Vector_len__Stmt((a. body ))); j++) {
+                    Stmt   b = Vector_get__Stmt((a. body ), j);
+                    (out  =  __glide_string_concat(out, fmt_stmt((&b), (depth  +  2))));
+                }
+            }
+            (out  =  __glide_string_concat(__glide_string_concat(out, inner), "}\n"));
+        }
+    }
+    return __glide_string_concat(__glide_string_concat(out, pad), "}\n");
+}
+
+const char*   fmt_program (Vector__Stmt*   stmts) {
+    const char*   out = "";
+    int   prev_kind = (-1);
+    for (int   i = 0; (i  <  Vector_len__Stmt(stmts)); i++) {
+        Stmt   s = Vector_get__Stmt(stmts, i);
+        if (((i  >  0)  &&  needs_blank_line(prev_kind, (s. kind )))) {
+            (out  =  __glide_string_concat(out, "\n"));
+        }
+        (out  =  __glide_string_concat(out, fmt_stmt((&s), 0)));
+        (prev_kind  =  (s. kind ));
+    }
+    return out;
+}
+
+bool   needs_blank_line (int   prev, int   curr) {
+    if (((prev  ==  ST_IMPORT)  &&  (curr  ==  ST_IMPORT))) {
+        return false;
+    }
+    if (((prev  ==  ST_CONST)  &&  (curr  ==  ST_CONST))) {
+        return false;
+    }
+    return true;
+}
+
 LspState*   lsp_state_new (void) {
     LspState*   s = (( LspState* )malloc(sizeof( LspState )));
     HashMap__LspDoc*   m = HashMap_new__LspDoc();
@@ -7529,6 +8215,7 @@ void   handle_initialize (JsonValue*   req) {
     json_obj_set(caps, "referencesProvider", json_bool(true));
     json_obj_set(caps, "documentHighlightProvider", json_bool(true));
     json_obj_set(caps, "renameProvider", json_bool(true));
+    json_obj_set(caps, "documentFormattingProvider", json_bool(true));
     JsonValue*   comp = json_object();
     JsonValue*   trig = json_array();
     json_arr_push(trig, json_string("."));
@@ -8287,6 +8974,49 @@ void   handle_rename (JsonValue*   req, LspState*   state) {
     JsonValue*   result = json_object();
     json_obj_set(result, "changes", changes);
     lsp_send_response(id, result);
+}
+
+int   count_lines (const char*   s) {
+    int   n = 0;
+    int   len = __glide_string_len(s);
+    for (int   i = 0; (i  <  len); i++) {
+        if ((__glide_char_to_int(__glide_string_at(s, i))  ==  10)) {
+            (n  =  (n  +  1));
+        }
+    }
+    return n;
+}
+
+void   handle_formatting (JsonValue*   req, LspState*   state) {
+    JsonValue*   id = json_get(req, "id");
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    if ((!HashMap_contains__LspDoc((state-> docs ), uri))) {
+        lsp_send_response(id, json_array());
+        return;
+    }
+    LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
+    Lexer*   lex = Lexer_new((doc. text ));
+    Parser*   p = Parser_new(lex);
+    Vector__Stmt*   parsed = parse_program(p);
+    const char*   formatted = fmt_program(parsed);
+    int   lines = (count_lines((doc. text ))  +  2);
+    JsonValue*   edit = json_object();
+    JsonValue*   range = json_object();
+    JsonValue*   start = json_object();
+    JsonValue*   endp = json_object();
+    json_obj_set(start, "line", json_int(0));
+    json_obj_set(start, "character", json_int(0));
+    json_obj_set(endp, "line", json_int(lines));
+    json_obj_set(endp, "character", json_int(0));
+    json_obj_set(range, "start", start);
+    json_obj_set(range, "end", endp);
+    json_obj_set(edit, "range", range);
+    json_obj_set(edit, "newText", json_string(formatted));
+    JsonValue*   arr = json_array();
+    json_arr_push(arr, edit);
+    lsp_send_response(id, arr);
 }
 
 void   analysis_unused_vars (Typer*   t, Vector__Stmt*   program) {
@@ -9063,6 +9793,10 @@ int   lsp_main (void) {
             handle_rename(req, state);
             continue;
         }
+        if (__glide_string_eq(method, "textDocument/formatting")) {
+            handle_formatting(req, state);
+            continue;
+        }
         JsonValue*   id = json_get(req, "id");
         if ((id  !=  NULL)) {
             lsp_send_response(id, json_null());
@@ -9281,6 +10015,7 @@ void   print_usage (void) {
     printf("%s\n", "  glide run <file>");
     printf("%s\n", "  glide emit <file>          (print generated C to stdout)");
     printf("%s\n", "  glide check <file>         (parse + type-check, no codegen)");
+    printf("%s\n", "  glide fmt <file> [--write] (pretty-print to stdout, or rewrite in place)");
     printf("%s\n", "  glide lsp                  (language server on stdio)");
 }
 
@@ -9393,11 +10128,15 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
                 if (__glide_string_eq(cmd, "check")) {
                     (mode  =  MODE_CHECK);
                 } else {
-                    (src_arg_idx  =  1);
-                    for (int   i = 0; (i  <  argc); i++) {
-                        if (__glide_string_eq(args_at(i), "--emit")) {
-                            (mode  =  MODE_EMIT);
-                            (src_arg_idx  =  (i  +  1));
+                    if (__glide_string_eq(cmd, "fmt")) {
+                        (mode  =  MODE_FMT);
+                    } else {
+                        (src_arg_idx  =  1);
+                        for (int   i = 0; (i  <  argc); i++) {
+                            if (__glide_string_eq(args_at(i), "--emit")) {
+                                (mode  =  MODE_EMIT);
+                                (src_arg_idx  =  (i  +  1));
+                            }
                         }
                     }
                 }
@@ -9411,10 +10150,14 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
     const char*   src_path = args_at(src_arg_idx);
     const char*   out_path = "";
     const char*   target = "";
+    bool   write_in_place = false;
     for (int   i = (src_arg_idx  +  1); (i  <  argc); i++) {
         const char*   a = args_at(i);
         if ((__glide_string_eq(a, "-o")  &&  ((i  +  1)  <  argc))) {
             (out_path  =  args_at((i  +  1)));
+        }
+        if (__glide_string_eq(a, "--write")) {
+            (write_in_place  =  true);
         }
         if ((__glide_string_len(a)  >  9)) {
             const char*   prefix = __glide_string_substring(a, 0, 9);
@@ -9442,6 +10185,27 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
             }
         }
         return run_build(src_path, out_path, target, true);
+    }
+    if ((mode  ==  MODE_FMT)) {
+        const char*   src = read_file(src_path);
+        if (__glide_string_eq(src, "")) {
+            printf("%s %s\n", "could not read or empty file:", src_path);
+            return 1;
+        }
+        Lexer*   lex = Lexer_new(src);
+        Parser*   p = Parser_new(lex);
+        Vector__Stmt*   parsed = parse_program(p);
+        const char*   formatted = fmt_program(parsed);
+        if (write_in_place) {
+            if ((!write_file(src_path, formatted))) {
+                printf("%s %s\n", "could not write:", src_path);
+                return 1;
+            }
+            return 0;
+        }
+        __glide_write_str(formatted);
+        __glide_flush_stdout();
+        return 0;
     }
     Vector__Stmt*   stmts = Vector_new__Stmt();
     if ((!parse_program_into(stmts, src_path))) {

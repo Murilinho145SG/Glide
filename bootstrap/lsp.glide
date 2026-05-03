@@ -13,6 +13,7 @@ import "lexer.glide";
 import "parser.glide";
 import "typer.glide";
 import "json.glide";
+import "fmt.glide";
 
 // FFI to runtime helpers (defined in codegen runtime emit).
 extern fn __glide_read_line() -> string;
@@ -123,6 +124,7 @@ fn handle_initialize(req: *JsonValue) {
     json_obj_set(caps, "referencesProvider", json_bool(true));
     json_obj_set(caps, "documentHighlightProvider", json_bool(true));
     json_obj_set(caps, "renameProvider", json_bool(true));
+    json_obj_set(caps, "documentFormattingProvider", json_bool(true));
     let comp: *JsonValue = json_object();
     let trig: *JsonValue = json_array();
     json_arr_push(trig, json_string("."));
@@ -760,6 +762,46 @@ fn handle_rename(req: *JsonValue, state: *LspState) {
     lsp_send_response(id, result);
 }
 
+fn count_lines(s: string) -> int {
+    let mut n: int = 0;
+    let len: int = s.len();
+    for let i: int = 0; i < len; i++ {
+        if s.at(i).to_int() == 10 { n = n + 1; }
+    }
+    return n;
+}
+
+fn handle_formatting(req: *JsonValue, state: *LspState) {
+    let id: *JsonValue = json_get(req, "id");
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
+    let doc: LspDoc = state.docs.get(uri);
+    // Re-parse from text in case stmts is stale.
+    let lex: *Lexer = Lexer::new(doc.text);
+    let p: *Parser = Parser::new(lex);
+    let parsed: *Vector<Stmt> = parse_program(p);
+    let formatted: string = fmt_program(parsed);
+    // Return a single TextEdit replacing the whole document.
+    let lines: int = count_lines(doc.text) + 2;
+    let edit: *JsonValue = json_object();
+    let range: *JsonValue = json_object();
+    let start: *JsonValue = json_object();
+    let endp: *JsonValue = json_object();
+    json_obj_set(start, "line", json_int(0));
+    json_obj_set(start, "character", json_int(0));
+    json_obj_set(endp, "line", json_int(lines));
+    json_obj_set(endp, "character", json_int(0));
+    json_obj_set(range, "start", start);
+    json_obj_set(range, "end", endp);
+    json_obj_set(edit, "range", range);
+    json_obj_set(edit, "newText", json_string(formatted));
+    let arr: *JsonValue = json_array();
+    json_arr_push(arr, edit);
+    lsp_send_response(id, arr);
+}
+
 // ---- Custom analysis passes --------------------------------------------
 
 // Walk a fn body collecting let names, then walk again to find references.
@@ -1327,6 +1369,7 @@ pub fn lsp_main() -> int {
         if method.eq("textDocument/references") { handle_references(req, state); continue; }
         if method.eq("textDocument/documentHighlight") { handle_document_highlight(req, state); continue; }
         if method.eq("textDocument/rename") { handle_rename(req, state); continue; }
+        if method.eq("textDocument/formatting") { handle_formatting(req, state); continue; }
         // Any unhandled request gets an empty-result reply so clients don't hang.
         let id: *JsonValue = json_get(req, "id");
         if id != null { lsp_send_response(id, json_null()); }
