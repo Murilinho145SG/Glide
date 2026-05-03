@@ -96,28 +96,35 @@ fn print_stmt(s: *Stmt, indent: int) {
 }
 
 // Load a file by path (skipping if already loaded) and append its stmts,
-// recursively loading any `import "foo.glide"` it has.
-fn load_into(stmts: *Vector<Stmt>, path: string, loaded: *HashMap<bool>) {
+// recursively loading any `import "foo.glide"` it has. Parser diagnostics
+// (missing `;`, expected ident, etc) are appended to `pdiags` with their
+// origin tagged so the caller can surface them with proper file context.
+pub fn load_into(stmts: *Vector<Stmt>, path: string, loaded: *HashMap<bool>, pdiags: *Vector<ParseDiag>) {
     if loaded.contains(path) { return; }
     loaded.insert(path, true);
     let src: string = read_file(path);
     if src.eq("") { return; }
-    load_into_str(stmts, src, path, loaded);
+    load_into_str(stmts, src, path, loaded, pdiags);
 }
 
-// Parse a source string, recurse on imports, append non-import stmts.
-fn load_into_str(stmts: *Vector<Stmt>, src: string, origin: string, loaded: *HashMap<bool>) {
+pub fn load_into_str(stmts: *Vector<Stmt>, src: string, origin: string, loaded: *HashMap<bool>, pdiags: *Vector<ParseDiag>) {
     let lex: *Lexer = Lexer::new(src);
     let p: *Parser = Parser::new(lex);
     let parsed: *Vector<Stmt> = parse_program(p);
-    // Determine the directory of `origin` so relative imports resolve.
+    if pdiags != null && p.diags != null {
+        for let k: int = 0; k < p.diags.len(); k++ {
+            let d: ParseDiag = p.diags.get(k);
+            d.origin = origin;
+            pdiags.push(d);
+        }
+    }
     let dir: string = parent_dir(origin);
     for let i: int = 0; i < parsed.len(); i++ {
         let s: Stmt = parsed.get(i);
         if s.kind == ST_IMPORT {
             let unq: string = strip_quotes(s.import_path);
             let resolved: string = resolve_import(dir, unq);
-            load_into(stmts, resolved, loaded);
+            load_into(stmts, resolved, loaded, pdiags);
         } else {
             s.origin = origin;
             stmts.push(s);
@@ -321,7 +328,30 @@ fn print_usage() {
     println!("  glide lsp                  (language server on stdio)");
 }
 
-fn parse_program_into(stmts: *Vector<Stmt>, path: string) -> bool {
+// Convert parser-side diagnostics into typer DiagEntry shape and append them
+// to the typer's diagnostics vector so the existing pretty-printer / LSP
+// publish path picks them up alongside type errors. Always severity 1
+// (`error`) with code `parse`.
+pub fn merge_parse_diags(t: *Typer, pdiags: *Vector<ParseDiag>) {
+    if t == null || pdiags == null { return; }
+    for let i: int = 0; i < pdiags.len(); i++ {
+        let d: ParseDiag = pdiags.get(i);
+        let e: DiagEntry = DiagEntry {
+            line: d.line,
+            col: d.col,
+            end_line: d.line,
+            end_col: d.col + 1,
+            severity: 1,
+            code: "parse",
+            message: d.msg,
+            origin: d.origin,
+            tag: 0,
+        };
+        t.diagnostics.push(e);
+    }
+}
+
+fn parse_program_into(stmts: *Vector<Stmt>, path: string, pdiags: *Vector<ParseDiag>) -> bool {
     let src: string = read_file(path);
     if src.eq("") {
         println!("could not read or empty file:", path);
@@ -340,10 +370,10 @@ fn parse_program_into(stmts: *Vector<Stmt>, path: string) -> bool {
             b_path = exe_dir.concat("/stdlib/builtins.glide");
         }
     }
-    load_into(stmts, b_path, loaded);
-    load_into(stmts, v_path, loaded);
-    load_into(stmts, h_path, loaded);
-    load_into_str(stmts, src, path, loaded);
+    load_into(stmts, b_path, loaded, pdiags);
+    load_into(stmts, v_path, loaded, pdiags);
+    load_into(stmts, h_path, loaded, pdiags);
+    load_into_str(stmts, src, path, loaded, pdiags);
     let expanded: *Vector<Stmt> = expand_macros(stmts);
     let lowered: *Vector<Stmt> = lower_program(expanded);
     stmts.clear();
@@ -373,11 +403,13 @@ fn pick_cc() -> string {
 fn run_build(src_path: string, out_path: string, target: string, then_run: bool) -> int {
     // 1. Parse
     let stmts: *Vector<Stmt> = Vector::new();
-    if !parse_program_into(stmts, src_path) { return 1; }
+    let pdiags: *Vector<ParseDiag> = Vector::new();
+    if !parse_program_into(stmts, src_path, pdiags) { return 1; }
 
     // 2. Type-check. Abort the build before codegen if the user file has
     //    errors (e.g. infinite-recursion, type mismatches).
     let t: *Typer = Typer::new();
+    merge_parse_diags(t, pdiags);
     check_program(t, stmts);
     run_extra_analyses(t, stmts);
     let src_text: string = read_file(src_path);
@@ -530,10 +562,12 @@ fn main() -> int {
 
     // emit / check / fallback
     let stmts: *Vector<Stmt> = Vector::new();
-    if !parse_program_into(stmts, src_path) { return 1; }
+    let pdiags: *Vector<ParseDiag> = Vector::new();
+    if !parse_program_into(stmts, src_path, pdiags) { return 1; }
 
     if mode == MODE_CHECK {
         let t: *Typer = Typer::new();
+        merge_parse_diags(t, pdiags);
         check_program(t, stmts);
         run_extra_analyses(t, stmts);
         let src_text: string = read_file(src_path);

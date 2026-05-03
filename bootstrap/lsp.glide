@@ -214,16 +214,18 @@ fn run_analysis_and_publish(uri: string, text: string, state: *LspState) {
     // Auto-prepend stdlib so Vector<T> and HashMap<V> methods resolve, plus
     // builtin macro / printf stubs so hover and goto find them.
     let prefix: string = find_stdlib_root();
-    load_into(stmts, prefix.concat("stdlib/builtins.glide"), loaded);
-    load_into(stmts, prefix.concat("stdlib/vector.glide"), loaded);
-    load_into(stmts, prefix.concat("stdlib/hashmap.glide"), loaded);
+    let pdiags: *Vector<ParseDiag> = Vector::new();
+    load_into(stmts, prefix.concat("stdlib/builtins.glide"), loaded, pdiags);
+    load_into(stmts, prefix.concat("stdlib/vector.glide"), loaded, pdiags);
+    load_into(stmts, prefix.concat("stdlib/hashmap.glide"), loaded, pdiags);
 
     // Parse the user's text and follow its `import "..."` directives so that
     // cross-file symbols (Stmt, Expr, Lexer, etc. when editing the bootstrap
     // codebase) resolve. Imports are resolved relative to the user file's dir.
-    load_into_str(stmts, text, path, loaded);
+    load_into_str(stmts, text, path, loaded, pdiags);
 
     let t: *Typer = Typer::new();
+    merge_parse_diags(t, pdiags);
     check_program(t, stmts);
     run_extra_analyses(t, stmts);
 

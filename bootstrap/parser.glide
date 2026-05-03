@@ -4,6 +4,7 @@ import "lexer.glide";
 import "ast.glide";
 
 pub struct ParseDiag {
+    origin: string,
     line: int,
     col: int,
     msg: string,
@@ -65,7 +66,12 @@ impl Parser {
 
     fn err(self: *Parser, msg: string) {
         let full: string = msg.concat(" near '").concat(self.current.lexeme).concat("'");
-        let d: ParseDiag = ParseDiag { line: self.current.line, col: self.current.column, msg: full };
+        let d: ParseDiag = ParseDiag {
+            origin: "",
+            line: self.current.line,
+            col: self.current.column,
+            msg: full,
+        };
         self.diags.push(d);
         self.error_count = self.error_count + 1;
     }
