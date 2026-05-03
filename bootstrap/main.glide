@@ -357,18 +357,29 @@ fn main() -> int {
         let t: *Typer = Typer::new();
         check_program(t, stmts);
         run_extra_analyses(t, stmts);
+        let mut user_errors: int = 0;
         for let i: int = 0; i < t.diagnostics.len(); i++ {
             let d: DiagEntry = t.diagnostics.get(i);
+            let mut path: string = d.origin;
+            if path.eq("") { path = src_path; }
+            // Only count and print diagnostics from the user's file, so imports
+            // don't drown the output. Pass --all to see every entry.
+            let mut want_all: bool = false;
+            for let k: int = 0; k < argc; k++ {
+                if args_at(k).eq("--all") { want_all = true; }
+            }
+            if !want_all && !path.eq(src_path) { continue; }
             let mut tag: string = "error";
             if d.severity == 2 { tag = "warning"; }
             if d.severity == 3 { tag = "info"; }
             if d.severity == 4 { tag = "hint"; }
-            print!(src_path, ":", d.line, ":", d.col, ": ", tag);
+            print!(path, ":", d.line, ":", d.col, ": ", tag);
             if !d.code.eq("") { print!(" [", d.code, "]"); }
             println!(": ", d.message);
+            if d.severity == 1 { user_errors = user_errors + 1; }
         }
-        if t.error_count > 0 {
-            println!(t.error_count, "error(s)");
+        if user_errors > 0 {
+            println!(user_errors, "error(s)");
             t.free();
             return 1;
         }

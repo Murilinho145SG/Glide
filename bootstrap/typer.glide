@@ -59,9 +59,25 @@ fn is_bool_type(t: *Type) -> bool {
 }
 
 fn types_compat(want: *Type, got: *Type) -> bool {
+    // If either side couldn't be inferred (the typer is permissive and many
+    // expressions still return null), don't pretend it's a mismatch — that
+    // would flood callers with cascading false-positive diagnostics.
+    if want == null || got == null { return true; }
     if type_eq(want, got) { return true; }
     if is_int_type(want) && is_int_type(got) { return true; }
     if is_float_type(want) && is_float_type(got) { return true; }
+    // *T <-> *void (libc malloc/calloc result, plus the type of `null`).
+    // Must run BEFORE the structural pointer recursion below; otherwise the
+    // recursion compares Stmt vs void at the leaf and returns false.
+    if want.kind == TY_POINTER && got.kind == TY_POINTER {
+        if want.inner != null && want.inner.kind == TY_NAMED && want.inner.name.eq("void") { return true; }
+        if got.inner != null && got.inner.kind == TY_NAMED && got.inner.name.eq("void") { return true; }
+    }
+    // *T <-> &T <-> &mut T are interconvertible.
+    if (want.kind == TY_POINTER || want.kind == TY_BORROW || want.kind == TY_BORROW_MUT)
+       && (got.kind == TY_POINTER || got.kind == TY_BORROW || got.kind == TY_BORROW_MUT) {
+        return types_compat(want.inner, got.inner);
+    }
     return false;
 }
 
@@ -97,6 +113,7 @@ pub struct Typer {
     fns: *HashMap<FnSig>,
     structs: *HashMap<bool>,        // just registry of names for now
     scope: *HashMap<Type>,          // current scope: name -> Type (heap-alloc'd)
+    module_scope: *HashMap<Type>,   // top-level consts (visible inside any fn body)
     owned_locals: *HashMap<bool>,   // names that must not escape (auto-drop)
     borrows: *Vector<BorrowEvent>,  // active let-bound borrows; save/restore per block
     current_ret: *Type,
@@ -111,12 +128,14 @@ impl Typer {
         let fns: *HashMap<FnSig> = HashMap::new();
         let structs: *HashMap<bool> = HashMap::new();
         let scope: *HashMap<Type> = HashMap::new();
+        let mscope: *HashMap<Type> = HashMap::new();
         let owned: *HashMap<bool> = HashMap::new();
         let bw: *Vector<BorrowEvent> = Vector::new();
         let dg: *Vector<DiagEntry> = Vector::new();
         t.fns = fns;
         t.structs = structs;
         t.scope = scope;
+        t.module_scope = mscope;
         t.owned_locals = owned;
         t.borrows = bw;
         t.diagnostics = dg;
@@ -130,6 +149,7 @@ impl Typer {
         self.fns.free();
         self.structs.free();
         self.scope.free();
+        self.module_scope.free();
         self.owned_locals.free();
         self.borrows.free();
         self.diagnostics.free();
@@ -166,6 +186,19 @@ impl Typer {
 pub fn pre_register(t: *Typer, program: *Vector<Stmt>) {
     for let i: int = 0; i < program.len(); i++ {
         let s: Stmt = program.get(i);
+        if s.kind == ST_CONST {
+            // Top-level const: type from annotation if any, otherwise infer
+            // from the literal value (covers `const X: int = 1;` and friends).
+            let mut ty: *Type = s.let_ty;
+            if ty == null && s.let_value != null {
+                if s.let_value.kind == EX_INT { ty = ty_named("int"); }
+                else if s.let_value.kind == EX_FLOAT { ty = ty_named("float"); }
+                else if s.let_value.kind == EX_STRING { ty = ty_named("string"); }
+                else if s.let_value.kind == EX_BOOL { ty = ty_named("bool"); }
+                else if s.let_value.kind == EX_CHAR { ty = ty_named("char"); }
+            }
+            if ty != null { t.module_scope.insert(s.name, *ty); }
+        }
         if s.kind == ST_FN {
             let sig: FnSig = FnSig {
                 name: s.name,
@@ -347,7 +380,7 @@ fn check_stmt(t: *Typer, s: *Stmt) {
     if s.kind == ST_IF {
         if s.cond != null {
             let ct: *Type = infer_expr(t, s.cond);
-            if !is_bool_type(ct) {
+            if ct != null && !is_bool_type(ct) {
                 t.err(s.line, s.column, "if condition must be bool");
             }
         }
@@ -372,7 +405,7 @@ fn check_stmt(t: *Typer, s: *Stmt) {
     if s.kind == ST_WHILE {
         if s.cond != null {
             let ct: *Type = infer_expr(t, s.cond);
-            if !is_bool_type(ct) {
+            if ct != null && !is_bool_type(ct) {
                 t.err(s.line, s.column, "while condition must be bool");
             }
         }
@@ -551,6 +584,14 @@ pub fn infer_expr(t: *Typer, e: *Expr) -> *Type {
     if e.kind == EX_IDENT {
         if t.scope.contains(e.str_val) {
             let ty: Type = t.scope.get(e.str_val);
+            let p: *Type = malloc(sizeof(Type)) as *Type;
+            *p = ty;
+            return p;
+        }
+        // Top-level consts (and other module-level bindings) live here so
+        // they remain visible inside fn bodies whose local scope is fresh.
+        if t.module_scope.contains(e.str_val) {
+            let ty: Type = t.module_scope.get(e.str_val);
             let p: *Type = malloc(sizeof(Type)) as *Type;
             *p = ty;
             return p;

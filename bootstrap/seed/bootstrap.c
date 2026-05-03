@@ -497,6 +497,7 @@ typedef struct  Typer  {
      HashMap__FnSig*   fns;
      HashMap__bool*   structs;
      HashMap__Type*   scope;
+     HashMap__Type*   module_scope;
      HashMap__bool*   owned_locals;
      Vector__BorrowEvent*   borrows;
      Type*   current_ret;
@@ -985,6 +986,7 @@ void   HashMap_free__Type (HashMap__Type*   self);
 void   Vector_free__BorrowEvent (Vector__BorrowEvent*   self);
 void   Vector_free__DiagEntry (Vector__DiagEntry*   self);
 void   Vector_push__DiagEntry (Vector__DiagEntry*   self, DiagEntry   x);
+void   HashMap_insert__Type (HashMap__Type*   self, const char*   k, Type   v);
 void   HashMap_insert__FnSig (HashMap__FnSig*   self, const char*   k, FnSig   v);
 void   HashMap_insert__bool (HashMap__bool*   self, const char*   k, bool   v);
 int   Vector_len__Field (Vector__Field*   self);
@@ -1002,7 +1004,6 @@ const char*   Vector_get__string (Vector__string*   self, int   i);
 bool   Vector_get__bool (Vector__bool*   self, int   i);
 int   Vector_len__Param (Vector__Param*   self);
 Param   Vector_get__Param (Vector__Param*   self, int   i);
-void   HashMap_insert__Type (HashMap__Type*   self, const char*   k, Type   v);
 bool   HashMap_contains__bool (HashMap__bool*   self, const char*   k);
 bool   HashMap_contains__Type (HashMap__Type*   self, const char*   k);
 Type   HashMap_get__Type (HashMap__Type*   self, const char*   k);
@@ -1046,19 +1047,19 @@ void   Vector_push__UseSite (Vector__UseSite*   self, UseSite   x);
 Vector__UseSite*   Vector_new__UseSite (void);
 int   Vector_len__UseSite (Vector__UseSite*   self);
 UseSite   Vector_get__UseSite (Vector__UseSite*   self, int   i);
+void   HashMap_resize__Type (HashMap__Type*   self, int   new_cap);
+int   HashMap_slot__Type (HashMap__Type*   self, const char*   k);
 void   HashMap_resize__FnSig (HashMap__FnSig*   self, int   new_cap);
 int   HashMap_slot__FnSig (HashMap__FnSig*   self, const char*   k);
 void   HashMap_resize__bool (HashMap__bool*   self, int   new_cap);
 int   HashMap_slot__bool (HashMap__bool*   self, const char*   k);
-void   HashMap_resize__Type (HashMap__Type*   self, int   new_cap);
-int   HashMap_slot__Type (HashMap__Type*   self, const char*   k);
 int   HashMap_slot__Stmt (HashMap__Stmt*   self, const char*   k);
 void   HashMap_resize__Stmt (HashMap__Stmt*   self, int   new_cap);
 int   HashMap_slot__LspDoc (HashMap__LspDoc*   self, const char*   k);
 void   HashMap_resize__LspDoc (HashMap__LspDoc*   self, int   new_cap);
+int   HashMap_hash_key__Type (HashMap__Type*   self, const char*   k);
 int   HashMap_hash_key__FnSig (HashMap__FnSig*   self, const char*   k);
 int   HashMap_hash_key__bool (HashMap__bool*   self, const char*   k);
-int   HashMap_hash_key__Type (HashMap__Type*   self, const char*   k);
 int   HashMap_hash_key__Stmt (HashMap__Stmt*   self, const char*   k);
 int   HashMap_hash_key__LspDoc (HashMap__LspDoc*   self, const char*   k);
 
@@ -3067,6 +3068,9 @@ bool   is_bool_type (Type*   t) {
 }
 
 bool   types_compat (Type*   want, Type*   got) {
+    if (((want  ==  NULL)  ||  (got  ==  NULL))) {
+        return true;
+    }
     if (type_eq(want, got)) {
         return true;
     }
@@ -3076,6 +3080,17 @@ bool   types_compat (Type*   want, Type*   got) {
     if ((is_float_type(want)  &&  is_float_type(got))) {
         return true;
     }
+    if ((((want-> kind )  ==  TY_POINTER)  &&  ((got-> kind )  ==  TY_POINTER))) {
+        if (((((want-> inner )  !=  NULL)  &&  (((want-> inner )-> kind )  ==  TY_NAMED))  &&  __glide_string_eq(((want-> inner )-> name ), "void"))) {
+            return true;
+        }
+        if (((((got-> inner )  !=  NULL)  &&  (((got-> inner )-> kind )  ==  TY_NAMED))  &&  __glide_string_eq(((got-> inner )-> name ), "void"))) {
+            return true;
+        }
+    }
+    if ((((((want-> kind )  ==  TY_POINTER)  ||  ((want-> kind )  ==  TY_BORROW))  ||  ((want-> kind )  ==  TY_BORROW_MUT))  &&  ((((got-> kind )  ==  TY_POINTER)  ||  ((got-> kind )  ==  TY_BORROW))  ||  ((got-> kind )  ==  TY_BORROW_MUT)))) {
+        return types_compat((want-> inner ), (got-> inner ));
+    }
     return false;
 }
 
@@ -3084,12 +3099,14 @@ Typer*   Typer_new (void) {
     HashMap__FnSig*   fns = HashMap_new__FnSig();
     HashMap__bool*   structs = HashMap_new__bool();
     HashMap__Type*   scope = HashMap_new__Type();
+    HashMap__Type*   mscope = HashMap_new__Type();
     HashMap__bool*   owned = HashMap_new__bool();
     Vector__BorrowEvent*   bw = Vector_new__BorrowEvent();
     Vector__DiagEntry*   dg = Vector_new__DiagEntry();
     ((t-> fns )  =  fns);
     ((t-> structs )  =  structs);
     ((t-> scope )  =  scope);
+    ((t-> module_scope )  =  mscope);
     ((t-> owned_locals )  =  owned);
     ((t-> borrows )  =  bw);
     ((t-> diagnostics )  =  dg);
@@ -3103,6 +3120,7 @@ void   Typer_free (Typer*   self) {
     HashMap_free__FnSig((self-> fns ));
     HashMap_free__bool((self-> structs ));
     HashMap_free__Type((self-> scope ));
+    HashMap_free__Type((self-> module_scope ));
     HashMap_free__bool((self-> owned_locals ));
     Vector_free__BorrowEvent((self-> borrows ));
     Vector_free__DiagEntry((self-> diagnostics ));
@@ -3131,6 +3149,33 @@ void   Typer_warn (Typer*   self, int   line, int   col, const char*   code, con
 void   pre_register (Typer*   t, Vector__Stmt*   program) {
     for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
         Stmt   s = Vector_get__Stmt(program, i);
+        if (((s. kind )  ==  ST_CONST)) {
+            Type*   ty = (s. let_ty );
+            if (((ty  ==  NULL)  &&  ((s. let_value )  !=  NULL))) {
+                if ((((s. let_value )-> kind )  ==  EX_INT)) {
+                    (ty  =  ty_named("int"));
+                } else {
+                    if ((((s. let_value )-> kind )  ==  EX_FLOAT)) {
+                        (ty  =  ty_named("float"));
+                    } else {
+                        if ((((s. let_value )-> kind )  ==  EX_STRING)) {
+                            (ty  =  ty_named("string"));
+                        } else {
+                            if ((((s. let_value )-> kind )  ==  EX_BOOL)) {
+                                (ty  =  ty_named("bool"));
+                            } else {
+                                if ((((s. let_value )-> kind )  ==  EX_CHAR)) {
+                                    (ty  =  ty_named("char"));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if ((ty  !=  NULL)) {
+                HashMap_insert__Type((t-> module_scope ), (s. name ), (*ty));
+            }
+        }
         if (((s. kind )  ==  ST_FN)) {
             FnSig   sig = (( FnSig ){. name  = (s. name ), . params  = (s. fn_params ), . ret_type  = (s. fn_ret_ty )});
             HashMap_insert__FnSig((t-> fns ), (s. name ), sig);
@@ -3300,7 +3345,7 @@ void   check_stmt (Typer*   t, Stmt*   s) {
     if (((s-> kind )  ==  ST_IF)) {
         if (((s-> cond )  !=  NULL)) {
             Type*   ct = infer_expr(t, (s-> cond ));
-            if ((!is_bool_type(ct))) {
+            if (((ct  !=  NULL)  &&  (!is_bool_type(ct)))) {
                 Typer_err(t, (s-> line ), (s-> column ), "if condition must be bool");
             }
         }
@@ -3325,7 +3370,7 @@ void   check_stmt (Typer*   t, Stmt*   s) {
     if (((s-> kind )  ==  ST_WHILE)) {
         if (((s-> cond )  !=  NULL)) {
             Type*   ct = infer_expr(t, (s-> cond ));
-            if ((!is_bool_type(ct))) {
+            if (((ct  !=  NULL)  &&  (!is_bool_type(ct)))) {
                 Typer_err(t, (s-> line ), (s-> column ), "while condition must be bool");
             }
         }
@@ -3483,6 +3528,12 @@ Type*   infer_expr (Typer*   t, Expr*   e) {
     if (((e-> kind )  ==  EX_IDENT)) {
         if (HashMap_contains__Type((t-> scope ), (e-> str_val ))) {
             Type   ty = HashMap_get__Type((t-> scope ), (e-> str_val ));
+            Type*   p = (( Type* )malloc(sizeof( Type )));
+            ((*p)  =  ty);
+            return p;
+        }
+        if (HashMap_contains__Type((t-> module_scope ), (e-> str_val ))) {
+            Type   ty = HashMap_get__Type((t-> module_scope ), (e-> str_val ));
             Type*   p = (( Type* )malloc(sizeof( Type )));
             ((*p)  =  ty);
             return p;
@@ -10259,8 +10310,22 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
         Typer*   t = Typer_new();
         check_program(t, stmts);
         run_extra_analyses(t, stmts);
+        int   user_errors = 0;
         for (int   i = 0; (i  <  Vector_len__DiagEntry((t-> diagnostics ))); i++) {
             DiagEntry   d = Vector_get__DiagEntry((t-> diagnostics ), i);
+            const char*   path = (d. origin );
+            if (__glide_string_eq(path, "")) {
+                (path  =  src_path);
+            }
+            bool   want_all = false;
+            for (int   k = 0; (k  <  argc); k++) {
+                if (__glide_string_eq(args_at(k), "--all")) {
+                    (want_all  =  true);
+                }
+            }
+            if (((!want_all)  &&  (!__glide_string_eq(path, src_path)))) {
+                continue;
+            }
             const char*   tag = "error";
             if (((d. severity )  ==  2)) {
                 (tag  =  "warning");
@@ -10271,14 +10336,17 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
             if (((d. severity )  ==  4)) {
                 (tag  =  "hint");
             }
-            printf("%s %s %d %s %d %s %s", src_path, ":", (d. line ), ":", (d. col ), ": ", tag);
+            printf("%s %s %d %s %d %s %s", path, ":", (d. line ), ":", (d. col ), ": ", tag);
             if ((!__glide_string_eq((d. code ), ""))) {
                 printf("%s %s %s", " [", (d. code ), "]");
             }
             printf("%s %s\n", ": ", (d. message ));
+            if (((d. severity )  ==  1)) {
+                (user_errors  =  (user_errors  +  1));
+            }
         }
-        if (((t-> error_count )  >  0)) {
-            printf("%d %s\n", (t-> error_count ), "error(s)");
+        if ((user_errors  >  0)) {
+            printf("%d %s\n", user_errors, "error(s)");
             Typer_free(t);
             return 1;
         }
@@ -10314,18 +10382,6 @@ int   HashMap_hash_key__Stmt (HashMap__Stmt*   self, const char*   k) {
     return h;
 }
 
-int   HashMap_hash_key__Type (HashMap__Type*   self, const char*   k) {
-    int   h = 0;
-    int   n = __glide_string_len(k);
-    for (int   i = 0; (i  <  n); i++) {
-        (h  =  ((h  *  31)  +  __glide_char_to_int(__glide_string_at(k, i))));
-    }
-    if ((h  <  0)) {
-        (h  =  (-h));
-    }
-    return h;
-}
-
 int   HashMap_hash_key__bool (HashMap__bool*   self, const char*   k) {
     int   h = 0;
     int   n = __glide_string_len(k);
@@ -10339,6 +10395,18 @@ int   HashMap_hash_key__bool (HashMap__bool*   self, const char*   k) {
 }
 
 int   HashMap_hash_key__FnSig (HashMap__FnSig*   self, const char*   k) {
+    int   h = 0;
+    int   n = __glide_string_len(k);
+    for (int   i = 0; (i  <  n); i++) {
+        (h  =  ((h  *  31)  +  __glide_char_to_int(__glide_string_at(k, i))));
+    }
+    if ((h  <  0)) {
+        (h  =  (-h));
+    }
+    return h;
+}
+
+int   HashMap_hash_key__Type (HashMap__Type*   self, const char*   k) {
     int   h = 0;
     int   n = __glide_string_len(k);
     for (int   i = 0; (i  <  n); i++) {
@@ -10430,46 +10498,6 @@ int   HashMap_slot__Stmt (HashMap__Stmt*   self, const char*   k) {
     return i;
 }
 
-int   HashMap_slot__Type (HashMap__Type*   self, const char*   k) {
-    if (((self-> cap )  ==  0)) {
-        return (-1);
-    }
-    int   mask = ((self-> cap )  -  1);
-    int   i = (HashMap_hash_key__Type(self, k)  &  mask);
-    while ((self-> occupied )[i]) {
-        if (__glide_string_eq((self-> keys )[i], k)) {
-            return i;
-        }
-        (i  =  ((i  +  1)  &  mask));
-    }
-    return i;
-}
-
-void   HashMap_resize__Type (HashMap__Type*   self, int   new_cap) {
-    const char**   old_keys = (self-> keys );
-    Type*   old_values = (self-> values );
-    bool*   old_occupied = (self-> occupied );
-    int   old_cap = (self-> cap );
-    ((self-> keys )  =  (( const char** )malloc((new_cap  *  sizeof( const char* )))));
-    ((self-> values )  =  (( Type* )malloc((new_cap  *  sizeof( Type )))));
-    ((self-> occupied )  =  (( bool* )malloc((new_cap  *  sizeof( bool )))));
-    ((self-> cap )  =  new_cap);
-    ((self-> len )  =  0);
-    for (int   i = 0; (i  <  new_cap); i++) {
-        ((self-> occupied )[i]  =  false);
-    }
-    for (int   i = 0; (i  <  old_cap); i++) {
-        if (old_occupied[i]) {
-            HashMap_insert__Type(self, old_keys[i], old_values[i]);
-        }
-    }
-    if ((old_cap  >  0)) {
-        free((( void* )old_keys));
-        free((( void* )old_values));
-        free((( void* )old_occupied));
-    }
-}
-
 int   HashMap_slot__bool (HashMap__bool*   self, const char*   k) {
     if (((self-> cap )  ==  0)) {
         return (-1);
@@ -10541,6 +10569,46 @@ void   HashMap_resize__FnSig (HashMap__FnSig*   self, int   new_cap) {
     for (int   i = 0; (i  <  old_cap); i++) {
         if (old_occupied[i]) {
             HashMap_insert__FnSig(self, old_keys[i], old_values[i]);
+        }
+    }
+    if ((old_cap  >  0)) {
+        free((( void* )old_keys));
+        free((( void* )old_values));
+        free((( void* )old_occupied));
+    }
+}
+
+int   HashMap_slot__Type (HashMap__Type*   self, const char*   k) {
+    if (((self-> cap )  ==  0)) {
+        return (-1);
+    }
+    int   mask = ((self-> cap )  -  1);
+    int   i = (HashMap_hash_key__Type(self, k)  &  mask);
+    while ((self-> occupied )[i]) {
+        if (__glide_string_eq((self-> keys )[i], k)) {
+            return i;
+        }
+        (i  =  ((i  +  1)  &  mask));
+    }
+    return i;
+}
+
+void   HashMap_resize__Type (HashMap__Type*   self, int   new_cap) {
+    const char**   old_keys = (self-> keys );
+    Type*   old_values = (self-> values );
+    bool*   old_occupied = (self-> occupied );
+    int   old_cap = (self-> cap );
+    ((self-> keys )  =  (( const char** )malloc((new_cap  *  sizeof( const char* )))));
+    ((self-> values )  =  (( Type* )malloc((new_cap  *  sizeof( Type )))));
+    ((self-> occupied )  =  (( bool* )malloc((new_cap  *  sizeof( bool )))));
+    ((self-> cap )  =  new_cap);
+    ((self-> len )  =  0);
+    for (int   i = 0; (i  <  new_cap); i++) {
+        ((self-> occupied )[i]  =  false);
+    }
+    for (int   i = 0; (i  <  old_cap); i++) {
+        if (old_occupied[i]) {
+            HashMap_insert__Type(self, old_keys[i], old_values[i]);
         }
     }
     if ((old_cap  >  0)) {
@@ -10896,23 +10964,6 @@ bool   HashMap_contains__bool (HashMap__bool*   self, const char*   k) {
     return ((self-> occupied )[i]  &&  __glide_string_eq((self-> keys )[i], k));
 }
 
-void   HashMap_insert__Type (HashMap__Type*   self, const char*   k, Type   v) {
-    if (((self-> cap )  ==  0)) {
-        HashMap_resize__Type(self, 8);
-    } else {
-        if ((((self-> len )  *  4)  >=  ((self-> cap )  *  3))) {
-            HashMap_resize__Type(self, ((self-> cap )  *  2));
-        }
-    }
-    int   i = HashMap_slot__Type(self, k);
-    if ((!(self-> occupied )[i])) {
-        ((self-> occupied )[i]  =  true);
-        ((self-> len )  =  ((self-> len )  +  1));
-    }
-    ((self-> keys )[i]  =  k);
-    ((self-> values )[i]  =  v);
-}
-
 Param   Vector_get__Param (Vector__Param*   self, int   i) {
     return (self-> data )[i];
 }
@@ -11036,6 +11087,23 @@ void   HashMap_insert__FnSig (HashMap__FnSig*   self, const char*   k, FnSig   v
         }
     }
     int   i = HashMap_slot__FnSig(self, k);
+    if ((!(self-> occupied )[i])) {
+        ((self-> occupied )[i]  =  true);
+        ((self-> len )  =  ((self-> len )  +  1));
+    }
+    ((self-> keys )[i]  =  k);
+    ((self-> values )[i]  =  v);
+}
+
+void   HashMap_insert__Type (HashMap__Type*   self, const char*   k, Type   v) {
+    if (((self-> cap )  ==  0)) {
+        HashMap_resize__Type(self, 8);
+    } else {
+        if ((((self-> len )  *  4)  >=  ((self-> cap )  *  3))) {
+            HashMap_resize__Type(self, ((self-> cap )  *  2));
+        }
+    }
+    int   i = HashMap_slot__Type(self, k);
     if ((!(self-> occupied )[i])) {
         ((self-> occupied )[i]  =  true);
         ((self-> len )  =  ((self-> len )  +  1));
