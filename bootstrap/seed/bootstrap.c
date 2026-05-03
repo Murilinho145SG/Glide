@@ -766,6 +766,7 @@ const char*   type_to_string (Type*   t);
 bool   is_int_type (Type*   t);
 bool   is_float_type (Type*   t);
 bool   is_bool_type (Type*   t);
+bool   is_unknown_type (Type*   t);
 bool   types_compat (Type*   want, Type*   got);
 void   pre_register (Typer*   t, Vector__Stmt*   program);
 int   count_borrows (Typer*   t, const char*   name, bool   want_mut);
@@ -3180,8 +3181,18 @@ bool   is_bool_type (Type*   t) {
     return (((t-> kind )  ==  TY_NAMED)  &&  __glide_string_eq((t-> name ), "bool"));
 }
 
+bool   is_unknown_type (Type*   t) {
+    if ((t  ==  NULL)) {
+        return true;
+    }
+    return (((t-> kind )  ==  TY_NAMED)  &&  __glide_string_eq((t-> name ), "__unknown__"));
+}
+
 bool   types_compat (Type*   want, Type*   got) {
     if (((want  ==  NULL)  ||  (got  ==  NULL))) {
+        return true;
+    }
+    if ((is_unknown_type(want)  ||  is_unknown_type(got))) {
         return true;
     }
     if (type_eq(want, got)) {
@@ -3483,7 +3494,7 @@ void   check_stmt (Typer*   t, Stmt*   s) {
     if (((s-> kind )  ==  ST_IF)) {
         if (((s-> cond )  !=  NULL)) {
             Type*   ct = infer_expr(t, (s-> cond ));
-            if (((ct  !=  NULL)  &&  (!is_bool_type(ct)))) {
+            if ((((ct  !=  NULL)  &&  (!is_unknown_type(ct)))  &&  (!is_bool_type(ct)))) {
                 Typer_err(t, (s-> line ), (s-> column ), "if condition must be bool");
             }
         }
@@ -3508,7 +3519,7 @@ void   check_stmt (Typer*   t, Stmt*   s) {
     if (((s-> kind )  ==  ST_WHILE)) {
         if (((s-> cond )  !=  NULL)) {
             Type*   ct = infer_expr(t, (s-> cond ));
-            if (((ct  !=  NULL)  &&  (!is_bool_type(ct)))) {
+            if ((((ct  !=  NULL)  &&  (!is_unknown_type(ct)))  &&  (!is_bool_type(ct)))) {
                 Typer_err(t, (s-> line ), (s-> column ), "while condition must be bool");
             }
         }
@@ -3596,6 +3607,12 @@ void   check_let_or_const (Typer*   t, Stmt*   s) {
     }
     if ((final_ty  !=  NULL)) {
         HashMap_insert__Type((t-> scope ), (s-> name ), (*final_ty));
+        if (is_auto_owned) {
+            HashMap_insert__bool((t-> owned_locals ), (s-> name ), true);
+        }
+    } else {
+        Type*   placeholder = ty_named("__unknown__");
+        HashMap_insert__Type((t-> scope ), (s-> name ), (*placeholder));
         if (is_auto_owned) {
             HashMap_insert__bool((t-> owned_locals ), (s-> name ), true);
         }

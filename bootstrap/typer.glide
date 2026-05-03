@@ -58,11 +58,17 @@ fn is_bool_type(t: *Type) -> bool {
     return t.kind == TY_NAMED && t.name.eq("bool");
 }
 
+fn is_unknown_type(t: *Type) -> bool {
+    if t == null { return true; }
+    return t.kind == TY_NAMED && t.name.eq("__unknown__");
+}
+
 fn types_compat(want: *Type, got: *Type) -> bool {
     // If either side couldn't be inferred (the typer is permissive and many
     // expressions still return null), don't pretend it's a mismatch — that
     // would flood callers with cascading false-positive diagnostics.
     if want == null || got == null { return true; }
+    if is_unknown_type(want) || is_unknown_type(got) { return true; }
     if type_eq(want, got) { return true; }
     if is_int_type(want) && is_int_type(got) { return true; }
     if is_float_type(want) && is_float_type(got) { return true; }
@@ -410,7 +416,7 @@ fn check_stmt(t: *Typer, s: *Stmt) {
     if s.kind == ST_IF {
         if s.cond != null {
             let ct: *Type = infer_expr(t, s.cond);
-            if ct != null && !is_bool_type(ct) {
+            if ct != null && !is_unknown_type(ct) && !is_bool_type(ct) {
                 t.err(s.line, s.column, "if condition must be bool");
             }
         }
@@ -435,7 +441,7 @@ fn check_stmt(t: *Typer, s: *Stmt) {
     if s.kind == ST_WHILE {
         if s.cond != null {
             let ct: *Type = infer_expr(t, s.cond);
-            if ct != null && !is_bool_type(ct) {
+            if ct != null && !is_unknown_type(ct) && !is_bool_type(ct) {
                 t.err(s.line, s.column, "while condition must be bool");
             }
         }
@@ -538,6 +544,14 @@ fn check_let_or_const(t: *Typer, s: *Stmt) {
     }
     if final_ty != null {
         t.scope.insert(s.name, *final_ty);
+        if is_auto_owned { t.owned_locals.insert(s.name, true); }
+    } else {
+        // Couldn't infer (e.g. `let v = Vector::new()` — the typer's call
+        // resolver doesn't know stdlib generic ctors). Still register the
+        // name so subsequent references don't fail with `unknown name`. The
+        // placeholder is treated as compatible-with-anything in types_compat.
+        let placeholder: *Type = ty_named("__unknown__");
+        t.scope.insert(s.name, *placeholder);
         if is_auto_owned { t.owned_locals.insert(s.name, true); }
     }
 
