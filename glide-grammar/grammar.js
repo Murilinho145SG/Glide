@@ -267,6 +267,7 @@ module.exports = grammar({
       'let',
       optional('mut'),
       field('name', $.identifier),
+      optional(field('auto_drop', '*')),
       optional(seq(':', field('type', $._type))),
       optional(seq('=', field('value', $._expression))),
       ';',
@@ -336,7 +337,10 @@ module.exports = grammar({
       $.chan_type,
       $.slice_type,
       $.fn_ptr_type,
+      $.result_type,
     ),
+
+    result_type: $ => seq('!', $._type),
 
     named_type:      $ => prec.right(seq(
       $.identifier,
@@ -461,7 +465,7 @@ module.exports = grammar({
 
     postfix_expr: $ => prec(PREC.postfix, seq(
       $._postfix_chain,
-      field('op', choice('++', '--')),
+      field('op', choice('++', '--', '?')),
     )),
 
     _primary: $ => choice(

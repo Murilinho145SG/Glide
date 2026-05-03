@@ -1,314 +1,293 @@
 # Glide language reference
 
-Snapshot of what the language supports today.
+Targeted at someone who already knows another systems language (Rust, C, Go, Zig). For a learning-oriented walkthrough see `TUTORIAL.md`.
 
-## Types
+## lexical structure
 
-| Form | Example | Notes |
-| --- | --- | --- |
-| `int`     | `42`         | C `int` |
-| `float`   | `3.14`       | C `double` |
-| `bool`    | `true`       | C `bool` (`stdbool.h`) |
-| `char`    | `'a'`        | C `char` |
-| `string`  | `"hi"`       | C `const char*` |
-| `void`    |              | only as fn return / `*void` |
-| `*T`      | `*int`       | owned heap pointer |
-| `&T`      | `&int`       | shared (immutable) borrow |
-| `&mut T`  | `&mut int`   | exclusive mutable borrow |
-| `chan<T>` | `chan<int>`  | channel; created with `make_chan(N)` |
-| `fn(...) -> T` | `fn(int, int) -> int` | function pointer |
-| `<Struct>`| `Point`      | user-defined |
+### keywords
 
-`null` is the typed null pointer; assignable to any `*T`.
-
-### Memory model
-
-| Form | Allocates? | Auto-frees? | Can be moved/returned? |
-| --- | --- | --- | --- |
-| `T` (value) | stack | scope-local | yes (copy or move) |
-| `*T` from `T { ... }` | heap (auto) | yes (auto-drop) | **no** in v1 |
-| `*T` from `arena.alloc()` etc | allocator-managed | no | yes (raw) |
-| `&T` / `&mut T` | no | no (view) | only pass-through of param |
-
-The pattern `let p: *T = T { ... };` triggers heap allocation and auto-drop at scope end. Other `*T` (from arena, function returns, casts) are raw pointers without auto-drop.
-
-### Borrow rules (v1)
-
-- `&T` and `&mut T` exist only as parameters or local variables; **not allowed in struct fields**.
-- Cannot return a borrow of a local variable (escape rule).
-- Within a single call, cannot borrow the same variable as both `&` and `&mut`, or as `&mut` twice.
-- `*T` decays to `&T` or `&mut T` automatically at call sites.
-
-### Type aliases
-
-```glide
-type UserId int;
-type Callback fn(int);
-type Handler fn(*Request) -> *Response;
-pub type ServerHandler fn(*Request) -> *Response;
+```
+let const mut fn struct enum impl interface type extern pub move
+if else while for return break continue match defer spawn import
+true false null as
 ```
 
-### Closures and anonymous functions
+`chan` is a type constructor, not a keyword in expression position.
 
-```glide
-// Anonymous fn (no capture) decays to a fn pointer.
-let add = fn(x: int, y: int) -> int { return x + y; };
-let r: int = add(3, 4);
+### operators
 
-// Capture variables explicitly with `move`. The captured values are moved
-// into the closure (sources can no longer be used unless they were Copy).
-let bias: int = 10;
-let add_bias = move fn(x: int) -> int { return x + bias; };
-let r2: int = add_bias(5);
-
-// Closures with capture are local values. They cannot be passed as
-// `fn(...) -> ...` parameters in v1; they're called locally only.
+```
++  -  *  /  %               arithmetic
+== != <  <= >  >=           comparison
+&& || !                     logical
+&  |  ^  ~  << >>           bitwise
+=  += -= *= /=              assignment / compound
+&  &mut                     borrow / mutable borrow
+*                           dereference / pointer-type prefix / auto-drop suffix
+->                          fn return type
+=>                          match arm
+::                          path
+?                           result propagation (postfix)
 ```
 
-## Literals
+### literals
 
-```glide
-123                 // int
-0x1F  0b1010  0o17  // hex / bin / oct
-1_000_000           // underscores allowed
-3.14   1.5e10       // float
-"hello\n"           // string with escapes
-'a'                 // char
-true   false        // bool
-null                // null pointer
-
-[1, 2, 3]           // array literal -> *T (C compound literal)
-Point { x: 1, y: 2 }    // struct literal
-new Point { x: 1, y: 2 }   // heap struct -> *Point
+```
+42      0xFF    0b1010    1_000_000        integers
+3.14    2.5e10                              floats
+"text"  "esc\n"                             strings
+'a'     '\n'    '\xFF'                      chars
+true    false   null                        keywords
 ```
 
-String / char escapes: `\n \t \r \\ \" \' \0 \xNN`.
-
-## Declarations
+### comments
 
 ```glide
-let x: int = 5;                 // typed, immutable
-let mut y: int = 5;             // mutable
-let x = 5;                      // inferred from value
-let x: int;                     // uninitialized (type required)
-const PI: float = 3.14;
-
-fn name(a: int, b: int) -> int {
-    return a + b;
-}
-
-fn no_return(p: *int) {
-    *p = 0;
-}
-
-struct Point {
-    x: int,
-    y: int,
-}
-
-interface Greet {
-    fn hi(self: string) -> string;
-}
-
-impl Greet for string {
-    fn hi(self: string) -> string {
-        return "hello, ".concat(self);
-    }
-}
-
-import "std/color";
+// line
+/* block */
 ```
 
-## Statements
+The lexer currently discards comments; the formatter doesn't preserve them.
+
+## types
+
+| Type            | Meaning                                                   |
+| --------------- | --------------------------------------------------------- |
+| `int` `uint`    | platform `int` (typically 32-bit) and unsigned variant     |
+| `i8`–`i64`, `u8`–`u64` | fixed-width integers                                |
+| `usize` `isize` | pointer-sized integers                                    |
+| `f32` `f64` `float` | floating point                                       |
+| `bool` `char` `string` | primitives. `string` is `const char*`             |
+| `*T`            | pointer; non-owning unless declared with auto-drop         |
+| `&T`            | shared borrow (non-null, no lifetime annotation)           |
+| `&mut T`        | exclusive mutable borrow (non-null)                        |
+| `[]T`           | slice: `{ data: *T, len: usize }`                         |
+| `T<U, V>`       | generic instantiation                                      |
+| `fn(A, B) -> R` | function pointer                                           |
+| `!T`            | result: success carries `T`, error carries a `string`      |
+| `chan<T>`       | typed channel                                              |
+
+## statements
 
 ```glide
-expr;                           // expression statement
-{ ... }                         // block
+let name[: T] = expr;             // immutable
+let mut name[: T] = expr;         // mutable
+let name*[: T] = expr;            // owned + auto-drop at scope exit
 
-if cond { ... }
+const NAME[: T] = expr;           // file-scope or block-scope constant
+
+return [expr];
+
+expr;                             // expression statement (calls, assignments)
+
 if cond { ... } else { ... }
-if cond { ... } else if cond { ... } else { ... }
-
 while cond { ... }
+for init; cond; step { ... }
+{ ... }                           // block
+match scrutinee { Variant(b) => { ... } _ => { ... } }
 
-for let i: int = 0; i < n; i++ {
-    ...
-}
+defer expr;                       // run at fn end / before return (LIFO)
+spawn fn_call(args);              // run fn on a new thread
 
-break;
-continue;
-
-return;
-return value;
-
-spawn worker(arg1, arg2);
+import "path/to/file.glide";
 ```
 
-`if`/`while`/`for` conditions don't take parentheses; the body is always braced.
+`break` and `continue` work in `while` and `for` loops.
 
-## Expressions
-
-| Category | Operators |
-| --- | --- |
-| Arithmetic | `+ - * / %` |
-| Comparison | `== != < <= > >=` |
-| Logical    | `&& \|\| !` |
-| Bitwise    | `& \| ^ ~ << >>` |
-| Assignment | `= += -= *= /= %= &= \|= ^= <<= >>=` |
-| Postfix    | `++ --` |
-| Unary      | `- ! ~ * & &mut` |
-| Member     | `obj.field` (auto-deref on `*Struct`) |
-| Index      | `arr[i]` |
-| Call       | `f(args)` |
-| Cast       | `expr as Type` |
-| Sizeof     | `sizeof(Type)` |
-
-## Method calls (UFCS)
-
-`obj.method(args)` rewrites to a free function call. Lookup order:
-
-1. `__glide_<typemangle>_<method>(obj, args)` (compiler builtin / stdlib)
-2. `<typemangle>_<method>(obj, args)` (user-defined or `impl` method)
-3. Stripped pointer mangle: `<basename>_<method>(obj, args)`
-4. Plain `<method>(obj, args)` if first param type matches
-
-`Type::mangle()`:
-- `int`, `string`, ... → same name
-- `*Point` → `Point_ptr`
-- `chan<int>` → `chan_int`
-
-So `fn int_to_string(n: int) -> string` makes `1.to_string()` work. `fn Point_ptr_translate(p: *Point, ...)` makes `(&p).translate(...)` work.
-
-## Builtins (always available)
-
-```
-printf(fmt: string, ...) -> int
-scanf(fmt: string, ...) -> int
-puts(s: string) -> int
-malloc(size: int) -> *void
-calloc(n: int, size: int) -> *void
-free(p: *void)
-strlen(s: string) -> int
-strcmp(a: string, b: string) -> int
-```
-
-All variadic / unchecked at the boundary (matches libc).
-
-## Concurrency
+## declarations
 
 ```glide
-let c: chan<int> = make_chan(4);    // capacity 4 ring buffer
+[pub] fn name[<T1, T2>](p1: T1, p2: T2) -> R { ... }
+[pub] fn name(args) -> R;                                  // extern (no body)
 
-spawn worker(c);                    // pthread_create + detach
-
-send(c, 42);
-let v: int = recv(c);
-close(c);
-```
-
-Channels are bounded, blocking on full/empty, broadcast on close. Compiled with `-lpthread` automatically.
-
-`make_chan(N)` only valid as the initializer of a `let` / `const` with an explicit `chan<T>` annotation.
-
-## Primitive methods (stdlib)
-
-Available everywhere, no import needed:
-
-```
-int   .to_string()    -> string
-int   .to_float()     -> float
-int   .abs()          -> int
-
-float .to_string()    -> string
-float .to_int()        -> int
-float .floor()        -> float
-float .ceil()         -> float
-
-string.len()          -> int
-string.eq(b: string)  -> bool
-string.at(i: int)     -> char
-string.concat(b)      -> string
-
-bool  .to_string()    -> string
-
-char  .to_int()       -> int
-char  .is_digit()     -> bool
-char  .is_alpha()     -> bool
-```
-
-## Stdlib modules (in Glide)
-
-### `std/io`
-
-```
-print(s: string)
-println(s: string)
-
-int_ptr_to_string(arr: *int, n: int) -> string
-string_ptr_to_string(arr: *string, n: int) -> string
-float_ptr_to_string(arr: *float, n: int) -> string
-```
-
-UFCS exposes the array printers as `arr.to_string(n)`.
-
-### `std/color`
-
-```
-interface Color {
-    black / red / green / yellow / blue / magenta / cyan / white
-    bold / dim / underline
+[pub] struct Name[<T>] {
+    field1: Type1,
+    field2: Type2,
 }
-impl Color for string { ... }   // ANSI escapes
 
-wrap_ansi(code: string, s: string) -> string
+[pub] enum Name {
+    Variant1,
+    Variant2(int, string),
+}
+
+impl[<T>] Name[<T>] {
+    fn method(self: *Name<T>, arg: int) -> int { ... }
+}
+
+extern fn libc_function(args) -> ret;
+extern type OpaqueHandle;
+extern type Tm = "struct tm";          // alias an existing C type
+c_include "<stdio.h>";
+c_link "m";                            // link against -lm
 ```
 
-So `"hi".blue().bold()` produces a colored string.
+`pub` makes the symbol importable from other Glide files. Top-level visibility defaults to private.
 
-## Toolchain
+## memory model
 
+### stack values
+
+Plain primitives and `let p: T = T { ... }` (no `*`) live on the stack and are copied on assignment / return-by-value.
+
+### owned heap (`*T` with auto-drop)
+
+Two equivalent patterns:
+
+```glide
+let p: *Point = Point { x: 1, y: 2 };   // implicit: type annotation + struct lit
+let p* = Point { x: 1, y: 2 };          // explicit marker
+let v* = Vector::new();                  // works for any pointer-returning expr
 ```
-glide build <file> [-o name]    # compile to native exe (gcc)
-glide run <file>                # build to tempfile and run
-glide emit <file>                # print generated C
-glide fmt <file> [--write]      # pretty-print
-glide lsp                       # language server on stdio
+
+The compiler emits `free(p as *void)` (or `p.free()` if the type defines a `free` method) at the end of the enclosing block. Cleanup is scope-based: an auto-drop binding inside a `for` body fires once per iteration.
+
+### raw heap (`*T`)
+
+Pointers that aren't auto-drop are raw:
+
+```glide
+let p: *Point = some_call();    // up to you to free
+let q: *Point = new Point { x: 1, y: 2 };   // explicit `new`, raw
 ```
 
-Imports are resolved recursively from the file being compiled. The driver looks for `std/` in any ancestor of the source file, so `import "std/color";` works from anywhere in the project.
+You're responsible for matching `free(p as *void)` or letting them leak intentionally (e.g. the program owns them until exit).
 
-## Editor support
+### arenas
 
-Zed extension at `zed-extension/`:
-- syntax highlighting via tree-sitter (`glide-grammar/`)
-- LSP launcher
-- LSP features: diagnostics, hover, goto-definition, completion (with auto-import for stdlib methods), document formatting
+```glide
+let arena: *Arena = Arena::new(4096);
+defer arena.free();
 
-Format-on-save settings example:
+let p: *Point = arena.create(Point);            // sugar for arena.alloc(sizeof(Point)) as *Point
+let buf: *int = arena.create(int, 100);         // sugar for an array
+let raw: *void = arena.alloc(bytes);            // raw escape hatch
+```
 
-```json
-{
-  "languages": {
-    "Glide": {
-      "format_on_save": "on",
-      "formatter": "language_server"
-    }
-  }
+Use arenas when you have a bag of allocations sharing a lifetime (parser nodes, request-scoped data). Free is `O(1)` regardless of count.
+
+### borrows
+
+`&T` and `&mut T` are non-null views with function-scoped lifetimes. The borrow checker enforces:
+
+| Code                    | Description                                                    |
+| ----------------------- | -------------------------------------------------------------- |
+| `borrow-in-field`       | `&T` / `&mut T` can't appear in a struct field (use `*T`)      |
+| `borrow-alias-in-call`  | `f(&x, &mut x)` and `f(&mut x, &mut x)` are rejected           |
+| `dangling-return`       | `return &local` is rejected; pass-through of borrow params OK   |
+| `owned-escape`          | `return owned_p` is rejected (auto-drop would free it)         |
+| `owned-move`            | `let q = owned_p` is rejected (double-free risk)               |
+| `owned-into-ptr-param`  | `f(owned_p)` where `f` takes `*T` by value is rejected         |
+| `overlap-borrow`        | conflicting `&` / `&mut` in the same scope is rejected          |
+
+You never write lifetime annotations.
+
+## errors as values
+
+```glide
+fn parse(s: string) -> !int {
+    if s.eq("") { return err("empty"); }
+    return ok(42);
+}
+
+fn pipeline(s: string) -> !int {
+    let n: int = parse(s)?;     // propagate err if any
+    return ok(n + 1);
 }
 ```
 
-## What's not (yet) supported
+`?` only works inside a function whose return type is `!U` for some `U`. Result conversion happens at the propagation site: an `!T` with err `e` becomes `!U` with err `e`.
 
-For honesty:
+`unwrap(r)` returns the inner value or a zero-initialized fallback if `r` is err. Use it at boundaries where you've already checked the error.
 
-- No generics
-- No `[T; N]` fixed-array type syntax (use `*T` + length)
-- No length tracking on arrays (you pass `n` everywhere)
-- No `match`
-- No closures / function pointers / indirect calls
-- No `import` aliasing (`import "std/io" as io`)
-- No multi-file user modules outside `std/` (works but no namespacing)
-- No GC, no ownership/borrow rules: you call `malloc`/`free` yourself
-- `as` cast is unchecked
-- No macros
-- No string interpolation
+## concurrency
+
+```glide
+fn worker(c: chan<int>) {
+    send(c, 42);
+    close(c);
+}
+
+fn main() -> int {
+    let c: chan<int> = make_chan(4);     // buffered, capacity 4
+    spawn worker(c);
+
+    let v: int = recv(c);                // blocks until value or closed
+    close(c);                            // sender already closed; idempotent
+    return v;
+}
+```
+
+Channels are bounded, blocking, MPMC. `spawn` takes a direct function call and starts a new thread. Each spawned function runs to completion (no early termination from outside).
+
+`make_chan(cap)` requires `cap >= 1`. Sending on a closed channel is a no-op. Receiving from a closed empty channel returns a zero-initialized `T`.
+
+## generics
+
+Function and struct type parameters use angle brackets; instantiation is monomorphized.
+
+```glide
+struct Vec<T> { data: *T, len: int, cap: int }
+
+impl<T> Vec<T> {
+    fn new() -> *Vec<T> { ... }
+    fn push(self: *Vec<T>, x: T) { ... }
+}
+
+fn first<T>(v: *Vec<T>) -> T { return v.data[0]; }
+```
+
+Inference fires from:
+
+- An explicit return-type hint at the call site (`let v: *Vec<int> = Vec::new()`)
+- Argument types passed in (`first(v)` infers `T` from `v`)
+- Method calls on a not-yet-bound `let v = Generic::new()` — the first call that uses a type parameter resolves it
+
+There's no turbofish syntax; if inference fails you must annotate the let.
+
+## interfaces
+
+```glide
+interface Drawable {
+    fn draw(self: *T);
+}
+
+impl Drawable for Circle {
+    fn draw(self: *Circle) { ... }
+}
+
+fn render(items: *Drawable) { ... }    // dynamic dispatch
+```
+
+Used sparingly; most polymorphism in Glide goes through generics.
+
+## FFI
+
+```glide
+extern fn printf(fmt: string, ...) -> int;
+extern fn time(t: *long) -> long;
+extern type FILE;
+extern type Tm = "struct tm";
+c_include "<time.h>";
+c_link "m";
+
+fn now() -> long {
+    let t: *long = null;
+    return time(t);
+}
+```
+
+Variadic functions accept `...` as the last "parameter". `extern type Foo;` declares an opaque struct; `extern type Foo = "..."` aliases an existing C type. `c_include` injects an `#include` into the generated C; `c_link` adds `-l<name>` to the linker.
+
+## memory layout and ABI
+
+Glide compiles to C99 + pthread. Structs follow the C ABI: same layout as the equivalent C struct. Generic struct instantiations are mangled with their type arguments (e.g. `Vector<int>` becomes `Vector__int`). Function pointers fit in a `void*` slot and cast at call sites.
+
+## what's intentionally not in the language
+
+- **Lifetimes / generic over lifetimes** — borrows are function-scoped only
+- **Async / await** — `chan` + `spawn` cover concurrency; no executor
+- **Trait bounds on generics** — errors surface at monomorphization
+- **Macros beyond `println!` / `print!` / `format!`** — no user-defined macros
+- **Reflection** — none
+- **Garbage collection** — explicitly excluded
+- **Nullable type (`?T`)** — pointers are nullable; borrows are non-null. `?T` is on the roadmap.

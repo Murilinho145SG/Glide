@@ -1,47 +1,53 @@
 # Glide tutorial
 
-From zero to a real program. Each section's code runs as-is with `glide run <file>.glide`.
+Walks you from a fresh install through writing, building, and running Glide programs. Assumes you've installed Glide via the one-liner from the README.
 
-For the full list of features and what's missing, see `LANGUAGE.md`. For working on the compiler itself, see `DEVELOPING.md`.
+```bash
+glide --help
+```
 
----
+If that prints the usage, you're set.
 
-## 1. Hello world
+## hello world
+
+Save this as `hello.glide`:
 
 ```glide
 fn main() -> int {
-    printf("hello\n");
+    println!("hello, glide");
     return 0;
 }
 ```
 
-Every program needs `fn main`. Returns int (process exit code). `printf` is the libc one, format strings work the same.
+Run it:
 
----
-
-## 2. Variables
-
-```glide
-fn main() -> int {
-    let n: int = 42;
-    let pi: float = 3.14;
-    let name: string = "Glide";
-    let ok: bool = true;
-    let c: char = 'a';
-
-    let inferred = 100;          // type comes from the value (int)
-    const MAX: int = 1_000_000;  // const is immutable
-
-    printf("%d %f %s\n", n, pi, name);
-    return 0;
-}
+```bash
+glide run hello.glide
 ```
 
-`let` is mutable, `const` isn't. Underscores in numbers are visual only.
+`glide run` compiles to a temp executable, runs it, then deletes it. To keep the binary, use `glide build hello.glide -o hello`.
 
----
+## values and bindings
 
-## 3. Functions
+Glide has a small set of primitive types: `int`, `uint`, `i32`, `i64`, `u32`, `u64`, `usize`, `isize`, `f32`, `f64`, `float`, `bool`, `char`, `string`.
+
+```glide
+let x: int = 42;            // immutable
+let mut y: int = 0;         // mutable
+y = x + 1;
+let pi: float = 3.14;
+let ok: bool = true;
+let name: string = "glide";
+```
+
+Type annotations are optional when the compiler can infer:
+
+```glide
+let v = Vector::new();      // T inferred from later v.push(...)
+v.push(10);                 // T = int
+```
+
+## functions
 
 ```glide
 fn add(a: int, b: int) -> int {
@@ -49,82 +55,13 @@ fn add(a: int, b: int) -> int {
 }
 
 fn greet(name: string) {
-    printf("hello, %s\n", name);
-}
-
-fn main() -> int {
-    let s: int = add(3, 4);
-    printf("%d\n", s);
-    greet("world");
-    return 0;
+    println!("hello,", name);
 }
 ```
 
-`-> Type` for the return. Omit it when the function returns nothing.
+`fn` declarations stand alone or live inside `impl` blocks for methods.
 
----
-
-## 4. if / while / for
-
-```glide
-fn main() -> int {
-    let n: int = 7;
-
-    if n > 10 {
-        printf("big\n");
-    } else if n > 5 {
-        printf("medium\n");
-    } else {
-        printf("small\n");
-    }
-
-    let i: int = 0;
-    while i < 3 {
-        printf("while %d\n", i);
-        i++;
-    }
-
-    for let j: int = 0; j < 3; j++ {
-        printf("for %d\n", j);
-    }
-
-    return 0;
-}
-```
-
-No parentheses around conditions. Body is always braced.
-
----
-
-## 5. Pointers and memory
-
-Glide has no garbage collector. You allocate with `malloc` and free with `free`.
-
-```glide
-fn add_offset(p: *int) {
-    *p += 100;
-}
-
-fn main() -> int {
-    let x: int = 5;
-    add_offset(&x);
-    printf("%d\n", x);  // 105
-
-    let p: *int = malloc(sizeof(int)) as *int;
-    *p = 42;
-    printf("%d\n", *p);
-    free(p as *void);
-
-    return 0;
-}
-```
-
-`*T` is "pointer to T". `&x` takes the address. `*p` reads/writes through it.
-`sizeof` returns the size in bytes. `as` is a cast.
-
----
-
-## 6. Structs
+## structs and methods
 
 ```glide
 struct Point {
@@ -132,234 +69,131 @@ struct Point {
     y: int,
 }
 
-fn main() -> int {
-    let p: Point = Point { x: 3, y: 4 };
-    printf("(%d, %d)\n", p.x, p.y);
-
-    let h: *Point = new Point { x: 10, y: 20 };  // heap-allocated
-    printf("(%d, %d)\n", h.x, h.y);
-    free(h as *void);
-
-    return 0;
-}
-```
-
-`new T { ... }` is `malloc + struct init` in one expression. Returns `*T`.
-
-`.` is the only field access. It works on values and auto-derefs on pointers, so `h.x` works whether `h` is `Point` or `*Point`.
-
----
-
-## 7. Methods (UFCS and impl)
-
-Any free function whose first parameter is `T` can be called as a method on a `T`. Three styles:
-
-**Style 1 — free function with name convention:**
-
-```glide
-fn Point_distance(a: Point, b: Point) -> int {
-    let dx: int = a.x - b.x;
-    let dy: int = a.y - b.y;
-    return dx * dx + dy * dy;
-}
-
-let p: Point = Point { x: 0, y: 0 };
-let q: Point = Point { x: 3, y: 4 };
-printf("%d\n", p.distance(q));   // 25
-```
-
-**Style 2 — `impl Type` block:**
-
-```glide
 impl Point {
-    fn distance(self: Point, other: Point) -> int {
+    fn distance(self: *Point, other: *Point) -> int {
         let dx: int = self.x - other.x;
         let dy: int = self.y - other.y;
         return dx * dx + dy * dy;
     }
-
-    fn translate(self: *Point, dx: int, dy: int) {
-        self.x += dx;
-        self.y += dy;
-    }
-
-    // no self: associated function
-    fn origin() -> Point {
-        return Point { x: 0, y: 0 };
-    }
-}
-
-let p: Point = Point::origin();
-p.distance(Point::origin());
-```
-
-**Style 3 — interface + impl** (trait-like):
-
-```glide
-interface Show {
-    fn show(self: Point);
-}
-
-impl Show for Point {
-    fn show(self: Point) {
-        printf("(%d, %d)\n", self.x, self.y);
-    }
 }
 ```
 
-Built-in primitives already come with stdlib methods:
+Call a method as `p.distance(q)`. The compiler auto-borrows where needed.
+
+## memory
+
+Three categories of values you actually allocate:
+
+**stack** — value types, automatic:
 
 ```glide
-let s: string = 42.to_string();
-printf("len = %d\n", s.len());
-let upper: string = "hello".concat(" world");
+let p: Point = Point { x: 1, y: 2 };   // lives on the stack
 ```
 
-Chaining works: `c.is_alpha().to_string()`, `name.concat(" ok").len()`.
-
----
-
-## 8. Arrays
-
-`[1, 2, 3]` is an array literal. Type is `*T`. Glide doesn't track length, so you carry it yourself.
+**owned heap with auto-drop** — your binding owns it; freed at scope exit:
 
 ```glide
-import "std/io";
+fn process() {
+    let v* = Vector::new();    // malloc'd
+    v.push(10);
+    v.push(20);
+}                              // automatic v.free() here
+```
+
+The `*` after the binding name is the explicit "this is owned, clean up at scope end" marker. Works for any expression that returns a pointer.
+
+**arena** — group of allocations with a shared lifetime:
+
+```glide
+let arena: *Arena = Arena::new(4096);
+defer arena.free();
+
+let p: *Point = arena.create(Point);
+let q: *Point = arena.create(Point);
+// freed together when arena.free() runs
+```
+
+## borrows
+
+`&T` and `&mut T` are non-owning views. They can't be null and can't outlive the function.
+
+```glide
+fn touch(p: &Point) -> int {
+    return p.x + p.y;
+}
 
 fn main() -> int {
-    let nums: *int = [10, 20, 30, 40, 50];
-    println!(nums.to_string(5));   // [10, 20, 30, 40, 50]
-
-    let sum: int = 0;
-    for let i: int = 0; i < 5; i++ {
-        sum += nums[i];
-    }
-    println!(sum.to_string());     // 150
-
-    return 0;
+    let p: Point = Point { x: 3, y: 4 };
+    return touch(&p);
 }
 ```
 
----
+The compiler enforces:
 
-## 9. println! and print! macros
+- A value can have many `&T` viewers OR one `&mut T` viewer, not both
+- A borrow can't be passed back as a function return when its source was a local
+- Two arguments to the same call can't alias the same variable if any is `&mut`
 
-Take any number of args of any type. The compiler picks the right format spec for each.
+You never write lifetime annotations.
+
+## errors as values
+
+`!T` is a result type. `?` propagates errors. `ok` and `err` build them.
 
 ```glide
-let name: string = "Maria";
-let age: int = 30;
+fn parse_pos(n: int) -> !int {
+    if n < 0 { return err("negative"); }
+    return ok(n * 2);
+}
 
-println!(name, age, 3.14, true);          // Maria 30 3.14 true
-println!("age squared:", age * age);
+fn pipeline(n: int) -> !int {
+    let v: int = parse_pos(n)?;     // if err, return err from pipeline
+    return ok(v + 1);
+}
+
+fn main() -> int {
+    let r: !int = pipeline(5);
+    return unwrap(r);                // 11
+}
 ```
 
-`println!` adds `\n`. `print!` doesn't.
+## generics
 
----
-
-## 10. Concurrency
-
-Glide has typed channels (Go-style) and a `spawn` keyword that runs a function in a thread.
+Type parameters use angle brackets. Inference works from arguments and from later uses of the binding.
 
 ```glide
-fn worker(out: chan<int>) {
-    out.send(42);
-    out.close();
+fn first<T>(v: *Vector<T>) -> T {
+    return v.get(0);
+}
+
+let v = Vector::new();           // T deferred
+v.push(42);                      // T = int
+let n: int = first(v);           // 42
+```
+
+The stdlib ships `Vector<T>` and `HashMap<V>`.
+
+## concurrency
+
+`chan<T>` is a typed channel. `spawn` runs a function on a new thread.
+
+```glide
+fn worker(c: chan<int>) {
+    send(c, 42);
 }
 
 fn main() -> int {
     let c: chan<int> = make_chan(1);
     spawn worker(c);
-
-    let v: int = c.recv();
-    printf("got %d\n", v);
-
-    return 0;
+    return recv(c);
 }
 ```
 
-`make_chan(N)` makes a channel with capacity `N`. `send` / `recv` / `close` are the operations; can be called as methods (`c.send(x)`) or as free functions (`send(c, x)`). Channels block on full / empty. `close` wakes everyone.
+Shared-nothing by design. No locks, no async coloring.
 
-`make_chan` only works as the initializer of a `let` or `const` with an explicit `chan<T>` annotation.
+## next steps
 
----
-
-## 11. Imports and the stdlib
-
-The compiler looks for a `std/` directory in any ancestor of your source file. `import "std/<name>";` loads `std/<name>.glide`.
-
-You can also import your own files:
-
-```glide
-// helpers.glide
-fn double(n: int) -> int {
-    return n * 2;
-}
-```
-
-```glide
-// main.glide
-import "helpers";
-
-fn main() -> int {
-    printf("%d\n", double(21));
-    return 0;
-}
-```
-
-In the LSP, methods from any file under `std/` show up automatically and offer to auto-import on accept.
-
----
-
-## 12. Putting it together
-
-A small command-line program:
-
-```glide
-import "std/io";
-import "std/color";
-
-struct Task {
-    name: string,
-    done: bool,
-}
-
-fn print_task(t: *Task) {
-    let mark: string = "[ ]";
-    if t.done {
-        mark = "[x]".green();
-    }
-    println!(mark.concat(" ").concat(t.name));
-}
-
-fn main() -> int {
-    let a: Task = Task { name: "write tutorial", done: true  };
-    let b: Task = Task { name: "add generics",   done: false };
-    let c: Task = Task { name: "build a real project", done: false };
-
-    print_task(&a);
-    print_task(&b);
-    print_task(&c);
-
-    return 0;
-}
-```
-
-Save as `examples/todo.glide`, run with `glide run examples/todo.glide`.
-
----
-
-## What to study next
-
-Practical limits you'll hit, which point at what to add:
-
-- **Building strings is awkward** because there's no interpolation and `printf` is the only formatter. You end up with `concat` chains plus `to_string`. A `format!` in stdlib is the obvious next quick win.
-- **Arrays don't track length.** Wrapping `*T + len` in a struct gives you a real "list". Add `push`/`get`/`len` methods. Once that exists, real programs feel much better.
-- **No generics yet**, so that list above is per element type (`IntList`, `StringList`, ...). Generics is the biggest language feature still missing. Adding it is a real project.
-- **No Result/Option or pattern matching.** Today functions either return a value or crash. Pattern matching would help.
-- **No closures**, so you can't pass behavior as an argument. Indirect calls would unlock callbacks and higher-order functions.
-
-`LANGUAGE.md` has the full gap list. `DEVELOPING.md` shows how to add things to the compiler when you decide what to tackle.
-
-The best way to actually learn the language is to write something small in Glide that you'd otherwise write in another language. A simple `wc`, an in-memory KV store, a password generator. You'll discover exactly what hurts and what's pleasant, and your priorities will sort themselves out.
+- Read `LANGUAGE.md` for the full reference
+- Browse `examples/` for working programs covering each feature
+- Try `glide check foo.glide` to see the compiler's diagnostics
+- Wire up the LSP (`glide lsp`) in your editor for completion, hover, and goto

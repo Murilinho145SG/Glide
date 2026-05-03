@@ -1,31 +1,66 @@
-# Contributing Guide
+# Contributing to Glide
 
-Thank you for considering contributing to Glide! The goal of this project is to build a small, statically typed systems language with manual memory management and Go-style concurrency. Any help is welcome, whether it's fixing bugs, improving documentation, or proposing new features.
+Thanks for your interest. This document covers the practical bits.
 
-## How to Contribute
+## getting started
 
-### 1. Reporting Bugs
+1. Read `DEVELOPING.md` to set up the bootstrap loop.
+2. Pick something to work on:
+   - Open issues tagged `good first issue` are the easiest entry points.
+   - The roadmap items in `CHANGELOG.md` under "Known limitations" are all fair game.
+   - Find a bug? File an issue or a PR.
 
-If you find an error, please open an **Issue** on GitHub detailing:
--   What you were trying to do.
--   The code that caused the error.
--   The expected behavior vs. the actual behavior.
--   Information about your environment (OS, Rust version, etc.).
+## code style
 
-### 2. Proposing Changes (Pull Requests)
+The compiler is written in Glide, so it eats its own dogfood. Use `glide fmt --write` on any file you touch:
 
-1.  **Fork** the repository.
-2.  Create a **Branch** for your feature or fix: `git checkout -b my-new-feature`.
-3.  Make your changes and commit: `git commit -m 'Add new feature X'`.
-4.  Push to your fork: `git push origin my-new-feature`.
-5.  Open a **Pull Request** to the `main` branch of this repository.
+```bash
+glide fmt bootstrap/parser.glide --write
+```
 
-### Code Guidelines
+Beyond what the formatter handles:
 
--   This project is written in **Rust**. Please follow standard language style conventions (`rustfmt`).
--   Write clean and readable code. Remember the focus is on being beginner-friendly, and this applies to the compiler code as well.
--   Add tests for new features whenever possible.
+- 4-space indent (the formatter enforces this)
+- No trailing whitespace, LF line endings
+- Names: `snake_case` for fns and locals, `PascalCase` for types and structs, `SCREAMING_SNAKE_CASE` for constants
+- Prefer explicit types on public functions; locals can lean on inference
+- Don't introduce abstractions for hypothetical future requirements
 
-### Code of Conduct
+If you change runtime helpers in `codegen.glide`, see the bootstrap-loop notes in `DEVELOPING.md` — you may need to patch `bootstrap/seed/bootstrap.c` and regenerate it.
 
-Please note that this project has a [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to respect these guidelines to maintain a healthy and inclusive environment.
+## commit messages
+
+Use [conventional commit prefixes](https://www.conventionalcommits.org/) — they show up in `git log` and feed the changelog:
+
+```
+feat(lsp): add hover for borrow types
+fix(typer): reject `&null` in let initializer
+chore: bump Zig to 0.14.2
+docs(tutorial): clarify auto-drop pattern
+refactor(codegen): pull mono dispatch into a helper
+release: 0.2.0
+```
+
+Body is optional; lead with the *why* when the change isn't obvious from the title.
+
+## pull requests
+
+- Branch off `main`. Keep commits clean (one logical change per commit when possible).
+- Run `glide check bootstrap/main.glide` to catch regressions in the compiler.
+- Run `./glide build bootstrap/main.glide -o glide_pr` and verify gen2 self-host works (`./glide_pr build bootstrap/main.glide -o glide_pr2`).
+- If you change source under `bootstrap/`, regenerate `bootstrap/seed/bootstrap.c` in the same PR (or note in the PR that the seed needs a follow-up).
+- Update `CHANGELOG.md` under the next release header.
+
+## reporting bugs
+
+Include:
+
+- The exact command and source that triggers the bug
+- Output of `glide --version` (when that lands; for now: `git rev-parse HEAD`)
+- Your platform (`uname -a` / `systeminfo` / `sw_vers`)
+
+Reduced repro is appreciated but not required for first reports.
+
+## license
+
+By contributing, you agree your work is licensed under the MIT License (`LICENSE`).

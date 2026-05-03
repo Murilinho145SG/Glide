@@ -1,126 +1,145 @@
-# Developing Glide
+# Developing the Glide compiler
 
-## Module map
+This document is for people working on the compiler itself. If you just want to use Glide, see `README.md`.
 
-| Path | What it does |
-| --- | --- |
-| `src/lexer/` | tokens, keywords, operators |
-| `src/parser/` | Pratt expression parser, statements |
-| `src/ast/` | AST types |
-| `src/typer/` | type checker, symbol index, UFCS lookup, stdlib registration |
-| `src/codegen/` | C transpiler, C runtime helpers (`STDLIB_C`) |
-| `src/fmt/` | pretty-printer |
-| `src/lsp.rs` | language server (hover, goto, completion, formatting, auto-import) |
-| `src/main.rs` | driver: `build` / `run` / `emit` / `fmt` / `lsp`, recursive import resolution |
-| `std/` | stdlib written in Glide |
-| `glide-grammar/` | tree-sitter grammar (regenerate `src/parser.c` after editing `grammar.js`) |
-| `zed-extension/` | Zed dev extension (LSP launcher + language config + queries) |
+## the bootstrap loop
 
-## Build / install / test
+The compiler is written in Glide. To break the chicken-and-egg, `bootstrap/seed/bootstrap.c` is an auto-emitted C version that any C compiler can build.
 
 ```bash
-cargo build
-cargo install --path . --force         # update PATH binary; close Zed first
-glide run examples/<file>.glide
-glide fmt examples/<file>.glide
-glide emit examples/<file>.glide       # print generated C
-glide lsp                              # start language server on stdio
+# 1. Build the seed binary (any cc — gcc, clang, MinGW, ...)
+cc bootstrap/seed/bootstrap.c -o glide_seed -O2 -lpthread -lm
+
+# 2. Fetch the bundled Zig toolchain (used as the C backend)
+bash tools/install_zig.sh
+
+# 3. Use the seed to build the real compiler
+./glide_seed build bootstrap/main.glide -o glide
+
+# 4. (optional) verify self-host
+./glide build bootstrap/main.glide -o glide_gen2
+./glide_gen2 build bootstrap/main.glide -o glide_gen3   # should match
 ```
 
-## Faster iteration
+Once `glide` works, you don't need `glide_seed` again unless you change a runtime helper that the seed itself uses (rare).
+
+## project structure
+
+```
+bootstrap/
+  main.glide        driver: arg parsing, build/run/emit/check/fmt/lsp
+  lexer.glide       byte stream -> tokens
+  parser.glide      tokens -> AST
+  ast.glide         Stmt / Expr / Type definitions
+  typer.glide       type + borrow checker (collects diagnostics)
+  codegen.glide     AST -> C source (also emits the runtime)
+  fmt.glide         AST -> canonical Glide source
+  lsp.glide         JSON-RPC server (uses everything above)
+  json.glide        minimal JSON parser + emitter for the LSP
+
+  seed/bootstrap.c  auto-emitted C version of the compiler
+
+stdlib/
+  vector.glide      Vector<T>
+  hashmap.glide     HashMap<V> with string keys
+
+tools/
+  install_zig.{sh,ps1}    download a Zig release into runtime/zig/
+  install.{sh,ps1}        install a Glide release archive
+  build_release.sh        package glide+stdlib+Zig into a tarball/zip
+  gen_icons.py            rasterize the logo SVG to PNGs
+
+zed-extension/             Zed editor support (LSP wiring + tree-sitter)
+vscode-extension/          VSCode extension (LSP wiring + tmLanguage)
+glide-grammar/             tree-sitter grammar (used by Zed)
+
+assets/                    logos and icons
+```
+
+## edit-build cycle
+
+When you change anything under `bootstrap/`:
 
 ```bash
-cargo install cargo-watch
-cargo watch -x "run --quiet -- run examples/array.glide"
+./glide build bootstrap/main.glide -o glide_new
+mv glide_new glide          # replace the running compiler
+./glide check some_test.glide
 ```
 
-Re-runs on every save.
+If the change touches `emit_stdlib_runtime` in `codegen.glide` AND your change requires the new helpers to be present in the seed-built binary, you also need to patch `bootstrap/seed/bootstrap.c` manually (add both the C function bodies and their corresponding `printf` lines that re-emit them on the next compile). This is the only chicken-and-egg case; other changes propagate naturally.
 
-For just type-checking without invoking gcc, run `cargo run --quiet -- emit <file>` and discard stdout.
-
-## Recipes
-
-### Add a keyword
-
-1. `src/lexer/keywords.rs`: add enum variant + entry in `to_lexeme` + entry in `from_str`.
-2. `src/parser/mod.rs`: handle it in the right spot (usually `parse_stmt_kind` or `parse_prefix`).
-3. `src/ast/mod.rs`: add the AST variant if the keyword introduces a new construct.
-4. `src/typer/mod.rs`: add a check arm; pre-register if it declares something.
-5. `src/codegen/mod.rs`: emit C for the new node.
-6. `src/fmt/mod.rs`: pretty-print the new node.
-7. `glide-grammar/grammar.js`: add the grammar rule.
-8. `zed-extension/languages/glide/highlights.scm` and `glide-grammar/queries/highlights.scm`: add to the keyword list.
-9. `cd glide-grammar && tree-sitter generate`.
-10. Commit, then bump `commit` SHA in `zed-extension/extension.toml`.
-
-### Add a Rust-side builtin (printf-like)
-
-`src/typer/mod.rs::register_builtins` — append an entry. If it maps to libc, codegen needs no changes.
-
-### Add a Rust-side stdlib helper for a primitive method
-
-1. `src/typer/mod.rs::stdlib_signatures` — append `(name, params, ret)`. The name controls UFCS dispatch: `int_foo` enables `n.foo()` on int.
-2. `src/codegen/mod.rs::STDLIB_C` — add the `__glide_<name>` C function definition.
-
-### Add a stdlib module in Glide
-
-1. Create `std/<name>.glide`.
-2. Import in user code with `import "std/<name>";`.
-3. To make a function callable as `obj.method(args)`, name it `<typemangle>_<method>`:
-   - `int.foo` → `fn int_foo(self: int, ...)`
-   - `string.foo` → `fn string_foo(self: string, ...)`
-   - `*Point.foo` → `fn Point_ptr_foo(self: *Point, ...)`
-   - `*int.foo` → `fn int_ptr_foo(self: *int, ...)`
-
-The LSP auto-discovers any `.glide` file under `std/` in any ancestor directory, so completion offers methods even before the user adds the import.
-
-### Add an interface and impl
-
-```glide
-interface Greet {
-    fn hi(self: string) -> string;
-}
-
-impl Greet for string {
-    fn hi(self: string) -> string {
-        return "hello, ".concat(self);
-    }
-}
-```
-
-The `impl` registers `string_hi` under the hood. UFCS makes `"world".hi()` resolve to it.
-
-### Regenerate the tree-sitter parser
+After a meaningful change, regenerate the seed so new contributors don't carry your patches:
 
 ```bash
-cd glide-grammar
-tree-sitter generate
-cd ..
-git add glide-grammar
-git commit -m "grammar: ..."
-git rev-parse HEAD                     # paste into zed-extension/extension.toml
-git add zed-extension/extension.toml
-git commit -m "chore(zed): re-pin grammar"
+./glide emit bootstrap/main.glide > bootstrap/seed/bootstrap.c
 ```
 
-In Zed: `zed: rebuild dev extension`.
+Verify the new seed compiles cleanly:
 
-## How the LSP loads context
+```bash
+cc bootstrap/seed/bootstrap.c -o /tmp/seed_check -O2 -lpthread -lm
+```
 
-On every keystroke (`did_change`):
+## testing
 
-1. Parse the current file.
-2. Walk ancestor directories looking for a `std/` folder.
-3. For every `.glide` file under that `std/`, parse and pre-register its top-level decls in the `Typer` (with `module = "std/foo"` and `file = path`).
-4. Follow the file's own `import` statements and pre-register those too.
-5. Type-check the current file with all those decls visible.
-6. If parsing fails, keep the previous good `SymbolIndex` so completion / hover still work mid-edit.
+There's no test runner yet. The verification flow is:
 
-This is what lets `"x".blue()` complete even when `import "std/color"` isn't yet typed; the auto-import edit is attached to the completion item and applied when the user accepts.
+```bash
+# Self-host (3 generations should produce identical compilers)
+./glide build bootstrap/main.glide -o gen2
+./gen2 build bootstrap/main.glide -o gen3
 
-## Common gotchas
+# Smoke test
+echo 'fn main() -> int { return 42; }' > /tmp/h.glide
+./glide run /tmp/h.glide                    # exit 42
 
-- `cargo install` fails with "permission denied" on Windows: Zed has `glide.exe` locked. Close Zed first.
-- Zed colors stale: regenerate grammar, re-pin SHA, `zed: rebuild dev extension`.
-- Method lookup misses: the function name has to match the mangled prefix exactly. `Point_ptr_translate` vs `Point_translate` matters; check `Type::mangle()` in `src/types/mod.rs`.
-- Format / parse round-trip should be idempotent. `cargo run -- fmt <file>` twice should produce the same output. Failures usually mean the formatter is missing a case for a new AST node.
+# LSP smoke test
+echo '{...}' | ./glide lsp                   # see ad-hoc Python tests
+```
+
+Adding proper tests is on the roadmap.
+
+## working on the LSP
+
+Run `glide lsp` and pipe LSP requests via stdin. The protocol uses `Content-Length: N\r\n\r\n<payload>` framing. Easiest to drive from a small Python script that builds the right JSON-RPC envelopes.
+
+For interactive testing, install the Zed or VSCode extension, point it at your in-development `glide` binary (PATH or `glide.path` setting), and check the server's `--trace` channel.
+
+## working on the formatter
+
+`bootstrap/fmt.glide` walks the AST and emits canonical text. The formatter can run on any `.glide` file:
+
+```bash
+./glide fmt bootstrap/codegen.glide          # to stdout
+./glide fmt foo.glide --write                # rewrite in place
+```
+
+Round-trip stability is the primary invariant: `format(format(X)) == format(X)`. Add a test by passing a representative file through twice and `diff`-ing.
+
+## releases
+
+```bash
+# Bump VERSION in tools/install*.sh, tools/build_release.sh, CHANGELOG.md, etc.
+# Tag the commit
+git tag v0.X.Y
+
+# Build for each target platform
+bash tools/build_release.sh                              # host
+bash tools/build_release.sh --target=x86_64-linux        # cross
+bash tools/build_release.sh --target=aarch64-macos       # cross
+
+# Push and publish
+git push origin main && git push origin v0.X.Y
+gh release create v0.X.Y dist/glide-*.{zip,tar.gz} \
+    tools/install.sh tools/install.ps1 \
+    --title "Glide v0.X.Y" --notes-file CHANGELOG.md
+```
+
+The install scripts default to GitHub's `releases/latest/download/` so users get the latest tag automatically.
+
+## known constraints
+
+- The bootstrap parser doesn't track end-position info per node, so the LSP and the formatter can only point at the start of a token.
+- The lexer drops comments. The formatter therefore drops them too. Adding a comment-aware lexer + formatter is the next iteration.
+- LSP analysis is single-file (no cross-file resolution beyond what the typer already does for `pub` symbols).
+- No `?T` nullable type yet — only `&T` borrows are non-null by typer enforcement. `*T` may be null at runtime.

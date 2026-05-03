@@ -1,9 +1,0 @@
-import std::color;
-
-fn main() -> int {
-    printf("%s\n", "blue".blue());
-    printf("%s\n", "red".red());
-    printf("%s\n", "green bold".green().bold());
-    printf("%s\n", "underlined dim".dim().underline());
-    return 0;
-}

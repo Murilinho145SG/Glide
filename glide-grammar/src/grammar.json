@@ -1316,6 +1316,22 @@
           "type": "CHOICE",
           "members": [
             {
+              "type": "FIELD",
+              "name": "auto_drop",
+              "content": {
+                "type": "STRING",
+                "value": "*"
+              }
+            },
+            {
+              "type": "BLANK"
+            }
+          ]
+        },
+        {
+          "type": "CHOICE",
+          "members": [
+            {
               "type": "SEQ",
               "members": [
                 {
@@ -1827,6 +1843,23 @@
         {
           "type": "SYMBOL",
           "name": "fn_ptr_type"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "result_type"
+        }
+      ]
+    },
+    "result_type": {
+      "type": "SEQ",
+      "members": [
+        {
+          "type": "STRING",
+          "value": "!"
+        },
+        {
+          "type": "SYMBOL",
+          "name": "_type"
         }
       ]
     },
@@ -3078,6 +3111,10 @@
                 {
                   "type": "STRING",
                   "value": "--"
+                },
+                {
+                  "type": "STRING",
+                  "value": "?"
                 }
               ]
             }
