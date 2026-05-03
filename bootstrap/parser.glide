@@ -17,6 +17,12 @@ pub struct Parser {
     error_count: int,
     no_struct_lit: bool,
     diags: *Vector<ParseDiag>,
+    // Position of the most recently consumed token (advanced past). Used to
+    // anchor "expected ';'" errors at the END of the previous token rather
+    // than the start of the next stmt — much friendlier IDE underlines.
+    prev_line: int,
+    prev_col: int,
+    prev_len: int,
 }
 
 impl Parser {
@@ -36,6 +42,9 @@ impl Parser {
 
     fn advance(self: *Parser) -> Token {
         let prev: Token = self.current;
+        self.prev_line = prev.line;
+        self.prev_col = prev.column;
+        self.prev_len = prev.lexeme.len();
         self.current = self.peek;
         self.peek = self.lex.next_token();
         return prev;
@@ -76,9 +85,31 @@ impl Parser {
         self.error_count = self.error_count + 1;
     }
 
+    // Same as `err` but anchors at the end of the most-recently-consumed
+    // token. Used for "expected ';'" so the underline lands at the end of
+    // the prior stmt instead of the start of the next one.
+    fn err_after_prev(self: *Parser, msg: string) {
+        let full: string = msg.concat(" near '").concat(self.current.lexeme).concat("'");
+        let mut line: int = self.prev_line;
+        let mut col: int = self.prev_col + self.prev_len;
+        if line == 0 { line = self.current.line; col = self.current.column; }
+        let d: ParseDiag = ParseDiag {
+            origin: "",
+            line: line,
+            col: col,
+            msg: full,
+        };
+        self.diags.push(d);
+        self.error_count = self.error_count + 1;
+    }
+
     fn expect_op(self: *Parser, lexeme: string) -> bool {
         if self.at_op(lexeme) { self.advance(); return true; }
-        self.err("expected '".concat(lexeme).concat("'"));
+        if lexeme.eq(";") {
+            self.err_after_prev("expected '".concat(lexeme).concat("'"));
+        } else {
+            self.err("expected '".concat(lexeme).concat("'"));
+        }
         return false;
     }
     fn expect_ident(self: *Parser) -> string {
