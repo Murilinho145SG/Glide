@@ -433,6 +433,7 @@ module.exports = grammar({
       $.index_expr,
       $.member_expr,
       $.postfix_expr,
+      $.method_macro_call,
     ),
 
     call_expr: $ => prec(PREC.postfix, seq(
@@ -472,6 +473,7 @@ module.exports = grammar({
       $.parenthesized,
       $.array_literal,
       $.macro_call,
+      $.path_macro_call,
       $.path_expr,
       $.struct_literal,
       $.new_expr,
@@ -501,6 +503,36 @@ module.exports = grammar({
     )),
 
     macro_call: $ => prec(20, seq(
+      field('name', $.identifier),
+      '!',
+      '(',
+      optional(seq(
+        $._expression,
+        repeat(seq(',', $._expression)),
+        optional(','),
+      )),
+      ')',
+    )),
+
+    // `recv.name!(args)` — type-attached macro called instance-style.
+    method_macro_call: $ => prec(PREC.postfix, seq(
+      field('object', $._postfix_chain),
+      '.',
+      field('name', $.identifier),
+      '!',
+      '(',
+      optional(seq(
+        $._expression,
+        repeat(seq(',', $._expression)),
+        optional(','),
+      )),
+      ')',
+    )),
+
+    // `Type::name!(args)` — type-attached macro called via path qualifier.
+    path_macro_call: $ => prec(20, seq(
+      field('type', $.identifier),
+      '::',
       field('name', $.identifier),
       '!',
       '(',
