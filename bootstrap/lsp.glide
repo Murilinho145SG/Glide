@@ -173,6 +173,7 @@ fn run_analysis_and_publish(uri: string, text: string) {
     // Run extra analysis passes.
     analysis_unused_vars(t, stmts);
     analysis_arena_not_freed(t, stmts);
+    analysis_large_return(t, stmts);
 
     // Build diagnostics array.
     let arr: *JsonValue = json_array();
@@ -387,6 +388,75 @@ fn expr_calls_method(e: *Expr, var: string, method: string) -> bool {
         }
     }
     return false;
+}
+
+// Estimate a type's size in bytes. Approximate (no alignment / padding) but
+// good enough to spot "I'm returning a 2KB struct by value" anti-patterns.
+fn type_size_bytes(t: *Type, structs: *HashMap<Stmt>) -> int {
+    if t == null { return 0; }
+    if t.kind == TY_POINTER || t.kind == TY_BORROW || t.kind == TY_BORROW_MUT { return 8; }
+    if t.kind == TY_FNPTR { return 8; }
+    if t.kind == TY_SLICE { return 16; }            // {data, len}
+    if t.kind == TY_RESULT {
+        return type_size_bytes(t.inner, structs) + 16;   // ok flag + val + err msg
+    }
+    if t.kind == TY_GENERIC { return 16; }          // best-effort guess for unmonomorphized
+    if t.kind == TY_NAMED {
+        let n: string = t.name;
+        if n.eq("char") || n.eq("bool") || n.eq("i8") || n.eq("u8") { return 1; }
+        if n.eq("i16") || n.eq("u16") { return 2; }
+        if n.eq("int") || n.eq("uint") || n.eq("i32") || n.eq("u32") || n.eq("f32") { return 4; }
+        if n.eq("long") || n.eq("ulong") || n.eq("i64") || n.eq("u64")
+           || n.eq("usize") || n.eq("isize") || n.eq("float") || n.eq("f64") { return 8; }
+        if n.eq("string") { return 8; }             // const char*
+        if n.eq("void") { return 0; }
+        if structs.contains(n) {
+            let sd: Stmt = structs.get(n);
+            let mut sz: int = 0;
+            if sd.struct_fields != null {
+                for let i: int = 0; i < sd.struct_fields.len(); i++ {
+                    let f: Field = sd.struct_fields.get(i);
+                    sz = sz + type_size_bytes(f.ty, structs);
+                }
+            }
+            return sz;
+        }
+    }
+    return 0;
+}
+
+// Hint: a function returns a large struct by value. The caller pays a copy on
+// every call (or the ABI inserts a hidden out-pointer transparently). For hot
+// paths, suggest taking an explicit `out: *T` parameter, or returning `*T` if
+// ownership transfer makes sense.
+fn analysis_large_return(t: *Typer, program: *Vector<Stmt>) {
+    let structs: *HashMap<Stmt> = HashMap::new();
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_STRUCT { structs.insert(s.name, s); }
+    }
+    let threshold: int = 64;
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind != ST_FN { continue; }
+        if s.fn_body == null { continue; }      // skip extern declarations
+        let ret: *Type = s.fn_ret_ty;
+        if ret == null { continue; }
+        // Already a pointer / borrow — nothing to recommend.
+        if ret.kind == TY_POINTER || ret.kind == TY_BORROW
+           || ret.kind == TY_BORROW_MUT || ret.kind == TY_FNPTR { continue; }
+        let sz: int = type_size_bytes(ret, structs);
+        if sz >= threshold {
+            t.push_diag(s.line, s.column, 3, "large-return",
+                "fn `".concat(s.name).concat("` returns ")
+                .concat(int_to_str(sz)).concat(" bytes by value (")
+                .concat(type_to_string(ret))
+                .concat("); for hot paths consider an out-param `out: *")
+                .concat(type_to_string(ret)).concat("` or returning `*")
+                .concat(type_to_string(ret)).concat("`"));
+        }
+    }
+    structs.free();
 }
 
 // ---- Main loop ---------------------------------------------------------

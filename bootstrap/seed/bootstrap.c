@@ -847,6 +847,8 @@ void   check_arena_in_body (Typer*   t, Vector__Stmt*   body);
 bool   arena_is_freed_in_body (const char*   name, Vector__Stmt*   body, int   start);
 bool   stmt_calls_method (Stmt*   s, const char*   var, const char*   method);
 bool   expr_calls_method (Expr*   e, const char*   var, const char*   method);
+int   type_size_bytes (Type*   t, HashMap__Stmt*   structs);
+void   analysis_large_return (Typer*   t, Vector__Stmt*   program);
 int   lsp_main (void);
 void   print_indent (int   n);
 void   print_type (Type*   t);
@@ -7520,6 +7522,7 @@ void   run_analysis_and_publish (const char*   uri, const char*   text) {
     check_program(t, stmts);
     analysis_unused_vars(t, stmts);
     analysis_arena_not_freed(t, stmts);
+    analysis_large_return(t, stmts);
     JsonValue*   arr = json_array();
     for (int   i = 0; (i  <  Vector_len__DiagEntry((t-> diagnostics ))); i++) {
         DiagEntry   d = Vector_get__DiagEntry((t-> diagnostics ), i);
@@ -7777,6 +7780,92 @@ bool   expr_calls_method (Expr*   e, const char*   var, const char*   method) {
         }
     }
     return false;
+}
+
+int   type_size_bytes (Type*   t, HashMap__Stmt*   structs) {
+    if ((t  ==  NULL)) {
+        return 0;
+    }
+    if (((((t-> kind )  ==  TY_POINTER)  ||  ((t-> kind )  ==  TY_BORROW))  ||  ((t-> kind )  ==  TY_BORROW_MUT))) {
+        return 8;
+    }
+    if (((t-> kind )  ==  TY_FNPTR)) {
+        return 8;
+    }
+    if (((t-> kind )  ==  TY_SLICE)) {
+        return 16;
+    }
+    if (((t-> kind )  ==  TY_RESULT)) {
+        return (type_size_bytes((t-> inner ), structs)  +  16);
+    }
+    if (((t-> kind )  ==  TY_GENERIC)) {
+        return 16;
+    }
+    if (((t-> kind )  ==  TY_NAMED)) {
+        const char*   n = (t-> name );
+        if ((((__glide_string_eq(n, "char")  ||  __glide_string_eq(n, "bool"))  ||  __glide_string_eq(n, "i8"))  ||  __glide_string_eq(n, "u8"))) {
+            return 1;
+        }
+        if ((__glide_string_eq(n, "i16")  ||  __glide_string_eq(n, "u16"))) {
+            return 2;
+        }
+        if (((((__glide_string_eq(n, "int")  ||  __glide_string_eq(n, "uint"))  ||  __glide_string_eq(n, "i32"))  ||  __glide_string_eq(n, "u32"))  ||  __glide_string_eq(n, "f32"))) {
+            return 4;
+        }
+        if ((((((((__glide_string_eq(n, "long")  ||  __glide_string_eq(n, "ulong"))  ||  __glide_string_eq(n, "i64"))  ||  __glide_string_eq(n, "u64"))  ||  __glide_string_eq(n, "usize"))  ||  __glide_string_eq(n, "isize"))  ||  __glide_string_eq(n, "float"))  ||  __glide_string_eq(n, "f64"))) {
+            return 8;
+        }
+        if (__glide_string_eq(n, "string")) {
+            return 8;
+        }
+        if (__glide_string_eq(n, "void")) {
+            return 0;
+        }
+        if (HashMap_contains__Stmt(structs, n)) {
+            Stmt   sd = HashMap_get__Stmt(structs, n);
+            int   sz = 0;
+            if (((sd. struct_fields )  !=  NULL)) {
+                for (int   i = 0; (i  <  Vector_len__Field((sd. struct_fields ))); i++) {
+                    Field   f = Vector_get__Field((sd. struct_fields ), i);
+                    (sz  =  (sz  +  type_size_bytes((f. ty ), structs)));
+                }
+            }
+            return sz;
+        }
+    }
+    return 0;
+}
+
+void   analysis_large_return (Typer*   t, Vector__Stmt*   program) {
+    HashMap__Stmt*   structs = HashMap_new__Stmt();
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if (((s. kind )  ==  ST_STRUCT)) {
+            HashMap_insert__Stmt(structs, (s. name ), s);
+        }
+    }
+    int   threshold = 64;
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if (((s. kind )  !=  ST_FN)) {
+            continue;
+        }
+        if (((s. fn_body )  ==  NULL)) {
+            continue;
+        }
+        Type*   ret = (s. fn_ret_ty );
+        if ((ret  ==  NULL)) {
+            continue;
+        }
+        if ((((((ret-> kind )  ==  TY_POINTER)  ||  ((ret-> kind )  ==  TY_BORROW))  ||  ((ret-> kind )  ==  TY_BORROW_MUT))  ||  ((ret-> kind )  ==  TY_FNPTR))) {
+            continue;
+        }
+        int   sz = type_size_bytes(ret, structs);
+        if ((sz  >=  threshold)) {
+            Typer_push_diag(t, (s. line ), (s. column ), 3, "large-return", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("fn `", (s. name )), "` returns "), int_to_str(sz)), " bytes by value ("), type_to_string(ret)), "); for hot paths consider an out-param `out: *"), type_to_string(ret)), "` or returning `*"), type_to_string(ret)), "`"));
+        }
+    }
+    HashMap_free__Stmt(structs);
 }
 
 int   lsp_main (void) {
