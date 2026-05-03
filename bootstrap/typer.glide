@@ -389,10 +389,13 @@ fn check_let_or_const(t: *Typer, s: *Stmt) {
         }
     }
 
-    // Detect auto-drop pattern: `let p: *T = T { ... };` (annot is `*T` and
-    // the RHS is a struct literal of `T`). The codegen rewrites this to
-    // malloc + auto-free; the typer marks the binding as owned-local.
+    // Detect auto-drop:
+    //   - explicit `let v* = expr` marker, OR
+    //   - `let p: *T = T { ... }` struct-lit pattern.
     let mut is_auto_owned: bool = false;
+    if s.kind == ST_LET && s.is_auto_owned {
+        is_auto_owned = true;
+    }
     if s.kind == ST_LET && final_ty != null && final_ty.kind == TY_POINTER
         && s.let_value != null && s.let_value.kind == EX_STRUCT_LIT
         && final_ty.inner != null && final_ty.inner.kind == TY_NAMED

@@ -1000,6 +1000,23 @@ fn prescan_stmt(g: *CG, s: *Stmt) {
         // Declare in scope so receiver-type lookup works.
         if s.let_ty != null { g.declare(s.name, s.let_ty); }
         if s.let_value != null { prescan_expr(g, s.let_value, s.let_ty); }
+        // Auto-drop with `let v*` on a generic type: queue the free-method
+        // mono so its forward decl is emitted before any user fn body.
+        if s.kind == ST_LET && s.is_auto_owned && s.let_ty != null {
+            let inner_ty: *Type = strip_ptr(s.let_ty);
+            if inner_ty != null && inner_ty.kind == TY_GENERIC {
+                let free_name: string = inner_ty.name.concat("_free");
+                if g.generic_fns.contains(free_name) {
+                    let mangled: string = mangle_generic(free_name, inner_ty.args);
+                    if !g.emitted_monos.contains(mangled) {
+                        g.emitted_monos.insert(mangled, true);
+                        let template: Stmt = g.generic_fns.get(free_name);
+                        let entry: FnMonoEntry = FnMonoEntry { name: template.name, args: inner_ty.args };
+                        g.fn_mono_queue.push(entry);
+                    }
+                }
+            }
+        }
         return;
     }
     if s.expr_value != null { prescan_expr(g, s.expr_value, null); }
@@ -1654,23 +1671,21 @@ pub fn emit_expr(g: *CG, e: *Expr) {
 pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
     if s == null { return; }
     if s.kind == ST_LET || s.kind == ST_CONST {
-        // Auto-drop pattern: `let p: *T = T { ... };` → push free(p) onto defer.
-        let mut auto_owned: bool = false;
+        // Auto-drop modes:
+        //   struct_lit_auto: `let p: *T = T { ... }` rewrites RHS to malloc+init.
+        //   explicit_auto: `let v* = expr` (explicit `*` after binding name).
+        // Both push a cleanup expression onto the defer stack: a method call
+        // `v.free()` if the type defines one, otherwise `free(v as *void)`.
+        let mut struct_lit_auto: bool = false;
         if s.kind == ST_LET && s.let_ty != null && s.let_ty.kind == TY_POINTER
            && s.let_value != null && s.let_value.kind == EX_STRUCT_LIT {
-            // Match annot inner name with struct lit name.
-            let inner_name: string = "";
             if s.let_ty.inner != null && s.let_ty.inner.kind == TY_NAMED {
                 if s.let_ty.inner.name.eq(s.let_value.str_val) {
-                    auto_owned = true;
+                    struct_lit_auto = true;
                 }
             }
-            if auto_owned {
-                // Rewrite `T { ... }` to malloc + assign.
-                // Emit: T* p = malloc(sizeof(T)); *p = (T){...};
-                // Then defer free(p).
-            }
         }
+        let auto_owned: bool = struct_lit_auto || s.is_auto_owned;
         // ---- pre-pass: detect generic fn call BEFORE we emit anything,
         //      since we may need to print a forward decl on its own line.
 
@@ -1742,7 +1757,7 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
         } else {
             print!("/* infer */ int ", s.name);
         }
-        if auto_owned {
+        if struct_lit_auto {
             // T* p = malloc(sizeof(T)); *p = (T){...};
             print!(" = (");
             print!(type_to_c(s.let_ty));
@@ -1756,26 +1771,51 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
             print!(" = ");
             emit_expr(g, s.let_value);
             println!(";");
-            // Push free(p) onto defer stack.
-            let free_call: *Expr = calloc(1, sizeof(Expr)) as *Expr;
-            free_call.kind = EX_CALL;
-            free_call.line = s.line;
-            free_call.column = s.column;
-            let callee: *Expr = expr_ident("free", s.line, s.column);
-            free_call.lhs = callee;
-            let args: *Vector<Expr> = Vector::new();
-            let cast_arg: *Expr = expr_cast(expr_ident(s.name, s.line, s.column),
-                                             ty_pointer(ty_named("void")));
-            args.push(*cast_arg);
-            free_call.args = args;
-            g.defer_stack.push(*free_call);
-            return;
+        } else {
+            if s.let_value != null {
+                print!(" = ");
+                emit_expr(g, s.let_value);
+            }
+            println!(";");
         }
-        if s.let_value != null {
-            print!(" = ");
-            emit_expr(g, s.let_value);
+        if auto_owned {
+            // Decide cleanup: prefer `v.free()` method if type defines one
+            // (e.g. Vector_free); otherwise libc `free(v as *void)`.
+            let inner_ty: *Type = strip_ptr(s.let_ty);
+            let mut method_name: string = "";
+            let mut has_method: bool = false;
+            if inner_ty != null && inner_ty.kind == TY_NAMED {
+                method_name = inner_ty.name.concat("_free");
+                if g.fns.contains(method_name) { has_method = true; }
+            }
+            if inner_ty != null && inner_ty.kind == TY_GENERIC {
+                method_name = inner_ty.name.concat("_free");
+                if g.generic_fns.contains(method_name) { has_method = true; }
+            }
+            if has_method {
+                // Push `v.free()` (member call) onto defer; emit_expr will
+                // dispatch through the existing method-on-receiver path,
+                // including mono for generic receivers.
+                let recv: *Expr = expr_ident(s.name, s.line, s.column);
+                let mem: *Expr = expr_member(recv, "free");
+                let no_args: *Vector<Expr> = Vector::new();
+                let call: *Expr = expr_call(mem, no_args);
+                g.defer_stack.push(*call);
+            } else {
+                let free_call: *Expr = calloc(1, sizeof(Expr)) as *Expr;
+                free_call.kind = EX_CALL;
+                free_call.line = s.line;
+                free_call.column = s.column;
+                let callee: *Expr = expr_ident("free", s.line, s.column);
+                free_call.lhs = callee;
+                let args: *Vector<Expr> = Vector::new();
+                let cast_arg: *Expr = expr_cast(expr_ident(s.name, s.line, s.column),
+                                                 ty_pointer(ty_named("void")));
+                args.push(*cast_arg);
+                free_call.args = args;
+                g.defer_stack.push(*free_call);
+            }
         }
-        println!(";");
         return;
     }
     if s.kind == ST_RETURN {

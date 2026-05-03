@@ -180,6 +180,7 @@ pub struct Stmt {
     let_ty: *Type,
     let_value: *Expr,
     is_mut: bool,
+    is_auto_owned: bool,    // explicit `let v* = ...` marker (auto-drop)
 
     // Return / Expr stmt / Defer
     expr_value: *Expr,

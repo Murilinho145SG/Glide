@@ -341,12 +341,17 @@ fn parse_let(p: *Parser) -> *Stmt {
     let mut is_mut: bool = false;
     if p.eat_kw("mut") { is_mut = true; }
     let name: string = p.expect_ident();
+    // Postfix `*` on the binding: explicit auto-drop ownership marker.
+    let mut is_auto_owned: bool = false;
+    if p.eat_op("*") { is_auto_owned = true; }
     let mut ty: *Type = null;
     if p.eat_op(":") { ty = parse_type(p); }
     let mut value: *Expr = null;
     if p.eat_op("=") { value = parse_expr(p, 0); }
     p.expect_op(";");
-    return stmt_let(name, ty, value, is_mut, line, col);
+    let s: *Stmt = stmt_let(name, ty, value, is_mut, line, col);
+    s.is_auto_owned = is_auto_owned;
+    return s;
 }
 
 fn parse_const(p: *Parser) -> *Stmt {
