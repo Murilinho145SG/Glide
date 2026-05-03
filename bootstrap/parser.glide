@@ -643,6 +643,13 @@ fn parse_for(p: *Parser) -> *Stmt {
     let col: int = p.current.column;
     p.advance(); // 'for'
 
+    // for-in form: `for IDENT in EXPR { body }`. Distinguishes from the
+    // C-style by checking that current is a bare identifier AND the next
+    // token is the `in` keyword.
+    if p.current.kind == TOK_IDENT && p.peek.kind == TOK_KEYWORD && p.peek.lexeme.eq("in") {
+        return parse_for_in(p, line, col);
+    }
+
     let saved: bool = p.no_struct_lit;
     p.no_struct_lit = true;
 
@@ -682,6 +689,92 @@ fn parse_for(p: *Parser) -> *Stmt {
     p.no_struct_lit = saved;
     let body: *Vector<Stmt> = parse_block(p);
     return stmt_for(init, cond, step, body, line, col);
+}
+
+// `for IDENT in EXPR { body }` — desugars at parse time so codegen / typer
+// keep seeing the existing C-style ST_FOR shape.
+//
+//   for i in lo..hi   { body }   ->   for let i: int = lo; i < hi;  i++ { body }
+//   for i in lo..=hi  { body }   ->   for let i: int = lo; i <= hi; i++ { body }
+//   for x in collect  { body }   ->   {
+//                                       let __it = collect;
+//                                       for let __i: int = 0;
+//                                           __i < __it.len();
+//                                           __i++
+//                                       {
+//                                           let x = __it.get(__i);
+//                                           body
+//                                       }
+//                                     }
+fn parse_for_in(p: *Parser, line: int, col: int) -> *Stmt {
+    let nline: int = p.current.line;
+    let ncol: int = p.current.column;
+    let nlen: int = p.current.lexeme.len();
+    let var_name: string = p.expect_ident();
+    p.advance(); // 'in' keyword
+
+    let saved: bool = p.no_struct_lit;
+    p.no_struct_lit = true;
+    let lo: *Expr = parse_expr(p, 0);
+    let mut hi: *Expr = null;
+    let mut inclusive: bool = false;
+    if p.at_op("..") || p.at_op("..=") {
+        if p.at_op("..=") { inclusive = true; }
+        p.advance();
+        hi = parse_expr(p, 0);
+    }
+    p.no_struct_lit = saved;
+    let body: *Vector<Stmt> = parse_block(p);
+
+    if hi != null {
+        // Range form. Build C-style for over an int counter.
+        let init: *Stmt = stmt_let(var_name, ty_named("int"), lo, true, line, col);
+        if init != null { init.name_line = nline; init.name_col = ncol; init.name_len = nlen; }
+        let mut cmp_op: int = OP_LT;
+        if inclusive { cmp_op = OP_LE; }
+        let cond: *Expr = expr_binary(cmp_op, expr_ident(var_name, line, col), hi);
+        let step: *Expr = expr_postinc(expr_ident(var_name, line, col));
+        return stmt_for(init, cond, step, body, line, col);
+    }
+
+    // Collection form. Wrap in a block so the iter-snapshot binding has its
+    // own scope. Works for any value with `.len()` and `.get(i)`.
+    let id: string = int_to_str(line * 1000 + col);
+    let it_name: string = "__glide_iter_".concat(id);
+    let idx_name: string = "__glide_idx_".concat(id);
+
+    let block_body: *Vector<Stmt> = Vector::new();
+    let bind_iter: *Stmt = stmt_let(it_name, null, lo, false, line, col);
+    block_body.push(*bind_iter);
+
+    // Inner: for let __idx: int = 0; __idx < __it.len(); __idx++ { ... }
+    let init: *Stmt = stmt_let(idx_name, ty_named("int"), expr_int(0, line, col), true, line, col);
+    let len_call: *Expr = expr_call(expr_member(expr_ident(it_name, line, col), "len"), Vector::new());
+    let cond: *Expr = expr_binary(OP_LT, expr_ident(idx_name, line, col), len_call);
+    let step: *Expr = expr_postinc(expr_ident(idx_name, line, col));
+
+    let get_args: *Vector<Expr> = Vector::new();
+    get_args.push(*expr_ident(idx_name, line, col));
+    let get_call: *Expr = expr_call(expr_member(expr_ident(it_name, line, col), "get"), get_args);
+    let bind_var: *Stmt = stmt_let(var_name, null, get_call, false, line, col);
+    if bind_var != null { bind_var.name_line = nline; bind_var.name_col = ncol; bind_var.name_len = nlen; }
+
+    let inner_body: *Vector<Stmt> = Vector::new();
+    inner_body.push(*bind_var);
+    for let i: int = 0; i < body.len(); i++ {
+        let s: Stmt = body.get(i);
+        inner_body.push(s);
+    }
+
+    let inner_for: *Stmt = stmt_for(init, cond, step, inner_body, line, col);
+    block_body.push(*inner_for);
+
+    let block: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+    block.kind = ST_BLOCK;
+    block.line = line;
+    block.column = col;
+    block.then_body = block_body;
+    return block;
 }
 
 // ---- types ---------------------------------------------------------------
