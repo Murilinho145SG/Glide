@@ -1,8 +1,8 @@
 use crate::ast::Program;
 use crate::parser::Parser;
 
-const VECTOR_SRC: &str = include_str!("vector.glide");
-const HASHMAP_SRC: &str = include_str!("hashmap.glide");
+const VECTOR_SRC: &str = include_str!("../../stdlib/vector.glide");
+const HASHMAP_SRC: &str = include_str!("../../stdlib/hashmap.glide");
 
 pub fn prelude() -> Program {
     let mut out = Vec::new();

@@ -165,8 +165,9 @@ fn main() -> int {
     let loaded: *HashMap<bool> = HashMap::new();
     let stmts: *Vector<Stmt> = Vector::new();
 
-    // Auto-prepend embedded stdlib (Vector<T> + HashMap<V>).
-    load_into(stmts, "bootstrap/stdlib.glide", loaded);
+    // Auto-prepend stdlib. Read from canonical `stdlib/` at repo root.
+    load_into(stmts, "stdlib/vector.glide", loaded);
+    load_into(stmts, "stdlib/hashmap.glide", loaded);
 
     // Load the user file (which may import others).
     load_into_str(stmts, src, path, loaded);
