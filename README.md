@@ -1,4 +1,6 @@
-# Glide
+<p align="center">
+  <img src="assets/glide-horizontal.svg" alt="Glide" width="320">
+</p>
 
 A small statically typed systems language. Pointers, no GC, Go-style channels.
 The compiler is written in Rust and transpiles to C.

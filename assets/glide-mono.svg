@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!--
+    GLIDE — Monochrome variant (use currentColor for theme adaptation)
+  -->
+  <path d="M 128 56
+           L 152 88
+           L 220 104
+           L 200 132
+           L 156 140
+           L 168 196
+           L 128 216
+           L 88 196
+           L 100 140
+           L 56 132
+           L 36 104
+           L 104 88
+           Z"
+        fill="currentColor"/>
+
+  <!-- Negative space pra listra e olhos -->
+  <path d="M 124 70
+           L 132 70
+           L 132 210
+           L 124 210
+           Z"
+        fill="white"
+        opacity="0.18"/>
+  <circle cx="116" cy="86" r="3.5" fill="white" opacity="0.6"/>
+  <circle cx="140" cy="86" r="3.5" fill="white" opacity="0.6"/>
+</svg>
