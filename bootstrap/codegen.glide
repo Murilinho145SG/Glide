@@ -581,7 +581,8 @@ pub struct CG {
     fns: *HashMap<Stmt>,
     emitted_monos: *HashMap<bool>,
     fn_mono_queue: *Vector<FnMonoEntry>,
-    defer_stack: *Vector<Expr>,
+    defer_stack: *Vector<Expr>,         // explicit `defer expr;` (fn-scoped)
+    auto_drop_stack: *Vector<Expr>,     // `let v*` cleanups (block-scoped)
     // Anonymous fn lifts (collected during codegen, emitted at end).
     anon_fns: *Vector<AnonFn>,
     anon_count: int,
@@ -607,6 +608,8 @@ impl CG {
         let q: *Vector<FnMonoEntry> = Vector::new();
         let ds: *Vector<Expr> = Vector::new();
         g.defer_stack = ds;
+        let ads: *Vector<Expr> = Vector::new();
+        g.auto_drop_stack = ads;
         let af: *Vector<AnonFn> = Vector::new();
         g.anon_fns = af;
         g.anon_count = 0;
@@ -628,13 +631,39 @@ impl CG {
         return g;
     }
 
+    // Flush all pending cleanups in reverse order. Called on return / fn end.
+    // Auto-drops fire first (innermost block first), then explicit defers
+    // (so e.g. `defer arena.free()` at fn-top fires after auto-drops that
+    // allocated inside it).
     fn emit_deferred_reverse(self: *CG, depth: int) {
-        let n: int = self.defer_stack.len();
-        for let i: int = n - 1; i >= 0; i = i - 1 {
+        let na: int = self.auto_drop_stack.len();
+        for let i: int = na - 1; i >= 0; i = i - 1 {
+            ind(depth);
+            let ex: Expr = self.auto_drop_stack.get(i);
+            emit_expr(self, &ex);
+            println!(";");
+        }
+        let nd: int = self.defer_stack.len();
+        for let i: int = nd - 1; i >= 0; i = i - 1 {
             ind(depth);
             let ex: Expr = self.defer_stack.get(i);
             emit_expr(self, &ex);
             println!(";");
+        }
+    }
+
+    // Block-exit cleanup: emit (in reverse) and pop only auto-drop entries
+    // pushed since `saved`. Explicit defers stay on their own stack.
+    fn emit_block_drops(self: *CG, saved: int, depth: int) {
+        let n: int = self.auto_drop_stack.len();
+        for let i: int = n - 1; i >= saved; i = i - 1 {
+            ind(depth);
+            let ex: Expr = self.auto_drop_stack.get(i);
+            emit_expr(self, &ex);
+            println!(";");
+        }
+        while self.auto_drop_stack.len() > saved {
+            let _ev: Expr = self.auto_drop_stack.pop();
         }
     }
 
@@ -1800,7 +1829,7 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
                 let mem: *Expr = expr_member(recv, "free");
                 let no_args: *Vector<Expr> = Vector::new();
                 let call: *Expr = expr_call(mem, no_args);
-                g.defer_stack.push(*call);
+                g.auto_drop_stack.push(*call);
             } else {
                 let free_call: *Expr = calloc(1, sizeof(Expr)) as *Expr;
                 free_call.kind = EX_CALL;
@@ -1813,7 +1842,7 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
                                                  ty_pointer(ty_named("void")));
                 args.push(*cast_arg);
                 free_call.args = args;
-                g.defer_stack.push(*free_call);
+                g.auto_drop_stack.push(*free_call);
             }
         }
         return;
@@ -1893,18 +1922,22 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
         emit_expr(g, s.cond);
         println!(") {");
         if s.then_body != null {
+            let saved: int = g.auto_drop_stack.len();
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
                 emit_stmt(g, &b, depth + 1);
             }
+            g.emit_block_drops(saved, depth + 1);
         }
         ind(depth);
         if s.else_body != null {
             println!("} else {");
+            let saved: int = g.auto_drop_stack.len();
             for let i: int = 0; i < s.else_body.len(); i++ {
                 let b: Stmt = s.else_body.get(i);
                 emit_stmt(g, &b, depth + 1);
             }
+            g.emit_block_drops(saved, depth + 1);
             ind(depth); println!("}");
         } else {
             println!("}");
@@ -1916,10 +1949,12 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
         emit_expr(g, s.cond);
         println!(") {");
         if s.then_body != null {
+            let saved: int = g.auto_drop_stack.len();
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
                 emit_stmt(g, &b, depth + 1);
             }
+            g.emit_block_drops(saved, depth + 1);
         }
         ind(depth); println!("}");
         return;
@@ -1947,10 +1982,12 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
         if s.for_step != null { emit_expr(g, s.for_step); }
         println!(") {");
         if s.then_body != null {
+            let saved: int = g.auto_drop_stack.len();
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
                 emit_stmt(g, &b, depth + 1);
             }
+            g.emit_block_drops(saved, depth + 1);
         }
         ind(depth); println!("}");
         return;
@@ -2017,10 +2054,12 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
     if s.kind == ST_BLOCK {
         ind(depth); println!("{");
         if s.then_body != null {
+            let saved: int = g.auto_drop_stack.len();
             for let i: int = 0; i < s.then_body.len(); i++ {
                 let b: Stmt = s.then_body.get(i);
                 emit_stmt(g, &b, depth + 1);
             }
+            g.emit_block_drops(saved, depth + 1);
         }
         ind(depth); println!("}");
         return;
@@ -2171,13 +2210,41 @@ fn populate_scope_from_stmt(g: *CG, s: *Stmt) {
     }
 }
 
-// Pre-pass: for each `let v = Generic::new()` (no annot) in the fn body,
-// find the first subsequent use of v that constrains the generic's type
-// params, and backfill s.let_ty so the rest of codegen mono'izes correctly.
+fn try_resolve_open_let(g: *CG, s: *Stmt, body: *Vector<Stmt>, start: int) -> *Type {
+    if s.let_ty != null { return null; }
+    if s.let_value == null || s.let_value.kind != EX_CALL { return null; }
+    let callee: *Expr = s.let_value.lhs;
+    if callee == null { return null; }
+    let mut gname: string = "";
+    if callee.kind == EX_IDENT { gname = callee.str_val; }
+    if callee.kind == EX_PATH { gname = callee.str_val.concat("_").concat(callee.field); }
+    if gname.len() == 0 { return null; }
+    if !g.generic_fns.contains(gname) { return null; }
+    let template: Stmt = g.generic_fns.get(gname);
+    if template.type_params == null || template.type_params.len() == 0 { return null; }
+    if template.fn_ret_ty == null { return null; }
+    let mut inner: *Type = template.fn_ret_ty;
+    while inner != null && inner.kind == TY_POINTER {
+        inner = inner.inner;
+    }
+    if inner == null || inner.kind != TY_GENERIC { return null; }
+    let gen_base: string = inner.name;
+    let n: int = body.len();
+    for let j: int = start + 1; j < n; j++ {
+        let s2: Stmt = body.get(j);
+        let r: *Type = try_constrain_from_stmt(g, &s2, s.name, gen_base, template.type_params);
+        if r != null { return r; }
+    }
+    return null;
+}
+
+// Pre-pass: for each `let v = Generic::new()` (no annot) anywhere in the fn,
+// resolve T from the first subsequent use of v in the same body and backfill
+// s.let_ty. Recurses into nested if/for/while bodies.
 fn infer_let_types(g: *CG, body: *Vector<Stmt>) {
     if body == null { return; }
-    // Pre-populate scope with all annotated lets (recursing into bodies) so
-    // identifier inference works inside nested blocks.
+    // Pre-populate scope with all annotated lets (recursing) so identifier
+    // inference works inside nested blocks.
     for let k: int = 0; k < body.len(); k++ {
         let sk: Stmt = body.get(k);
         populate_scope_from_stmt(g, &sk);
@@ -2185,39 +2252,17 @@ fn infer_let_types(g: *CG, body: *Vector<Stmt>) {
     let n: int = body.len();
     for let i: int = 0; i < n; i++ {
         let s: Stmt = body.get(i);
-        if s.kind != ST_LET { continue; }
-        if s.let_ty != null { continue; }
-        if s.let_value == null || s.let_value.kind != EX_CALL { continue; }
-        let callee: *Expr = s.let_value.lhs;
-        if callee == null { continue; }
-        let mut gname: string = "";
-        if callee.kind == EX_IDENT { gname = callee.str_val; }
-        if callee.kind == EX_PATH { gname = callee.str_val.concat("_").concat(callee.field); }
-        if gname.len() == 0 { continue; }
-        if !g.generic_fns.contains(gname) { continue; }
-        let template: Stmt = g.generic_fns.get(gname);
-        if template.type_params == null || template.type_params.len() == 0 { continue; }
-        if template.fn_ret_ty == null { continue; }
-        // Strip outer pointer(s) to get the generic base name.
-        let mut inner: *Type = template.fn_ret_ty;
-        while inner != null && inner.kind == TY_POINTER {
-            inner = inner.inner;
+        if s.kind == ST_LET {
+            let resolved: *Type = try_resolve_open_let(g, &s, body, i);
+            if resolved != null {
+                s.let_ty = resolved;
+                body.set(i, s);
+                g.declare(s.name, resolved);
+            }
         }
-        if inner == null || inner.kind != TY_GENERIC { continue; }
-        let gen_base: string = inner.name;
-        // Search later stmts.
-        let mut resolved: *Type = null;
-        for let j: int = i + 1; j < n; j++ {
-            let s2: Stmt = body.get(j);
-            resolved = try_constrain_from_stmt(g, &s2, s.name, gen_base, template.type_params);
-            if resolved != null { break; }
-        }
-        if resolved != null {
-            s.let_ty = resolved;
-            body.set(i, s);
-            // Declare this let now too, in case a later let references it.
-            g.declare(s.name, resolved);
-        }
+        // Recurse into nested bodies for lets buried inside loops / branches.
+        if s.then_body != null { infer_let_types(g, s.then_body); }
+        if s.else_body != null { infer_let_types(g, s.else_body); }
     }
 }
 
@@ -2266,10 +2311,13 @@ fn emit_fn(g: *CG, s: *Stmt) {
     g.scope.clear();
     let saved_ret: *Type = g.current_ret_ty;
     g.current_ret_ty = s.fn_ret_ty;
-    // Reset defer stack for this fn (we'll pop at return / fn end).
+    // Reset defer + auto-drop stacks for this fn.
     let saved_defer: *Vector<Expr> = g.defer_stack;
+    let saved_drop: *Vector<Expr> = g.auto_drop_stack;
     let new_defer: *Vector<Expr> = Vector::new();
+    let new_drop: *Vector<Expr> = Vector::new();
     g.defer_stack = new_defer;
+    g.auto_drop_stack = new_drop;
     if s.fn_params != null {
         for let i: int = 0; i < s.fn_params.len(); i++ {
             let p: Param = s.fn_params.get(i);
@@ -2285,6 +2333,7 @@ fn emit_fn(g: *CG, s: *Stmt) {
     // Flush any deferred exprs that didn't hit a return (e.g. fall-through fn end).
     g.emit_deferred_reverse(1);
     g.defer_stack = saved_defer;
+    g.auto_drop_stack = saved_drop;
     g.current_ret_ty = saved_ret;
     println!("}");
 }
@@ -2315,8 +2364,11 @@ fn emit_impl(g: *CG, s: *Stmt) {
         println!(") {");
         g.scope.clear();
         let saved_defer: *Vector<Expr> = g.defer_stack;
+        let saved_drop: *Vector<Expr> = g.auto_drop_stack;
         let nd: *Vector<Expr> = Vector::new();
+        let nadr: *Vector<Expr> = Vector::new();
         g.defer_stack = nd;
+        g.auto_drop_stack = nadr;
         if m.fn_params != null {
             for let j: int = 0; j < m.fn_params.len(); j++ {
                 let p: Param = m.fn_params.get(j);
@@ -2331,6 +2383,7 @@ fn emit_impl(g: *CG, s: *Stmt) {
         }
         g.emit_deferred_reverse(1);
         g.defer_stack = saved_defer;
+        g.auto_drop_stack = saved_drop;
         println!("}");
         println!("");
     }
@@ -2691,8 +2744,11 @@ pub fn emit_program(program: *Vector<Stmt>) {
         println!(") {");
         g.scope.clear();
         let saved_d: *Vector<Expr> = g.defer_stack;
+        let saved_dr: *Vector<Expr> = g.auto_drop_stack;
         let nd_q: *Vector<Expr> = Vector::new();
+        let nadr_q: *Vector<Expr> = Vector::new();
         g.defer_stack = nd_q;
+        g.auto_drop_stack = nadr_q;
         for let j: int = 0; j < new_params_v.len(); j++ {
             let p: Param = new_params_v.get(j);
             g.declare(p.name, p.ty);
@@ -2703,6 +2759,7 @@ pub fn emit_program(program: *Vector<Stmt>) {
         }
         g.emit_deferred_reverse(1);
         g.defer_stack = saved_d;
+        g.auto_drop_stack = saved_dr;
         println!("}");
         println!("");
     }
@@ -2724,8 +2781,11 @@ pub fn emit_program(program: *Vector<Stmt>) {
         println!(") {");
         g.scope.clear();
         let saved_d: *Vector<Expr> = g.defer_stack;
+        let saved_dr: *Vector<Expr> = g.auto_drop_stack;
         let nd: *Vector<Expr> = Vector::new();
+        let nadr: *Vector<Expr> = Vector::new();
         g.defer_stack = nd;
+        g.auto_drop_stack = nadr;
         if af.params != null {
             for let j: int = 0; j < af.params.len(); j++ {
                 let p: Param = af.params.get(j);
@@ -2740,6 +2800,7 @@ pub fn emit_program(program: *Vector<Stmt>) {
         }
         g.emit_deferred_reverse(1);
         g.defer_stack = saved_d;
+        g.auto_drop_stack = saved_dr;
         println!("}");
         println!("");
     }
