@@ -290,6 +290,20 @@ fn emit_chan_runtime(g: *CG) {
     g.uses_pthread = true;
     println!("#include <pthread.h>");
     println!("");
+    // For chan inners that are themselves generic monos (e.g. `Vector<int>`),
+    // emit the struct typedef + body up front so the chan struct's `T buf` /
+    // `sizeof(T)` references resolve.
+    for let i: int = 0; i < g.chan_types.len(); i++ {
+        let t: Type = g.chan_types.get(i);
+        if t.kind == TY_GENERIC && g.generic_structs.contains(t.name) {
+            let mangled: string = mangle_generic(t.name, t.args);
+            if !g.emitted_monos.contains(mangled) {
+                g.emitted_monos.insert(mangled, true);
+                println!("typedef struct ", mangled, " ", mangled, ";");
+                emit_struct_mono(g, &t);
+            }
+        }
+    }
     // Forward typedefs
     for let i: int = 0; i < g.chan_types.len(); i++ {
         let t: Type = g.chan_types.get(i);
@@ -2842,6 +2856,17 @@ pub fn emit_program(program: *Vector<Stmt>) {
     emit_stdlib_runtime();
 
     let g: *CG = CG::new();
+
+    // Register generic struct templates up front so that runtime emitters
+    // (chan, result) can synthesize struct monos for their inner types
+    // (e.g. `chan<Vector<int>>` needs the `Vector__int` body before the
+    // chan runtime references it).
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind == ST_STRUCT && s.type_params != null && s.type_params.len() > 0 {
+            g.generic_structs.insert(s.name, s);
+        }
+    }
 
     // ---- Concurrency pre-pass: collect chan inner types + emit pthread runtime
     for let i: int = 0; i < program.len(); i++ {

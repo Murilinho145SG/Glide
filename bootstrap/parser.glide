@@ -112,6 +112,27 @@ impl Parser {
         }
         return false;
     }
+
+    // True at either `>` or the start of a `>>` token. Handles the nested-
+    // generics case (`Vector<Foo<T>>`) where the lexer hands back `>>` as
+    // a single shift-right token.
+    fn at_close_angle(self: *Parser) -> bool {
+        if self.current.kind != TOK_OP { return false; }
+        return self.current.lexeme.eq(">") || self.current.lexeme.eq(">>");
+    }
+
+    // Consume a single closing `>`. If the current token is `>>`, splits it
+    // so the outer generic still sees the second `>`.
+    fn consume_close_angle(self: *Parser) -> bool {
+        if self.at_op(">") { self.advance(); return true; }
+        if self.at_op(">>") {
+            self.current.lexeme = ">";
+            self.current.column = self.current.column + 1;
+            return true;
+        }
+        self.err("expected '>'");
+        return false;
+    }
     fn expect_ident(self: *Parser) -> string {
         if self.current.kind == TOK_IDENT || self.current.kind == TOK_KEYWORD {
             let name: string = self.current.lexeme;
@@ -847,16 +868,17 @@ fn parse_type(p: *Parser) -> *Type {
     if p.current.kind == TOK_IDENT || p.current.kind == TOK_KEYWORD {
         let name: string = p.current.lexeme;
         p.advance();
-        // Generic instantiation: Foo<T1, T2>
+        // Generic instantiation: Foo<T1, T2>. Handles nested forms like
+        // `chan<Vector<int>>` by splitting a trailing `>>` token.
         if p.at_op("<") {
             p.advance();
             let args: *Vector<Type> = Vector::new();
-            while !p.at_op(">") && !p.at_eof() {
+            while !p.at_close_angle() && !p.at_eof() {
                 let inner: *Type = parse_type(p);
                 if inner != null { args.push(*inner); }
                 if !p.eat_op(",") { break; }
             }
-            p.expect_op(">");
+            p.consume_close_angle();
             return ty_generic(name, args);
         }
         return ty_named(name);
