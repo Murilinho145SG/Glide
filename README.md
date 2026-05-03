@@ -2,69 +2,96 @@
   <img src="assets/glide-horizontal.svg" alt="Glide" width="320">
 </p>
 
-A small statically typed systems language. Pointers, no GC, Go-style channels.
-The compiler is written in Rust and transpiles to C.
+**Glide gives you memory safety, real concurrency, and the speed of C, without lifetime annotations, callbacks, or a garbage collector.**
+
+A small systems language. Small enough to learn in an afternoon.
+
+## the problems Glide solves
+
+### "I want safety, but `'a, 'b, 'q: 'a` makes me cry."
+
+Borrows in Glide are function-scoped. The compiler catches dangling references, double-free, aliased mutation, and owned values trying to escape their scope. You never type a single lifetime parameter.
 
 ```glide
-struct Point {
-    x: int,
-    y: int,
+fn dangle() -> &int {
+    let x: int = 5;
+    return &x;          // rejected at compile time
 }
+```
 
-fn translate(p: *Point, dx: int, dy: int) {
-    p->x += dx;
-    p->y += dy;
-}
+### "I want heap allocation without `free()` everywhere."
 
+Declare a `*T` from a struct literal and Glide pairs the allocation with automatic cleanup at scope exit. When you have a pile of objects that all live and die together, reach for an arena.
+
+```glide
+fn process() {
+    let p: *Point = Point { x: 1, y: 2 };   // allocates
+    use(p);
+}                                            // freed automatically
+```
+
+```glide
+let arena: *Arena = Arena::new(4096);
+defer arena.free();
+let n1: *Node = arena.create(Node);
+let n2: *Node = arena.create(Node);
+// freed together when the arena drops
+```
+
+### "I want real concurrency, not callback soup."
+
+Channels and `spawn`. Shared-nothing by design. No `Arc<Mutex<...>>`, no async coloring, no executor to configure.
+
+```glide
 fn worker(c: chan<int>) {
     send(c, 42);
 }
 
 fn main() -> int {
-    let p: *Point = new Point { x: 3, y: 4 };
-    translate(p, 10, 20);
-    printf("(%d, %d)\n", p->x, p->y);
-    free(p);
-
     let c: chan<int> = make_chan(1);
     spawn worker(c);
-    printf("got %d\n", recv(c));
-    return 0;
+    return recv(c);
 }
 ```
 
-## Build
+### "I want errors as values, not exceptions or `Result<T, Box<dyn Error>>`."
 
-Requires Rust and a C compiler (`gcc` or `clang`) on `PATH`.
+`!T` is the result type. `?` propagates errors. That's the whole story.
+
+```glide
+fn parse(n: int) -> !int {
+    if n < 0 { return err("negative"); }
+    return ok(n * 2);
+}
+
+fn double(n: int) -> !int {
+    let v: int = parse(n)?;
+    return ok(v + 1);
+}
+```
+
+### "I want generics that aren't a PhD thesis."
+
+Monomorphized, inferred from arguments and return-type hints. No `::<T>` turbofish needed in the common case.
+
+```glide
+let v: *Vector<int> = Vector::new();
+v.push(10);
+v.push(20);
+
+let m: *HashMap<int> = HashMap::new();
+m.insert("answer", 42);
+```
+
+## get started
 
 ```bash
 cargo install --path .
+glide run hello.glide
 ```
 
-## Use
+Examples in `examples/`. Editor support in `zed-extension/`.
 
-```bash
-glide build hello.glide -o hello
-./hello
-
-glide run hello.glide          # build to a tempfile and run
-glide emit hello.glide         # print the generated C
-glide fmt hello.glide          # pretty-print to stdout
-glide fmt hello.glide --write  # rewrite the file in place
-glide lsp                      # start the LSP server on stdio
-```
-
-Programs that use `chan` / `spawn` get linked with `-lpthread` automatically.
-
-## Editor
-
-The `zed-extension/` directory has a Zed extension that wires the LSP and a
-Tree-sitter grammar. See `zed-extension/README.md`.
-
-## Examples
-
-`examples/*.glide` covers each language feature end-to-end.
-
-## License
+## license
 
 MIT.
