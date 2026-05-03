@@ -106,3 +106,10 @@
 ; operator/identifier captures above)
 (macro_call name: (identifier) @function.macro
             "!" @function.macro)
+
+(method_macro_call name: (identifier) @function.macro
+                   "!" @function.macro)
+
+(path_macro_call type: (identifier) @type
+                 name: (identifier) @function.macro
+                 "!" @function.macro)
