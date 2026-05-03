@@ -212,6 +212,22 @@ impl Typer {
         self.error_count = self.error_count + 1;
     }
 
+    fn err_code_range(self: *Typer, line: int, col: int, span: int, code: string, msg: string) {
+        let mut e_len: int = span;
+        if e_len < 1 { e_len = 1; }
+        let mut origin: string = self.current_origin;
+        if origin == null { origin = ""; }
+        let e: DiagEntry = DiagEntry {
+            line: line, col: col,
+            end_line: line, end_col: col + e_len,
+            severity: 1, code: code, message: msg,
+            origin: origin,
+            tag: 0,
+        };
+        self.diagnostics.push(e);
+        self.error_count = self.error_count + 1;
+    }
+
     fn warn(self: *Typer, line: int, col: int, code: string, msg: string) {
         self.push_diag(line, col, 2, code, msg);
     }
@@ -362,6 +378,37 @@ fn check_top(t: *Typer, s: *Stmt) {
     // unknown — ignore for now
 }
 
+fn is_self_call_expr(e: *Expr, name: string) -> bool {
+    if e == null { return false; }
+    if e.kind != EX_CALL { return false; }
+    if e.lhs == null { return false; }
+    if e.lhs.kind != EX_IDENT { return false; }
+    return e.lhs.str_val.eq(name);
+}
+
+// Walk the body's top-level statements in order. If we hit a branching or
+// return-like statement first, assume the user has a base case. If we hit a
+// self-call expression (statement OR let initializer) first, the recursion
+// is unconditional and every invocation overflows the stack.
+fn first_unconditional_self_call(body: *Vector<Stmt>, name: string) -> *Expr {
+    if body == null { return null; }
+    for let i: int = 0; i < body.len(); i++ {
+        let st: Stmt = body.get(i);
+        if st.kind == ST_IF || st.kind == ST_WHILE || st.kind == ST_FOR
+           || st.kind == ST_MATCH || st.kind == ST_RETURN
+           || st.kind == ST_BREAK || st.kind == ST_CONTINUE {
+            return null;
+        }
+        if st.kind == ST_EXPR && is_self_call_expr(st.expr_value, name) {
+            return st.expr_value;
+        }
+        if st.kind == ST_LET && is_self_call_expr(st.let_value, name) {
+            return st.let_value;
+        }
+    }
+    return null;
+}
+
 fn check_fn(t: *Typer, s: *Stmt) {
     let saved_scope: *HashMap<Type> = t.scope;
     let saved_owned: *HashMap<bool> = t.owned_locals;
@@ -388,6 +435,11 @@ fn check_fn(t: *Typer, s: *Stmt) {
         for let i: int = 0; i < s.fn_body.len(); i++ {
             let b: Stmt = s.fn_body.get(i);
             check_stmt(t, &b);
+        }
+        let rc: *Expr = first_unconditional_self_call(s.fn_body, s.name);
+        if rc != null {
+            t.err_code_range(rc.line, rc.column, s.name.len(), "infinite-recursion",
+                             "function `".concat(s.name).concat("` recurses unconditionally; every call overflows the stack"));
         }
     }
 
@@ -670,11 +722,20 @@ pub fn infer_expr(t: *Typer, e: *Expr) -> *Type {
         let inner: *Type = infer_expr(t, e.operand);
         if e.op_code == UN_NOT { return ty_named("bool"); }
         if e.op_code == UN_DEREF {
-            if inner != null && inner.kind == TY_POINTER { return inner.inner; }
+            if inner != null && (inner.kind == TY_POINTER
+                                 || inner.kind == TY_BORROW
+                                 || inner.kind == TY_BORROW_MUT) {
+                return inner.inner;
+            }
             return inner;
         }
         if e.op_code == UN_ADDR { return ty_pointer(inner); }
         if e.op_code == UN_ADDR_MUT { return ty_pointer(inner); }
+        if e.op_code == UN_TRY {
+            // `expr?` on `!T` propagates the err and yields T to the caller.
+            if inner != null && inner.kind == TY_RESULT { return inner.inner; }
+            return inner;
+        }
         return inner;
     }
 

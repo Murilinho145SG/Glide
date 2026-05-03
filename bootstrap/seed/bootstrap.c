@@ -105,6 +105,73 @@ static bool __glide_file_exists(const char* path) {
     FILE* f = fopen(path, "rb"); if (!f) return false; fclose(f); return true;
 }
 #ifdef _WIN32
+#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING
+#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004
+#endif
+__attribute__((constructor)) static void __glide_enable_vt(void) {
+    HANDLE hs[2] = { GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE) };
+    for (int i = 0; i < 2; i++) {
+        DWORD m = 0;
+        if (GetConsoleMode(hs[i], &m)) {
+            SetConsoleMode(hs[i], m | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+    }
+    SetConsoleOutputCP(65001);
+    SetConsoleCP(65001);
+}
+#endif
+#ifdef _WIN32
+static LONG WINAPI __glide_seh_handler(EXCEPTION_POINTERS* ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    const char* name = "unhandled exception";
+    const char* hint = "";
+    if (code == 0xC0000005) { name = "segmentation fault"; hint = "hint: dereferenced a null or invalid pointer"; }
+    else if (code == 0xC0000094) { name = "integer divide by zero"; hint = "hint: divisor reached zero before the division"; }
+    else if (code == 0xC00000FD) { name = "stack overflow"; hint = "hint: runtime recursion exceeded the stack limit"; }
+    else if (code == 0x80000003) { name = "trap (likely null deref or undefined behavior)"; hint = "hint: the optimizer turned a null/invalid op into __builtin_trap; rebuild with `-O0` for clearer location"; }
+    fflush(stdout);
+    fprintf(stderr, "\n\x1b[1;31mfatal\x1b[0m: %s (code 0x%lx)\n", name, (unsigned long)code);
+    if (hint[0]) fprintf(stderr, "  \x1b[1;36m=\x1b[0m %s\n", hint);
+    void* frames[32];
+    USHORT n = CaptureStackBackTrace(1, 32, frames, NULL);
+    fprintf(stderr, "stack trace (%u frames; pipe through addr2line for source lines):\n", n);
+    for (USHORT i = 0; i < n; i++) fprintf(stderr, "  #%-2u  %p\n", i, frames[i]);
+    fflush(stderr);
+    ExitProcess((UINT)code);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+__attribute__((constructor)) static void __glide_install_trap(void) {
+    if (getenv("GLIDE_NO_TRAP")) return;
+    // VEH runs before any SEH/CRT-installed filter, so our handler stays in charge.
+    AddVectoredExceptionHandler(1, __glide_seh_handler);
+    SetUnhandledExceptionFilter(__glide_seh_handler);
+}
+#else
+#include <signal.h>
+#include <execinfo.h>
+#include <unistd.h>
+static void __glide_sig_handler(int sig) {
+    const char* name = "unknown";
+    const char* hint = "";
+    if (sig == SIGSEGV) { name = "segmentation fault"; hint = "hint: dereferenced a null or invalid pointer"; }
+    else if (sig == SIGFPE) { name = "floating-point / arithmetic error"; hint = "hint: division by zero or invalid float operation"; }
+    else if (sig == SIGABRT) { name = "aborted"; hint = "hint: runtime panic (e.g. arena oom)"; }
+    fflush(stdout);
+    fprintf(stderr, "\n\x1b[1;31mfatal\x1b[0m: %s (signal %d)\n", name, sig);
+    if (hint[0]) fprintf(stderr, "  \x1b[1;36m=\x1b[0m %s\n", hint);
+    void* frames[32]; int n = backtrace(frames, 32);
+    fprintf(stderr, "stack trace (%d frames):\n", n);
+    backtrace_symbols_fd(frames, n, 2);
+    _exit(128 + sig);
+}
+__attribute__((constructor)) static void __glide_install_trap(void) {
+    if (getenv("GLIDE_NO_TRAP")) return;
+    signal(SIGSEGV, __glide_sig_handler);
+    signal(SIGABRT, __glide_sig_handler);
+    signal(SIGFPE,  __glide_sig_handler);
+}
+#endif
+#ifdef _WIN32
 #include <fcntl.h>
 static void __glide_set_binary_io(void) {
     _setmode(_fileno(stdin), _O_BINARY);
@@ -776,6 +843,8 @@ void   exit_borrow_scope (Typer*   t, int   saved);
 void   check_call_aliasing (Typer*   t, Expr*   call);
 void   check_program (Typer*   t, Vector__Stmt*   program);
 void   check_top (Typer*   t, Stmt*   s);
+bool   is_self_call_expr (Expr*   e, const char*   name);
+Expr*   first_unconditional_self_call (Vector__Stmt*   body, const char*   name);
 void   check_fn (Typer*   t, Stmt*   s);
 void   check_stmt (Typer*   t, Stmt*   s);
 void   check_let_or_const (Typer*   t, Stmt*   s);
@@ -806,6 +875,7 @@ const char*   fnptr_cast_str (Type*   t);
 const char*   mangle_generic (const char*   name, Vector__Type*   args);
 const char*   mangle_type (Type*   t);
 bool   try_mono_call (CG*   g, Expr*   call, Type*   ret_hint);
+Type*   callee_param_ty (CG*   g, Expr*   e, int   i);
 void   prescan_expr (CG*   g, Expr*   e, Type*   ret_hint);
 void   prescan_stmt (CG*   g, Stmt*   s);
 void   emit_mono_forward_decl (CG*   g, const char*   mangled, Stmt*   template, Vector__Type*   args);
@@ -908,11 +978,21 @@ void   run_extra_analyses (Typer*   t, Vector__Stmt*   stmts);
 const char*   type_to_string_pretty (Type*   t);
 const char*   fn_signature (Stmt*   s);
 Stmt*   find_top_decl (Vector__Stmt*   stmts, const char*   name);
+Stmt*   find_method_in_impl (Vector__Stmt*   stmts, const char*   type_name, const char*   method_name);
 const char*   word_at (const char*   text, int   line0, int   col0);
+Type*   lsp_infer_expr (Vector__Stmt*   stmts, Stmt*   host, Expr*   e);
+Stmt*   find_generic_impl (Vector__Stmt*   stmts, const char*   gen_name);
+bool   name_in_tparams (const char*   name, Vector__string*   tparams);
+Type*   try_constrain_call (Vector__Stmt*   stmts, Stmt*   host, Expr*   e, const char*   var, Vector__Stmt*   impl_methods, Vector__string*   tparams);
+Type*   walk_constraint_in_expr (Vector__Stmt*   stmts, Stmt*   host, Expr*   e, const char*   var, Vector__Stmt*   impl_methods, Vector__string*   tparams);
+Type*   walk_constraint_in_body (Vector__Stmt*   stmts, Stmt*   host, Vector__Stmt*   body, const char*   var, Vector__Stmt*   impl_methods, Vector__string*   tparams);
+Stmt*   find_local_let_in_body (Vector__Stmt*   body, const char*   name);
+const char*   render_hover_for_let (Vector__Stmt*   stmts, Stmt*   host, Stmt*   s);
 void   handle_hover (JsonValue*   req, LspState*   state);
 int   symbol_kind_for (Stmt*   s);
 JsonValue*   position_to_json (int   line1, int   col1);
 JsonValue*   range_for_decl_name (Stmt*   s);
+const char*   normalize_path (const char*   path);
 const char*   path_to_uri (const char*   path);
 void   handle_document_symbol (JsonValue*   req, LspState*   state);
 void   handle_definition (JsonValue*   req, LspState*   state);
@@ -926,7 +1006,7 @@ const char*   path_qualifier_before (const char*   text, int   line0, int   col0
 const char*   member_qualifier_before (const char*   text, int   line0, int   col0);
 const char*   lookup_local_type (Vector__Stmt*   stmts, int   line0, const char*   var);
 void   list_fields_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen);
-void   list_methods_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen);
+void   list_methods_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen, bool   want_self);
 void   handle_completion (JsonValue*   req, LspState*   state);
 void   collect_uses_in_expr (Expr*   e, const char*   name, Vector__UseSite*   out);
 void   collect_uses_in_stmt (Stmt*   s, const char*   name, Vector__UseSite*   out);
@@ -984,6 +1064,24 @@ const char*   __glide_getenv (const char*   name);
 int   __glide_is_windows (void);
 bool   __glide_file_exists (const char*   path);
 bool   write_file (const char*   path, const char*   content);
+bool   use_color (void);
+const char*   col_red (void);
+const char*   col_yellow (void);
+const char*   col_blue (void);
+const char*   col_bold (void);
+const char*   col_reset (void);
+const char*   nth_line (const char*   src, int   n);
+int   int_width (int   n);
+const char*   repeat_char (const char*   ch, int   n);
+const char*   help_for_code (const char*   code);
+bool   use_unicode (void);
+const char*   glyph_err (void);
+const char*   glyph_warn (void);
+const char*   glyph_info (void);
+const char*   glyph_help (void);
+const char*   glyph_pipe (void);
+const char*   glyph_under (void);
+void   print_pretty_diag (DiagEntry   d, const char*   src, const char*   src_path);
 void   print_usage (void);
 bool   parse_program_into (Vector__Stmt*   stmts, const char*   path);
 const char*   pick_cc (void);
@@ -1636,8 +1734,10 @@ Stmt*   stmt_return (Expr*   v, int   line, int   col) {
 Stmt*   stmt_expr (Expr*   e) {
     Stmt*   s = (( Stmt* )calloc(1, sizeof( Stmt )));
     ((s-> kind )  =  ST_EXPR);
-    ((s-> line )  =  (e-> line ));
-    ((s-> column )  =  (e-> column ));
+    if ((e  !=  NULL)) {
+        ((s-> line )  =  (e-> line ));
+        ((s-> column )  =  (e-> column ));
+    }
     ((s-> expr_value )  =  e);
     return s;
 }
@@ -3292,6 +3392,20 @@ void   Typer_err_code (Typer*   self, int   line, int   col, const char*   code,
     ((self-> error_count )  =  ((self-> error_count )  +  1));
 }
 
+void   Typer_err_code_range (Typer*   self, int   line, int   col, int   span, const char*   code, const char*   msg) {
+    int   e_len = span;
+    if ((e_len  <  1)) {
+        (e_len  =  1);
+    }
+    const char*   origin = (self-> current_origin );
+    if ((origin  ==  NULL)) {
+        (origin  =  "");
+    }
+    DiagEntry   e = (( DiagEntry ){. line  = line, . col  = col, . end_line  = line, . end_col  = (col  +  e_len), . severity  = 1, . code  = code, . message  = msg, . origin  = origin, . tag  = 0});
+    Vector_push__DiagEntry((self-> diagnostics ), e);
+    ((self-> error_count )  =  ((self-> error_count )  +  1));
+}
+
 void   Typer_warn (Typer*   self, int   line, int   col, const char*   code, const char*   msg) {
     Typer_push_diag(self, line, col, 2, code, msg);
 }
@@ -3442,6 +3556,41 @@ void   check_top (Typer*   t, Stmt*   s) {
     }
 }
 
+bool   is_self_call_expr (Expr*   e, const char*   name) {
+    if ((e  ==  NULL)) {
+        return false;
+    }
+    if (((e-> kind )  !=  EX_CALL)) {
+        return false;
+    }
+    if (((e-> lhs )  ==  NULL)) {
+        return false;
+    }
+    if ((((e-> lhs )-> kind )  !=  EX_IDENT)) {
+        return false;
+    }
+    return __glide_string_eq(((e-> lhs )-> str_val ), name);
+}
+
+Expr*   first_unconditional_self_call (Vector__Stmt*   body, const char*   name) {
+    if ((body  ==  NULL)) {
+        return NULL;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(body)); i++) {
+        Stmt   st = Vector_get__Stmt(body, i);
+        if (((((((((st. kind )  ==  ST_IF)  ||  ((st. kind )  ==  ST_WHILE))  ||  ((st. kind )  ==  ST_FOR))  ||  ((st. kind )  ==  ST_MATCH))  ||  ((st. kind )  ==  ST_RETURN))  ||  ((st. kind )  ==  ST_BREAK))  ||  ((st. kind )  ==  ST_CONTINUE))) {
+            return NULL;
+        }
+        if ((((st. kind )  ==  ST_EXPR)  &&  is_self_call_expr((st. expr_value ), name))) {
+            return (st. expr_value );
+        }
+        if ((((st. kind )  ==  ST_LET)  &&  is_self_call_expr((st. let_value ), name))) {
+            return (st. let_value );
+        }
+    }
+    return NULL;
+}
+
 void   check_fn (Typer*   t, Stmt*   s) {
     HashMap__Type*   saved_scope = (t-> scope );
     HashMap__bool*   saved_owned = (t-> owned_locals );
@@ -3466,6 +3615,10 @@ void   check_fn (Typer*   t, Stmt*   s) {
         for (int   i = 0; (i  <  Vector_len__Stmt((s-> fn_body ))); i++) {
             Stmt   b = Vector_get__Stmt((s-> fn_body ), i);
             check_stmt(t, (&b));
+        }
+        Expr*   rc = first_unconditional_self_call((s-> fn_body ), (s-> name ));
+        if ((rc  !=  NULL)) {
+            Typer_err_code_range(t, (rc-> line ), (rc-> column ), __glide_string_len((s-> name )), "infinite-recursion", __glide_string_concat(__glide_string_concat("function `", (s-> name )), "` recurses unconditionally; every call overflows the stack"));
         }
     }
     HashMap_free__Type((t-> scope ));
@@ -3721,7 +3874,7 @@ Type*   infer_expr (Typer*   t, Expr*   e) {
             return ty_named("bool");
         }
         if (((e-> op_code )  ==  UN_DEREF)) {
-            if (((inner  !=  NULL)  &&  ((inner-> kind )  ==  TY_POINTER))) {
+            if (((inner  !=  NULL)  &&  ((((inner-> kind )  ==  TY_POINTER)  ||  ((inner-> kind )  ==  TY_BORROW))  ||  ((inner-> kind )  ==  TY_BORROW_MUT)))) {
                 return (inner-> inner );
             }
             return inner;
@@ -3731,6 +3884,12 @@ Type*   infer_expr (Typer*   t, Expr*   e) {
         }
         if (((e-> op_code )  ==  UN_ADDR_MUT)) {
             return ty_pointer(inner);
+        }
+        if (((e-> op_code )  ==  UN_TRY)) {
+            if (((inner  !=  NULL)  &&  ((inner-> kind )  ==  TY_RESULT))) {
+                return (inner-> inner );
+            }
+            return inner;
         }
         return inner;
     }
@@ -4541,6 +4700,73 @@ void   emit_stdlib_runtime (void) {
     printf("%s\n", "    FILE* f = fopen(path, \"rb\"); if (!f) return false; fclose(f); return true;");
     printf("%s\n", "}");
     printf("%s\n", "#ifdef _WIN32");
+    printf("%s\n", "#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING");
+    printf("%s\n", "#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004");
+    printf("%s\n", "#endif");
+    printf("%s\n", "__attribute__((constructor)) static void __glide_enable_vt(void) {");
+    printf("%s\n", "    HANDLE hs[2] = { GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE) };");
+    printf("%s\n", "    for (int i = 0; i < 2; i++) {");
+    printf("%s\n", "        DWORD m = 0;");
+    printf("%s\n", "        if (GetConsoleMode(hs[i], &m)) {");
+    printf("%s\n", "            SetConsoleMode(hs[i], m | ENABLE_VIRTUAL_TERMINAL_PROCESSING);");
+    printf("%s\n", "        }");
+    printf("%s\n", "    }");
+    printf("%s\n", "    SetConsoleOutputCP(65001);");
+    printf("%s\n", "    SetConsoleCP(65001);");
+    printf("%s\n", "}");
+    printf("%s\n", "#endif");
+    printf("%s\n", "#ifdef _WIN32");
+    printf("%s\n", "static LONG WINAPI __glide_seh_handler(EXCEPTION_POINTERS* ep) {");
+    printf("%s\n", "    DWORD code = ep->ExceptionRecord->ExceptionCode;");
+    printf("%s\n", "    const char* name = \"unhandled exception\";");
+    printf("%s\n", "    const char* hint = \"\";");
+    printf("%s\n", "    if (code == 0xC0000005) { name = \"segmentation fault\"; hint = \"hint: dereferenced a null or invalid pointer\"; }");
+    printf("%s\n", "    else if (code == 0xC0000094) { name = \"integer divide by zero\"; hint = \"hint: divisor reached zero before the division\"; }");
+    printf("%s\n", "    else if (code == 0xC00000FD) { name = \"stack overflow\"; hint = \"hint: runtime recursion exceeded the stack limit\"; }");
+    printf("%s\n", "    else if (code == 0x80000003) { name = \"trap (likely null deref or undefined behavior)\"; hint = \"hint: the optimizer turned a null/invalid op into __builtin_trap; rebuild with `-O0` for clearer location\"; }");
+    printf("%s\n", "    fflush(stdout);");
+    printf("%s\n", "    fprintf(stderr, \"\\n\\x1b[1;31mfatal\\x1b[0m: %s (code 0x%lx)\\n\", name, (unsigned long)code);");
+    printf("%s\n", "    if (hint[0]) fprintf(stderr, \"  \\x1b[1;36m=\\x1b[0m %s\\n\", hint);");
+    printf("%s\n", "    void* frames[32];");
+    printf("%s\n", "    USHORT n = CaptureStackBackTrace(1, 32, frames, NULL);");
+    printf("%s\n", "    fprintf(stderr, \"stack trace (%u frames; pipe through addr2line for source lines):\\n\", n);");
+    printf("%s\n", "    for (USHORT i = 0; i < n; i++) fprintf(stderr, \"  #%-2u  %p\\n\", i, frames[i]);");
+    printf("%s\n", "    fflush(stderr);");
+    printf("%s\n", "    ExitProcess((UINT)code);");
+    printf("%s\n", "    return EXCEPTION_CONTINUE_SEARCH;");
+    printf("%s\n", "}");
+    printf("%s\n", "__attribute__((constructor)) static void __glide_install_trap(void) {");
+    printf("%s\n", "    if (getenv(\"GLIDE_NO_TRAP\")) return;");
+    printf("%s\n", "    // VEH runs before any SEH/CRT-installed filter, so our handler stays in charge.");
+    printf("%s\n", "    AddVectoredExceptionHandler(1, __glide_seh_handler);");
+    printf("%s\n", "    SetUnhandledExceptionFilter(__glide_seh_handler);");
+    printf("%s\n", "}");
+    printf("%s\n", "#else");
+    printf("%s\n", "#include <signal.h>");
+    printf("%s\n", "#include <execinfo.h>");
+    printf("%s\n", "#include <unistd.h>");
+    printf("%s\n", "static void __glide_sig_handler(int sig) {");
+    printf("%s\n", "    const char* name = \"unknown\";");
+    printf("%s\n", "    const char* hint = \"\";");
+    printf("%s\n", "    if (sig == SIGSEGV) { name = \"segmentation fault\"; hint = \"hint: dereferenced a null or invalid pointer\"; }");
+    printf("%s\n", "    else if (sig == SIGFPE) { name = \"floating-point / arithmetic error\"; hint = \"hint: division by zero or invalid float operation\"; }");
+    printf("%s\n", "    else if (sig == SIGABRT) { name = \"aborted\"; hint = \"hint: runtime panic (e.g. arena oom)\"; }");
+    printf("%s\n", "    fflush(stdout);");
+    printf("%s\n", "    fprintf(stderr, \"\\n\\x1b[1;31mfatal\\x1b[0m: %s (signal %d)\\n\", name, sig);");
+    printf("%s\n", "    if (hint[0]) fprintf(stderr, \"  \\x1b[1;36m=\\x1b[0m %s\\n\", hint);");
+    printf("%s\n", "    void* frames[32]; int n = backtrace(frames, 32);");
+    printf("%s\n", "    fprintf(stderr, \"stack trace (%d frames):\\n\", n);");
+    printf("%s\n", "    backtrace_symbols_fd(frames, n, 2);");
+    printf("%s\n", "    _exit(128 + sig);");
+    printf("%s\n", "}");
+    printf("%s\n", "__attribute__((constructor)) static void __glide_install_trap(void) {");
+    printf("%s\n", "    if (getenv(\"GLIDE_NO_TRAP\")) return;");
+    printf("%s\n", "    signal(SIGSEGV, __glide_sig_handler);");
+    printf("%s\n", "    signal(SIGABRT, __glide_sig_handler);");
+    printf("%s\n", "    signal(SIGFPE,  __glide_sig_handler);");
+    printf("%s\n", "}");
+    printf("%s\n", "#endif");
+    printf("%s\n", "#ifdef _WIN32");
     printf("%s\n", "#include <fcntl.h>");
     printf("%s\n", "static void __glide_set_binary_io(void) {");
     printf("%s\n", "    _setmode(_fileno(stdin), _O_BINARY);");
@@ -5131,6 +5357,42 @@ bool   try_mono_call (CG*   g, Expr*   call, Type*   ret_hint) {
     return true;
 }
 
+Type*   callee_param_ty (CG*   g, Expr*   e, int   i) {
+    if (((e  ==  NULL)  ||  ((e-> lhs )  ==  NULL))) {
+        return NULL;
+    }
+    Expr*   callee = (e-> lhs );
+    if (((((callee-> kind )  ==  EX_IDENT)  &&  ((callee-> str_val )  !=  NULL))  &&  HashMap_contains__Stmt((g-> fns ), (callee-> str_val )))) {
+        Stmt   sig = HashMap_get__Stmt((g-> fns ), (callee-> str_val ));
+        if ((((sig. fn_params )  !=  NULL)  &&  (i  <  Vector_len__Param((sig. fn_params ))))) {
+            Param   p = Vector_get__Param((sig. fn_params ), i);
+            return (p. ty );
+        }
+    }
+    if ((((callee-> kind )  ==  EX_MEMBER)  &&  ((callee-> lhs )  !=  NULL))) {
+        Type*   rt = infer_for_codegen(g, (callee-> lhs ));
+        Type*   stripped = strip_ptr(rt);
+        if (((stripped  !=  NULL)  &&  (((stripped-> kind )  ==  TY_NAMED)  ||  ((stripped-> kind )  ==  TY_GENERIC)))) {
+            const char*   mname = __glide_string_concat(__glide_string_concat((stripped-> name ), "_"), (callee-> field ));
+            if (HashMap_contains__Stmt((g-> fns ), mname)) {
+                Stmt   sig = HashMap_get__Stmt((g-> fns ), mname);
+                if ((((sig. fn_params )  !=  NULL)  &&  ((i  +  1)  <  Vector_len__Param((sig. fn_params ))))) {
+                    Param   p = Vector_get__Param((sig. fn_params ), (i  +  1));
+                    return (p. ty );
+                }
+            }
+            if (HashMap_contains__Stmt((g-> generic_fns ), mname)) {
+                Stmt   sig = HashMap_get__Stmt((g-> generic_fns ), mname);
+                if ((((sig. fn_params )  !=  NULL)  &&  ((i  +  1)  <  Vector_len__Param((sig. fn_params ))))) {
+                    Param   p = Vector_get__Param((sig. fn_params ), (i  +  1));
+                    return (p. ty );
+                }
+            }
+        }
+    }
+    return NULL;
+}
+
 void   prescan_expr (CG*   g, Expr*   e, Type*   ret_hint) {
     if ((e  ==  NULL)) {
         return;
@@ -5168,7 +5430,11 @@ void   prescan_expr (CG*   g, Expr*   e, Type*   ret_hint) {
     if (((e-> args )  !=  NULL)) {
         for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
             Expr   a = Vector_get__Expr((e-> args ), i);
-            prescan_expr(g, (&a), NULL);
+            Type*   arg_hint = NULL;
+            if (((e-> kind )  ==  EX_CALL)) {
+                (arg_hint  =  callee_param_ty(g, e, i));
+            }
+            prescan_expr(g, (&a), arg_hint);
         }
     }
 }
@@ -5177,9 +5443,22 @@ void   prescan_stmt (CG*   g, Stmt*   s) {
     if ((s  ==  NULL)) {
         return;
     }
+    if (((s-> kind )  ==  ST_RETURN)) {
+        if (((s-> expr_value )  !=  NULL)) {
+            prescan_expr(g, (s-> expr_value ), (g-> current_ret_ty ));
+        }
+        return;
+    }
     if ((((s-> kind )  ==  ST_LET)  ||  ((s-> kind )  ==  ST_CONST))) {
         if (((s-> let_ty )  !=  NULL)) {
             CG_declare(g, (s-> name ), (s-> let_ty ));
+        } else {
+            if (((s-> let_value )  !=  NULL)) {
+                Type*   inferred = infer_for_codegen(g, (s-> let_value ));
+                if ((inferred  !=  NULL)) {
+                    CG_declare(g, (s-> name ), inferred);
+                }
+            }
         }
         if (((s-> let_value )  !=  NULL)) {
             prescan_expr(g, (s-> let_value ), (s-> let_ty ));
@@ -5233,10 +5512,13 @@ void   prescan_stmt (CG*   g, Stmt*   s) {
                 CG_declare(g, (p. name ), (p. ty ));
             }
         }
+        Type*   saved_ret = (g-> current_ret_ty );
+        ((g-> current_ret_ty )  =  (s-> fn_ret_ty ));
         for (int   i = 0; (i  <  Vector_len__Stmt((s-> fn_body ))); i++) {
             Stmt   b = Vector_get__Stmt((s-> fn_body ), i);
             prescan_stmt(g, (&b));
         }
+        ((g-> current_ret_ty )  =  saved_ret);
     }
     if (((s-> impl_methods )  !=  NULL)) {
         for (int   i = 0; (i  <  Vector_len__Stmt((s-> impl_methods ))); i++) {
@@ -6233,6 +6515,7 @@ void   emit_stmt (CG*   g, Stmt*   s, int   depth) {
                     CG_declare(g, ((s-> for_init )-> name ), ((s-> for_init )-> let_ty ));
                 } else {
                     printf("%s %s", "int ", ((s-> for_init )-> name ));
+                    CG_declare(g, ((s-> for_init )-> name ), ty_named("int"));
                 }
                 if ((((s-> for_init )-> let_value )  !=  NULL)) {
                     printf("%s", " = ");
@@ -6499,8 +6782,14 @@ void   populate_scope_from_stmt (CG*   g, Stmt*   s) {
     if ((s  ==  NULL)) {
         return;
     }
-    if (((((s-> kind )  ==  ST_LET)  ||  ((s-> kind )  ==  ST_CONST))  &&  ((s-> let_ty )  !=  NULL))) {
-        CG_declare(g, (s-> name ), (s-> let_ty ));
+    if ((((s-> kind )  ==  ST_LET)  ||  ((s-> kind )  ==  ST_CONST))) {
+        Type*   ty = (s-> let_ty );
+        if (((ty  ==  NULL)  &&  ((s-> let_value )  !=  NULL))) {
+            (ty  =  infer_for_codegen(g, (s-> let_value )));
+        }
+        if ((ty  !=  NULL)) {
+            CG_declare(g, (s-> name ), ty);
+        }
     }
     if (((s-> for_init )  !=  NULL)) {
         populate_scope_from_stmt(g, (s-> for_init ));
@@ -8543,15 +8832,15 @@ const char*   uri_to_path (const char*   uri) {
 }
 
 const char*   find_stdlib_root (void) {
-    if ((!__glide_string_eq(read_file("stdlib/vector.glide"), ""))) {
-        return "";
-    }
     const char*   exe_dir = __glide_exe_dir();
     if ((!__glide_string_eq(exe_dir, ""))) {
         const char*   probe = __glide_string_concat(exe_dir, "/stdlib/vector.glide");
         if ((!__glide_string_eq(read_file(probe), ""))) {
             return __glide_string_concat(exe_dir, "/");
         }
+    }
+    if ((!__glide_string_eq(read_file("stdlib/vector.glide"), ""))) {
+        return "";
     }
     return "";
 }
@@ -8678,6 +8967,46 @@ Stmt*   find_top_decl (Vector__Stmt*   stmts, const char*   name) {
     return NULL;
 }
 
+Stmt*   find_method_in_impl (Vector__Stmt*   stmts, const char*   type_name, const char*   method_name) {
+    if ((stmts  ==  NULL)) {
+        return NULL;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(stmts)); i++) {
+        Stmt   s = Vector_get__Stmt(stmts, i);
+        if (((s. kind )  !=  ST_IMPL)) {
+            continue;
+        }
+        if (((s. impl_target )  ==  NULL)) {
+            continue;
+        }
+        const char*   tname = "";
+        if ((((s. impl_target )-> kind )  ==  TY_NAMED)) {
+            (tname  =  ((s. impl_target )-> name ));
+        }
+        if ((((s. impl_target )-> kind )  ==  TY_GENERIC)) {
+            (tname  =  ((s. impl_target )-> name ));
+        }
+        if ((!__glide_string_eq(tname, type_name))) {
+            continue;
+        }
+        if (((s. impl_methods )  ==  NULL)) {
+            continue;
+        }
+        for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
+            Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
+            if ((((m. kind )  ==  ST_FN)  &&  __glide_string_eq((m. name ), method_name))) {
+                Stmt*   p = (( Stmt* )malloc(sizeof( Stmt )));
+                ((*p)  =  m);
+                if (((((p-> origin )  ==  NULL)  ||  __glide_string_eq((p-> origin ), ""))  &&  ((s. origin )  !=  NULL))) {
+                    ((p-> origin )  =  (s. origin ));
+                }
+                return p;
+            }
+        }
+    }
+    return NULL;
+}
+
 const char*   word_at (const char*   text, int   line0, int   col0) {
     Lexer*   lex = Lexer_new(text);
     while (true) {
@@ -8696,6 +9025,306 @@ const char*   word_at (const char*   text, int   line0, int   col0) {
         }
     }
     return "";
+}
+
+Type*   lsp_infer_expr (Vector__Stmt*   stmts, Stmt*   host, Expr*   e) {
+    if ((e  ==  NULL)) {
+        return NULL;
+    }
+    if (((e-> kind )  ==  EX_INT)) {
+        return ty_named("int");
+    }
+    if (((e-> kind )  ==  EX_FLOAT)) {
+        return ty_named("float");
+    }
+    if (((e-> kind )  ==  EX_STRING)) {
+        return ty_named("string");
+    }
+    if (((e-> kind )  ==  EX_BOOL)) {
+        return ty_named("bool");
+    }
+    if (((e-> kind )  ==  EX_CHAR)) {
+        return ty_named("char");
+    }
+    if (((((e-> kind )  ==  EX_IDENT)  &&  ((e-> str_val )  !=  NULL))  &&  (host  !=  NULL))) {
+        if (((host-> fn_params )  !=  NULL)) {
+            for (int   i = 0; (i  <  Vector_len__Param((host-> fn_params ))); i++) {
+                Param   p = Vector_get__Param((host-> fn_params ), i);
+                if (__glide_string_eq((p. name ), (e-> str_val ))) {
+                    return (p. ty );
+                }
+            }
+        }
+        Stmt*   lst = find_local_let_in_body((host-> fn_body ), (e-> str_val ));
+        if ((lst  !=  NULL)) {
+            if (((lst-> let_ty )  !=  NULL)) {
+                return (lst-> let_ty );
+            }
+            if (((lst-> let_value )  !=  NULL)) {
+                return lsp_infer_expr(stmts, host, (lst-> let_value ));
+            }
+        }
+    }
+    return NULL;
+}
+
+Stmt*   find_generic_impl (Vector__Stmt*   stmts, const char*   gen_name) {
+    if ((stmts  ==  NULL)) {
+        return NULL;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(stmts)); i++) {
+        Stmt   s = Vector_get__Stmt(stmts, i);
+        if (((s. kind )  !=  ST_IMPL)) {
+            continue;
+        }
+        if (((s. impl_target )  ==  NULL)) {
+            continue;
+        }
+        const char*   tname = "";
+        if ((((s. impl_target )-> kind )  ==  TY_NAMED)) {
+            (tname  =  ((s. impl_target )-> name ));
+        }
+        if ((((s. impl_target )-> kind )  ==  TY_GENERIC)) {
+            (tname  =  ((s. impl_target )-> name ));
+        }
+        if (__glide_string_eq(tname, gen_name)) {
+            Stmt*   p = (( Stmt* )malloc(sizeof( Stmt )));
+            ((*p)  =  s);
+            return p;
+        }
+    }
+    return NULL;
+}
+
+bool   name_in_tparams (const char*   name, Vector__string*   tparams) {
+    if ((tparams  ==  NULL)) {
+        return false;
+    }
+    for (int   i = 0; (i  <  Vector_len__string(tparams)); i++) {
+        if (__glide_string_eq(Vector_get__string(tparams, i), name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Type*   try_constrain_call (Vector__Stmt*   stmts, Stmt*   host, Expr*   e, const char*   var, Vector__Stmt*   impl_methods, Vector__string*   tparams) {
+    if (((((e  ==  NULL)  ||  ((e-> kind )  !=  EX_CALL))  ||  ((e-> lhs )  ==  NULL))  ||  (((e-> lhs )-> kind )  !=  EX_MEMBER))) {
+        return NULL;
+    }
+    if (((((e-> lhs )-> lhs )  ==  NULL)  ||  ((((e-> lhs )-> lhs )-> kind )  !=  EX_IDENT))) {
+        return NULL;
+    }
+    if ((((((e-> lhs )-> lhs )-> str_val )  ==  NULL)  ||  (!__glide_string_eq((((e-> lhs )-> lhs )-> str_val ), var)))) {
+        return NULL;
+    }
+    const char*   method = ((e-> lhs )-> field );
+    if ((impl_methods  ==  NULL)) {
+        return NULL;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(impl_methods)); i++) {
+        Stmt   m = Vector_get__Stmt(impl_methods, i);
+        if ((((m. kind )  !=  ST_FN)  ||  (!__glide_string_eq((m. name ), method)))) {
+            continue;
+        }
+        if ((((m. fn_params )  ==  NULL)  ||  ((e-> args )  ==  NULL))) {
+            return NULL;
+        }
+        for (int   j = 1; (j  <  Vector_len__Param((m. fn_params ))); j++) {
+            Param   mp = Vector_get__Param((m. fn_params ), j);
+            if ((((mp. ty )  ==  NULL)  ||  (((mp. ty )-> kind )  !=  TY_NAMED))) {
+                continue;
+            }
+            if ((!name_in_tparams(((mp. ty )-> name ), tparams))) {
+                continue;
+            }
+            int   arg_idx = (j  -  1);
+            if ((arg_idx  >=  Vector_len__Expr((e-> args )))) {
+                continue;
+            }
+            Expr   a = Vector_get__Expr((e-> args ), arg_idx);
+            Type*   at = lsp_infer_expr(stmts, host, (&a));
+            if ((at  !=  NULL)) {
+                return at;
+            }
+        }
+    }
+    return NULL;
+}
+
+Type*   walk_constraint_in_expr (Vector__Stmt*   stmts, Stmt*   host, Expr*   e, const char*   var, Vector__Stmt*   impl_methods, Vector__string*   tparams) {
+    if ((e  ==  NULL)) {
+        return NULL;
+    }
+    Type*   r = try_constrain_call(stmts, host, e, var, impl_methods, tparams);
+    if ((r  !=  NULL)) {
+        return r;
+    }
+    if (((e-> lhs )  !=  NULL)) {
+        Type*   r2 = walk_constraint_in_expr(stmts, host, (e-> lhs ), var, impl_methods, tparams);
+        if ((r2  !=  NULL)) {
+            return r2;
+        }
+    }
+    if (((e-> rhs )  !=  NULL)) {
+        Type*   r2 = walk_constraint_in_expr(stmts, host, (e-> rhs ), var, impl_methods, tparams);
+        if ((r2  !=  NULL)) {
+            return r2;
+        }
+    }
+    if (((e-> operand )  !=  NULL)) {
+        Type*   r2 = walk_constraint_in_expr(stmts, host, (e-> operand ), var, impl_methods, tparams);
+        if ((r2  !=  NULL)) {
+            return r2;
+        }
+    }
+    if (((e-> args )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
+            Expr   a = Vector_get__Expr((e-> args ), i);
+            Type*   r2 = walk_constraint_in_expr(stmts, host, (&a), var, impl_methods, tparams);
+            if ((r2  !=  NULL)) {
+                return r2;
+            }
+        }
+    }
+    return NULL;
+}
+
+Type*   walk_constraint_in_body (Vector__Stmt*   stmts, Stmt*   host, Vector__Stmt*   body, const char*   var, Vector__Stmt*   impl_methods, Vector__string*   tparams) {
+    if ((body  ==  NULL)) {
+        return NULL;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(body)); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        if (((s. expr_value )  !=  NULL)) {
+            Type*   r = walk_constraint_in_expr(stmts, host, (s. expr_value ), var, impl_methods, tparams);
+            if ((r  !=  NULL)) {
+                return r;
+            }
+        }
+        if (((s. let_value )  !=  NULL)) {
+            Type*   r = walk_constraint_in_expr(stmts, host, (s. let_value ), var, impl_methods, tparams);
+            if ((r  !=  NULL)) {
+                return r;
+            }
+        }
+        if (((s. cond )  !=  NULL)) {
+            Type*   r = walk_constraint_in_expr(stmts, host, (s. cond ), var, impl_methods, tparams);
+            if ((r  !=  NULL)) {
+                return r;
+            }
+        }
+        if (((s. for_step )  !=  NULL)) {
+            Type*   r = walk_constraint_in_expr(stmts, host, (s. for_step ), var, impl_methods, tparams);
+            if ((r  !=  NULL)) {
+                return r;
+            }
+        }
+        if (((s. then_body )  !=  NULL)) {
+            Type*   r = walk_constraint_in_body(stmts, host, (s. then_body ), var, impl_methods, tparams);
+            if ((r  !=  NULL)) {
+                return r;
+            }
+        }
+        if (((s. else_body )  !=  NULL)) {
+            Type*   r = walk_constraint_in_body(stmts, host, (s. else_body ), var, impl_methods, tparams);
+            if ((r  !=  NULL)) {
+                return r;
+            }
+        }
+    }
+    return NULL;
+}
+
+Stmt*   find_local_let_in_body (Vector__Stmt*   body, const char*   name) {
+    if ((body  ==  NULL)) {
+        return NULL;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(body)); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        if (((((s. kind )  ==  ST_LET)  &&  ((s. name )  !=  NULL))  &&  __glide_string_eq((s. name ), name))) {
+            Stmt*   p = (( Stmt* )malloc(sizeof( Stmt )));
+            ((*p)  =  s);
+            return p;
+        }
+        if (((((((s. kind )  ==  ST_FOR)  &&  ((s. for_init )  !=  NULL))  &&  (((s. for_init )-> kind )  ==  ST_LET))  &&  (((s. for_init )-> name )  !=  NULL))  &&  __glide_string_eq(((s. for_init )-> name ), name))) {
+            Stmt*   p = (( Stmt* )malloc(sizeof( Stmt )));
+            ((*p)  =  (*(s. for_init )));
+            return p;
+        }
+        if (((s. then_body )  !=  NULL)) {
+            Stmt*   r = find_local_let_in_body((s. then_body ), name);
+            if ((r  !=  NULL)) {
+                return r;
+            }
+        }
+        if (((s. else_body )  !=  NULL)) {
+            Stmt*   r = find_local_let_in_body((s. else_body ), name);
+            if ((r  !=  NULL)) {
+                return r;
+            }
+        }
+    }
+    return NULL;
+}
+
+const char*   render_hover_for_let (Vector__Stmt*   stmts, Stmt*   host, Stmt*   s) {
+    const char*   header = "let ";
+    if ((s-> is_mut )) {
+        (header  =  __glide_string_concat(header, "mut "));
+    }
+    (header  =  __glide_string_concat(header, (s-> name )));
+    bool   inferred = false;
+    if (((s-> let_ty )  !=  NULL)) {
+        (header  =  __glide_string_concat(__glide_string_concat(header, ": "), type_to_string_pretty((s-> let_ty ))));
+    } else {
+        if (((s-> let_value )  !=  NULL)) {
+            Expr*   e = (s-> let_value );
+            if (((((e-> kind )  ==  EX_CALL)  &&  ((e-> lhs )  !=  NULL))  &&  (((e-> lhs )-> kind )  ==  EX_PATH))) {
+                const char*   gen_name = ((e-> lhs )-> str_val );
+                const char*   t_str = "?";
+                Stmt*   imp = find_generic_impl(stmts, gen_name);
+                if ((((imp  !=  NULL)  &&  (host  !=  NULL))  &&  ((host-> fn_body )  !=  NULL))) {
+                    Type*   r = walk_constraint_in_body(stmts, host, (host-> fn_body ), (s-> name ), (imp-> impl_methods ), (imp-> type_params ));
+                    if ((r  !=  NULL)) {
+                        (t_str  =  type_to_string_pretty(r));
+                    }
+                }
+                (header  =  __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(header, ": *"), gen_name), "<"), t_str), ">"));
+                (inferred  =  true);
+            } else {
+                if (((e-> kind )  ==  EX_INT)) {
+                    (header  =  __glide_string_concat(header, ": int"));
+                    (inferred  =  true);
+                } else {
+                    if (((e-> kind )  ==  EX_FLOAT)) {
+                        (header  =  __glide_string_concat(header, ": float"));
+                        (inferred  =  true);
+                    } else {
+                        if (((e-> kind )  ==  EX_STRING)) {
+                            (header  =  __glide_string_concat(header, ": string"));
+                            (inferred  =  true);
+                        } else {
+                            if (((e-> kind )  ==  EX_BOOL)) {
+                                (header  =  __glide_string_concat(header, ": bool"));
+                                (inferred  =  true);
+                            } else {
+                                if (((e-> kind )  ==  EX_CHAR)) {
+                                    (header  =  __glide_string_concat(header, ": char"));
+                                    (inferred  =  true);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const char*   block = __glide_string_concat(__glide_string_concat("```glide\n", header), "\n```");
+    if (inferred) {
+        (block  =  __glide_string_concat(block, "\n\n*type inferred*"));
+    }
+    return block;
 }
 
 void   handle_hover (JsonValue*   req, LspState*   state) {
@@ -8740,6 +9369,30 @@ void   handle_hover (JsonValue*   req, LspState*   state) {
         }
         if ((((!__glide_string_eq(content, ""))  &&  ((decl-> doc_comment )  !=  NULL))  &&  (!__glide_string_eq((decl-> doc_comment ), "")))) {
             (content  =  __glide_string_concat(__glide_string_concat(content, "\n\n---\n\n"), (decl-> doc_comment )));
+        }
+    }
+    if (__glide_string_eq(content, "")) {
+        Stmt*   host = fn_containing((doc. stmts ), line0);
+        if ((host  !=  NULL)) {
+            if (((host-> fn_params )  !=  NULL)) {
+                for (int   i = 0; (i  <  Vector_len__Param((host-> fn_params ))); i++) {
+                    Param   pp = Vector_get__Param((host-> fn_params ), i);
+                    if (__glide_string_eq((pp. name ), word)) {
+                        const char*   h = __glide_string_concat("param ", (pp. name ));
+                        if (((pp. ty )  !=  NULL)) {
+                            (h  =  __glide_string_concat(__glide_string_concat(h, ": "), type_to_string_pretty((pp. ty ))));
+                        }
+                        (content  =  __glide_string_concat(__glide_string_concat("```glide\n", h), "\n```"));
+                        break;
+                    }
+                }
+            }
+            if (__glide_string_eq(content, "")) {
+                Stmt*   lst = find_local_let_in_body((host-> fn_body ), word);
+                if ((lst  !=  NULL)) {
+                    (content  =  render_hover_for_let((doc. stmts ), host, lst));
+                }
+            }
         }
     }
     if (__glide_string_eq(content, "")) {
@@ -8808,14 +9461,34 @@ JsonValue*   range_for_decl_name (Stmt*   s) {
     return r;
 }
 
+const char*   normalize_path (const char*   path) {
+    if (((path  ==  NULL)  ||  (__glide_string_len(path)  ==  0))) {
+        return "";
+    }
+    int   n = __glide_string_len(path);
+    const char*   out = "";
+    int   i = 0;
+    while ((i  <  n)) {
+        int   c = __glide_char_to_int(__glide_string_at(path, i));
+        if ((c  ==  92)) {
+            (out  =  __glide_string_concat(out, "/"));
+        } else {
+            (out  =  __glide_string_concat(out, __glide_string_substring(path, i, (i  +  1))));
+        }
+        (i  =  (i  +  1));
+    }
+    return out;
+}
+
 const char*   path_to_uri (const char*   path) {
     if (((path  ==  NULL)  ||  (__glide_string_len(path)  ==  0))) {
         return "";
     }
-    if ((__glide_char_to_int(__glide_string_at(path, 0))  ==  47)) {
-        return __glide_string_concat("file://", path);
+    const char*   p = normalize_path(path);
+    if ((__glide_char_to_int(__glide_string_at(p, 0))  ==  47)) {
+        return __glide_string_concat("file://", p);
     }
-    return __glide_string_concat("file:///", path);
+    return __glide_string_concat("file:///", p);
 }
 
 void   handle_document_symbol (JsonValue*   req, LspState*   state) {
@@ -8873,7 +9546,23 @@ void   handle_definition (JsonValue*   req, LspState*   state) {
         lsp_send_response(id, json_null());
         return;
     }
-    Stmt*   decl = find_top_decl((doc. stmts ), word);
+    Stmt*   decl = NULL;
+    const char*   path_q = path_qualifier_before((doc. text ), line0, col0);
+    if ((!__glide_string_eq(path_q, ""))) {
+        (decl  =  find_method_in_impl((doc. stmts ), path_q, word));
+    }
+    if ((decl  ==  NULL)) {
+        const char*   mem_var = member_qualifier_before((doc. text ), line0, col0);
+        if ((!__glide_string_eq(mem_var, ""))) {
+            const char*   var_type = lookup_local_type((doc. stmts ), line0, mem_var);
+            if ((!__glide_string_eq(var_type, ""))) {
+                (decl  =  find_method_in_impl((doc. stmts ), var_type, word));
+            }
+        }
+    }
+    if ((decl  ==  NULL)) {
+        (decl  =  find_top_decl((doc. stmts ), word));
+    }
     if ((decl  ==  NULL)) {
         lsp_send_response(id, json_null());
         return;
@@ -9106,7 +9795,7 @@ void   list_fields_for_type (Vector__Stmt*   stmts, const char*   type_name, Jso
     }
 }
 
-void   list_methods_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen) {
+void   list_methods_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen, bool   want_self) {
     if ((stmts  ==  NULL)) {
         return;
     }
@@ -9136,6 +9825,19 @@ void   list_methods_for_type (Vector__Stmt*   stmts, const char*   type_name, Js
             if (((m. kind )  !=  ST_FN)) {
                 continue;
             }
+            bool   has_self = false;
+            if ((((m. fn_params )  !=  NULL)  &&  (Vector_len__Param((m. fn_params ))  >  0))) {
+                Param   p0 = Vector_get__Param((m. fn_params ), 0);
+                if (__glide_string_eq((p0. name ), "self")) {
+                    (has_self  =  true);
+                }
+            }
+            if ((want_self  &&  (!has_self))) {
+                continue;
+            }
+            if (((!want_self)  &&  has_self)) {
+                continue;
+            }
             if (HashMap_contains__bool(seen, (m. name ))) {
                 continue;
             }
@@ -9162,7 +9864,7 @@ void   handle_completion (JsonValue*   req, LspState*   state) {
     HashMap__bool*   seen = HashMap_new__bool();
     const char*   qualifier = path_qualifier_before((doc. text ), line0, col0);
     if ((!__glide_string_eq(qualifier, ""))) {
-        list_methods_for_type((doc. stmts ), qualifier, items, seen);
+        list_methods_for_type((doc. stmts ), qualifier, items, seen, false);
         HashMap_free__bool(seen);
         lsp_send_response(id, items);
         return;
@@ -9172,7 +9874,7 @@ void   handle_completion (JsonValue*   req, LspState*   state) {
         const char*   var_type = lookup_local_type((doc. stmts ), line0, member_var);
         if ((!__glide_string_eq(var_type, ""))) {
             list_fields_for_type((doc. stmts ), var_type, items, seen);
-            list_methods_for_type((doc. stmts ), var_type, items, seen);
+            list_methods_for_type((doc. stmts ), var_type, items, seen, true);
         }
         HashMap_free__bool(seen);
         lsp_send_response(id, items);
@@ -10566,6 +11268,255 @@ const char*   resolve_import (const char*   base, const char*   ipath) {
     return __glide_string_concat(__glide_string_concat(base, "/"), ipath);
 }
 
+bool   use_color (void) {
+    return __glide_string_eq(__glide_getenv("NO_COLOR"), "");
+}
+
+const char*   col_red (void) {
+    if (use_color()) {
+        return "\x1b[1;31m";
+    }
+    return "";
+}
+
+const char*   col_yellow (void) {
+    if (use_color()) {
+        return "\x1b[1;33m";
+    }
+    return "";
+}
+
+const char*   col_blue (void) {
+    if (use_color()) {
+        return "\x1b[1;36m";
+    }
+    return "";
+}
+
+const char*   col_bold (void) {
+    if (use_color()) {
+        return "\x1b[1m";
+    }
+    return "";
+}
+
+const char*   col_reset (void) {
+    if (use_color()) {
+        return "\x1b[0m";
+    }
+    return "";
+}
+
+const char*   nth_line (const char*   src, int   n) {
+    if ((n  <  1)) {
+        return "";
+    }
+    int   total = __glide_string_len(src);
+    int   line = 1;
+    int   start = 0;
+    int   i = 0;
+    while ((i  <  total)) {
+        if ((__glide_char_to_int(__glide_string_at(src, i))  ==  10)) {
+            if ((line  ==  n)) {
+                return __glide_string_substring(src, start, i);
+            }
+            (line  =  (line  +  1));
+            (start  =  (i  +  1));
+        }
+        (i  =  (i  +  1));
+    }
+    if (((line  ==  n)  &&  (start  <=  total))) {
+        return __glide_string_substring(src, start, total);
+    }
+    return "";
+}
+
+int   int_width (int   n) {
+    int   x = n;
+    if ((x  <  0)) {
+        (x  =  (-x));
+    }
+    int   w = 1;
+    while ((x  >=  10)) {
+        (x  =  (x  /  10));
+        (w  =  (w  +  1));
+    }
+    return w;
+}
+
+const char*   repeat_char (const char*   ch, int   n) {
+    const char*   s = "";
+    for (int   i = 0; (i  <  n); i++) {
+        (s  =  __glide_string_concat(s, ch));
+    }
+    return s;
+}
+
+const char*   help_for_code (const char*   code) {
+    if (__glide_string_eq(code, "infinite-recursion")) {
+        return "add a base case before the recursive call (e.g. `if n == 0 { return; }`)";
+    }
+    if (__glide_string_eq(code, "arena-not-freed")) {
+        return "free the arena with `arena_free(a)` or use `defer arena_free(a);`";
+    }
+    if (__glide_string_eq(code, "addr-of-temporary")) {
+        return "store the value in a `let` first, then take its address";
+    }
+    if (__glide_string_eq(code, "large-return")) {
+        return "return a pointer (`*T`) instead of a large struct";
+    }
+    if (__glide_string_eq(code, "overlap-borrow")) {
+        return "use distinct sources or split into separate statements";
+    }
+    if (__glide_string_eq(code, "unused-fn")) {
+        return "prefix with `_` if intentional, or remove the function";
+    }
+    if (__glide_string_eq(code, "unused-var")) {
+        return "prefix with `_` if intentional, or remove the variable";
+    }
+    if (__glide_string_eq(code, "unused-param")) {
+        return "prefix with `_` if intentional";
+    }
+    if (__glide_string_eq(code, "unnecessary-mut")) {
+        return "drop `mut` if the binding is never reassigned";
+    }
+    return "";
+}
+
+bool   use_unicode (void) {
+    const char*   asc = __glide_getenv("GLIDE_ASCII");
+    if (((!__glide_string_eq(asc, ""))  &&  (!__glide_string_eq(asc, "0")))) {
+        return false;
+    }
+    const char*   uni = __glide_getenv("GLIDE_UNICODE");
+    if (((!__glide_string_eq(uni, ""))  &&  (!__glide_string_eq(uni, "0")))) {
+        return true;
+    }
+    if ((__glide_is_windows()  !=  0)) {
+        return false;
+    }
+    return true;
+}
+
+const char*   glyph_err (void) {
+    if (use_unicode()) {
+        return "\xe2\x9c\x97";
+    }
+    return "x";
+}
+
+const char*   glyph_warn (void) {
+    if (use_unicode()) {
+        return "\xe2\x9a\xa0";
+    }
+    return "!";
+}
+
+const char*   glyph_info (void) {
+    if (use_unicode()) {
+        return "\xe2\x84\xb9";
+    }
+    return "i";
+}
+
+const char*   glyph_help (void) {
+    if (use_unicode()) {
+        return "\xe2\x86\xaa";
+    }
+    return ">";
+}
+
+const char*   glyph_pipe (void) {
+    if (use_unicode()) {
+        return "\xe2\x94\x8a";
+    }
+    return "|";
+}
+
+const char*   glyph_under (void) {
+    if (use_unicode()) {
+        return "\xe2\x94\x81";
+    }
+    return "-";
+}
+
+void   print_pretty_diag (DiagEntry   d, const char*   src, const char*   src_path) {
+    const char*   sym = glyph_err();
+    const char*   color = col_red();
+    if (((d. severity )  ==  2)) {
+        (sym  =  glyph_warn());
+        (color  =  col_yellow());
+    }
+    if (((d. severity )  ==  3)) {
+        (sym  =  glyph_info());
+        (color  =  col_blue());
+    }
+    if (((d. severity )  ==  4)) {
+        (sym  =  glyph_help());
+        (color  =  col_blue());
+    }
+    const char*   reset = col_reset();
+    const char*   bold = col_bold();
+    const char*   dim_blue = col_blue();
+    const char*   title = __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(color, sym), " "), reset), bold);
+    if ((!__glide_string_eq((d. code ), ""))) {
+        (title  =  __glide_string_concat(title, (d. code )));
+    } else {
+        if (((d. severity )  ==  1)) {
+            (title  =  __glide_string_concat(title, "error"));
+        } else {
+            if (((d. severity )  ==  2)) {
+                (title  =  __glide_string_concat(title, "warning"));
+            } else {
+                (title  =  __glide_string_concat(title, "info"));
+            }
+        }
+    }
+    (title  =  __glide_string_concat(title, reset));
+    printf("%s\n", title);
+    printf("%s\n", __glide_string_concat("  ", (d. message )));
+    printf("%s\n", "");
+    const char*   loc = __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("  ", dim_blue), "in "), reset), src_path), ":"), int_to_str((d. line ))), ":"), int_to_str((d. col )));
+    printf("%s\n", loc);
+    const char*   line_text = nth_line(src, (d. line ));
+    int   gw = int_width((d. line ));
+    const char*   pad = repeat_char(" ", gw);
+    const char*   bar = glyph_pipe();
+    printf("%s\n", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(dim_blue, int_to_str((d. line ))), " "), bar), " "), reset), line_text));
+    int   col0 = (d. col );
+    if ((col0  <  1)) {
+        (col0  =  1);
+    }
+    int   span = ((d. end_col )  -  (d. col ));
+    if ((span  <  1)) {
+        (span  =  1);
+    }
+    const char*   indent = "";
+    int   k = 0;
+    int   limit = (col0  -  1);
+    if ((limit  >  __glide_string_len(line_text))) {
+        (limit  =  __glide_string_len(line_text));
+    }
+    while ((k  <  limit)) {
+        int   ch = __glide_char_to_int(__glide_string_at(line_text, k));
+        if ((ch  ==  9)) {
+            (indent  =  __glide_string_concat(indent, "\t"));
+        } else {
+            (indent  =  __glide_string_concat(indent, " "));
+        }
+        (k  =  (k  +  1));
+    }
+    const char*   underline = __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(pad, " "), dim_blue), bar), " "), reset), indent), color), repeat_char(glyph_under(), span)), reset);
+    printf("%s\n", underline);
+    const char*   help = help_for_code((d. code ));
+    if ((!__glide_string_eq(help, ""))) {
+        const char*   h = __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("  ", dim_blue), glyph_help()), " "), reset), help);
+        printf("%s\n", "");
+        printf("%s\n", h);
+    }
+    printf("%s\n", "");
+}
+
 void   print_usage (void) {
     printf("%s\n", "Glide compiler");
     printf("%s\n", "usage:");
@@ -10620,6 +11571,33 @@ const char*   pick_cc (void) {
 int   run_build (const char*   src_path, const char*   out_path, const char*   target, bool   then_run) {
     Vector__Stmt*   stmts = Vector_new__Stmt();
     if ((!parse_program_into(stmts, src_path))) {
+        return 1;
+    }
+    Typer*   t = Typer_new();
+    check_program(t, stmts);
+    run_extra_analyses(t, stmts);
+    const char*   src_text = read_file(src_path);
+    int   errors = 0;
+    for (int   i = 0; (i  <  Vector_len__DiagEntry((t-> diagnostics ))); i++) {
+        DiagEntry   d = Vector_get__DiagEntry((t-> diagnostics ), i);
+        const char*   dpath = (d. origin );
+        if (__glide_string_eq(dpath, "")) {
+            (dpath  =  src_path);
+        }
+        if ((!__glide_string_eq(dpath, src_path))) {
+            continue;
+        }
+        print_pretty_diag(d, src_text, dpath);
+        if (((d. severity )  ==  1)) {
+            (errors  =  (errors  +  1));
+        }
+    }
+    if ((errors  >  0)) {
+        const char*   tail = "could not compile due to 1 previous error";
+        if ((errors  >  1)) {
+            (tail  =  __glide_string_concat(__glide_string_concat("could not compile due to ", int_to_str(errors)), " previous errors"));
+        }
+        printf("%s\n", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(col_red(), "error"), col_reset()), ": "), tail));
         return 1;
     }
     const char*   tmp_c = __glide_string_concat(out_path, ".__glide.c");
@@ -10773,6 +11751,7 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
         Typer*   t = Typer_new();
         check_program(t, stmts);
         run_extra_analyses(t, stmts);
+        const char*   src_text = read_file(src_path);
         int   user_errors = 0;
         for (int   i = 0; (i  <  Vector_len__DiagEntry((t-> diagnostics ))); i++) {
             DiagEntry   d = Vector_get__DiagEntry((t-> diagnostics ), i);
@@ -10789,31 +11768,25 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
             if (((!want_all)  &&  (!__glide_string_eq(path, src_path)))) {
                 continue;
             }
-            const char*   tag = "error";
-            if (((d. severity )  ==  2)) {
-                (tag  =  "warning");
+            const char*   snippet = src_text;
+            if ((!__glide_string_eq(path, src_path))) {
+                (snippet  =  read_file(path));
             }
-            if (((d. severity )  ==  3)) {
-                (tag  =  "info");
-            }
-            if (((d. severity )  ==  4)) {
-                (tag  =  "hint");
-            }
-            printf("%s %s %d %s %d %s %s", path, ":", (d. line ), ":", (d. col ), ": ", tag);
-            if ((!__glide_string_eq((d. code ), ""))) {
-                printf("%s %s %s", " [", (d. code ), "]");
-            }
-            printf("%s %s\n", ": ", (d. message ));
+            print_pretty_diag(d, snippet, path);
             if (((d. severity )  ==  1)) {
                 (user_errors  =  (user_errors  +  1));
             }
         }
         if ((user_errors  >  0)) {
-            printf("%d %s\n", user_errors, "error(s)");
+            const char*   tail = "found 1 error";
+            if ((user_errors  >  1)) {
+                (tail  =  __glide_string_concat(__glide_string_concat("found ", int_to_str(user_errors)), " errors"));
+            }
+            printf("%s\n", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(col_red(), "error"), col_reset()), ": "), tail));
             Typer_free(t);
             return 1;
         }
-        printf("%s\n", "ok");
+        printf("%s\n", __glide_string_concat(__glide_string_concat(col_blue(), "ok"), col_reset()));
         Typer_free(t);
         return 0;
     }

@@ -327,8 +327,10 @@ pub fn stmt_return(v: *Expr, line: int, col: int) -> *Stmt {
 pub fn stmt_expr(e: *Expr) -> *Stmt {
     let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
     s.kind = ST_EXPR;
-    s.line = e.line;
-    s.column = e.column;
+    if e != null {
+        s.line = e.line;
+        s.column = e.column;
+    }
     s.expr_value = e;
     return s;
 }

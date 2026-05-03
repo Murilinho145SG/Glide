@@ -570,6 +570,79 @@ fn emit_stdlib_runtime() {
     println!("static bool __glide_file_exists(const char* path) {");
     println!("    FILE* f = fopen(path, \"rb\"); if (!f) return false; fclose(f); return true;");
     println!("}");
+    // Enable ANSI escape interpretation on Win10+ console at process start.
+    // No-op on non-Windows or when stdout/stderr aren't terminals.
+    println!("#ifdef _WIN32");
+    println!("#ifndef ENABLE_VIRTUAL_TERMINAL_PROCESSING");
+    println!("#define ENABLE_VIRTUAL_TERMINAL_PROCESSING 0x0004");
+    println!("#endif");
+    println!("__attribute__((constructor)) static void __glide_enable_vt(void) {");
+    println!("    HANDLE hs[2] = { GetStdHandle(STD_OUTPUT_HANDLE), GetStdHandle(STD_ERROR_HANDLE) };");
+    println!("    for (int i = 0; i < 2; i++) {");
+    println!("        DWORD m = 0;");
+    println!("        if (GetConsoleMode(hs[i], &m)) {");
+    println!("            SetConsoleMode(hs[i], m | ENABLE_VIRTUAL_TERMINAL_PROCESSING);");
+    println!("        }");
+    println!("    }");
+    println!("    SetConsoleOutputCP(65001);");
+    println!("    SetConsoleCP(65001);");
+    println!("}");
+    println!("#endif");
+
+    // Crash handler. Replaces silent SIGSEGV / Windows error dialog with a
+    // labelled message and a frame-address stack trace, so users don't waste
+    // hours guessing what crashed. Disable with GLIDE_NO_TRAP=1.
+    println!("#ifdef _WIN32");
+    println!("static LONG WINAPI __glide_seh_handler(EXCEPTION_POINTERS* ep) {");
+    println!("    DWORD code = ep->ExceptionRecord->ExceptionCode;");
+    println!("    const char* name = \"unhandled exception\";");
+    println!("    const char* hint = \"\";");
+    println!("    if (code == 0xC0000005) { name = \"segmentation fault\"; hint = \"hint: dereferenced a null or invalid pointer\"; }");
+    println!("    else if (code == 0xC0000094) { name = \"integer divide by zero\"; hint = \"hint: divisor reached zero before the division\"; }");
+    println!("    else if (code == 0xC00000FD) { name = \"stack overflow\"; hint = \"hint: runtime recursion exceeded the stack limit\"; }");
+    println!("    else if (code == 0x80000003) { name = \"trap (likely null deref or undefined behavior)\"; hint = \"hint: the optimizer turned a null/invalid op into __builtin_trap; rebuild with `-O0` for clearer location\"; }");
+    println!("    fflush(stdout);");
+    println!("    fprintf(stderr, \"\\n\\x1b[1;31mfatal\\x1b[0m: %s (code 0x%lx)\\n\", name, (unsigned long)code);");
+    println!("    if (hint[0]) fprintf(stderr, \"  \\x1b[1;36m=\\x1b[0m %s\\n\", hint);");
+    println!("    void* frames[32];");
+    println!("    USHORT n = CaptureStackBackTrace(1, 32, frames, NULL);");
+    println!("    fprintf(stderr, \"stack trace (%u frames; pipe through addr2line for source lines):\\n\", n);");
+    println!("    for (USHORT i = 0; i < n; i++) fprintf(stderr, \"  #%-2u  %p\\n\", i, frames[i]);");
+    println!("    fflush(stderr);");
+    println!("    ExitProcess((UINT)code);");
+    println!("    return EXCEPTION_CONTINUE_SEARCH;");
+    println!("}");
+    println!("__attribute__((constructor)) static void __glide_install_trap(void) {");
+    println!("    if (getenv(\"GLIDE_NO_TRAP\")) return;");
+    println!("    // VEH runs before any SEH/CRT-installed filter, so our handler stays in charge.");
+    println!("    AddVectoredExceptionHandler(1, __glide_seh_handler);");
+    println!("    SetUnhandledExceptionFilter(__glide_seh_handler);");
+    println!("}");
+    println!("#else");
+    println!("#include <signal.h>");
+    println!("#include <execinfo.h>");
+    println!("#include <unistd.h>");
+    println!("static void __glide_sig_handler(int sig) {");
+    println!("    const char* name = \"unknown\";");
+    println!("    const char* hint = \"\";");
+    println!("    if (sig == SIGSEGV) { name = \"segmentation fault\"; hint = \"hint: dereferenced a null or invalid pointer\"; }");
+    println!("    else if (sig == SIGFPE) { name = \"floating-point / arithmetic error\"; hint = \"hint: division by zero or invalid float operation\"; }");
+    println!("    else if (sig == SIGABRT) { name = \"aborted\"; hint = \"hint: runtime panic (e.g. arena oom)\"; }");
+    println!("    fflush(stdout);");
+    println!("    fprintf(stderr, \"\\n\\x1b[1;31mfatal\\x1b[0m: %s (signal %d)\\n\", name, sig);");
+    println!("    if (hint[0]) fprintf(stderr, \"  \\x1b[1;36m=\\x1b[0m %s\\n\", hint);");
+    println!("    void* frames[32]; int n = backtrace(frames, 32);");
+    println!("    fprintf(stderr, \"stack trace (%d frames):\\n\", n);");
+    println!("    backtrace_symbols_fd(frames, n, 2);");
+    println!("    _exit(128 + sig);");
+    println!("}");
+    println!("__attribute__((constructor)) static void __glide_install_trap(void) {");
+    println!("    if (getenv(\"GLIDE_NO_TRAP\")) return;");
+    println!("    signal(SIGSEGV, __glide_sig_handler);");
+    println!("    signal(SIGABRT, __glide_sig_handler);");
+    println!("    signal(SIGFPE,  __glide_sig_handler);");
+    println!("}");
+    println!("#endif");
     // LSP transport helpers: stdin reading + stdout writing without newlines.
     println!("#ifdef _WIN32");
     println!("#include <fcntl.h>");
@@ -1094,6 +1167,46 @@ fn try_mono_call(g: *CG, call: *Expr, ret_hint: *Type) -> bool {
 // Recursively walks expr/stmt trees, calling try_mono_call on every generic
 // call to queue monos and emit forward decls. Called as a pre-pass before
 // emitting any fn body so forward decls don't interleave with code.
+// For an EX_CALL `e`, return the declared type of the i-th formal parameter,
+// or null when the callee isn't a known regular fn / impl method. Lets the
+// prescan propagate `*Vector<int>` down into `take(Vector::new())` so the
+// generic ctor monomorphizes from the surrounding context.
+fn callee_param_ty(g: *CG, e: *Expr, i: int) -> *Type {
+    if e == null || e.lhs == null { return null; }
+    let callee: *Expr = e.lhs;
+    if callee.kind == EX_IDENT && callee.str_val != null && g.fns.contains(callee.str_val) {
+        let sig: Stmt = g.fns.get(callee.str_val);
+        if sig.fn_params != null && i < sig.fn_params.len() {
+            let p: Param = sig.fn_params.get(i);
+            return p.ty;
+        }
+    }
+    // Method call: `recv.method(args)` — look up the impl method and skip
+    // self at index 0, so user arg index `i` maps to method param `i + 1`.
+    if callee.kind == EX_MEMBER && callee.lhs != null {
+        let rt: *Type = infer_for_codegen(g, callee.lhs);
+        let stripped: *Type = strip_ptr(rt);
+        if stripped != null && (stripped.kind == TY_NAMED || stripped.kind == TY_GENERIC) {
+            let mname: string = stripped.name.concat("_").concat(callee.field);
+            if g.fns.contains(mname) {
+                let sig: Stmt = g.fns.get(mname);
+                if sig.fn_params != null && (i + 1) < sig.fn_params.len() {
+                    let p: Param = sig.fn_params.get(i + 1);
+                    return p.ty;
+                }
+            }
+            if g.generic_fns.contains(mname) {
+                let sig: Stmt = g.generic_fns.get(mname);
+                if sig.fn_params != null && (i + 1) < sig.fn_params.len() {
+                    let p: Param = sig.fn_params.get(i + 1);
+                    return p.ty;
+                }
+            }
+        }
+    }
+    return null;
+}
+
 fn prescan_expr(g: *CG, e: *Expr, ret_hint: *Type) {
     if e == null { return; }
     if e.kind == EX_CALL {
@@ -1124,16 +1237,32 @@ fn prescan_expr(g: *CG, e: *Expr, ret_hint: *Type) {
     if e.args != null {
         for let i: int = 0; i < e.args.len(); i++ {
             let a: Expr = e.args.get(i);
-            prescan_expr(g, &a, null);
+            // Carry the formal param's declared type as the arg's expected
+            // type so inline `Vector::new()` etc. monomorphize correctly.
+            let mut arg_hint: *Type = null;
+            if e.kind == EX_CALL { arg_hint = callee_param_ty(g, e, i); }
+            prescan_expr(g, &a, arg_hint);
         }
     }
 }
 
 fn prescan_stmt(g: *CG, s: *Stmt) {
     if s == null { return; }
+    // `return X` carries the enclosing fn's return type as a hint so inline
+    // generic ctors like `return Vector::new()` monomorphize correctly.
+    if s.kind == ST_RETURN {
+        if s.expr_value != null { prescan_expr(g, s.expr_value, g.current_ret_ty); }
+        return;
+    }
     if s.kind == ST_LET || s.kind == ST_CONST {
-        // Declare in scope so receiver-type lookup works.
+        // Declare in scope so receiver-type lookup works. When there's no
+        // annotation, infer from the initializer (e.g. `let v = make()`
+        // where `make` returns `*Vector<int>`).
         if s.let_ty != null { g.declare(s.name, s.let_ty); }
+        else if s.let_value != null {
+            let inferred: *Type = infer_for_codegen(g, s.let_value);
+            if inferred != null { g.declare(s.name, inferred); }
+        }
         if s.let_value != null { prescan_expr(g, s.let_value, s.let_ty); }
         // Auto-drop with `let v*` on a generic type: queue the free-method
         // mono so its forward decl is emitted before any user fn body.
@@ -1178,10 +1307,13 @@ fn prescan_stmt(g: *CG, s: *Stmt) {
                 g.declare(p.name, p.ty);
             }
         }
+        let saved_ret: *Type = g.current_ret_ty;
+        g.current_ret_ty = s.fn_ret_ty;
         for let i: int = 0; i < s.fn_body.len(); i++ {
             let b: Stmt = s.fn_body.get(i);
             prescan_stmt(g, &b);
         }
+        g.current_ret_ty = saved_ret;
     }
     if s.impl_methods != null {
         for let i: int = 0; i < s.impl_methods.len(); i++ {
@@ -2080,7 +2212,11 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
                     print!(type_to_c(s.for_init.let_ty), " ", s.for_init.name);
                     g.declare(s.for_init.name, s.for_init.let_ty);
                 } else {
+                    // Untyped `for let i = 0; ...`: default to int and register
+                    // it in scope so the body's `i` references type-resolve to
+                    // int (otherwise printf-style macros emit `%p` → hex).
                     print!("int ", s.for_init.name);
+                    g.declare(s.for_init.name, ty_named("int"));
                 }
                 if s.for_init.let_value != null {
                     print!(" = "); emit_expr(g, s.for_init.let_value);
@@ -2305,8 +2441,15 @@ fn try_constrain_from_stmt(g: *CG, s: *Stmt, var: string, gen_name: string, tpar
 // nested blocks (e.g. `for let i: int = 0; ...; i++ { v.push(i * 10); }`).
 fn populate_scope_from_stmt(g: *CG, s: *Stmt) {
     if s == null { return; }
-    if (s.kind == ST_LET || s.kind == ST_CONST) && s.let_ty != null {
-        g.declare(s.name, s.let_ty);
+    if s.kind == ST_LET || s.kind == ST_CONST {
+        let mut ty: *Type = s.let_ty;
+        // No annotation? Infer from the initializer so plain `let i = 0`
+        // (typical in for-loops) registers `i: int` in the codegen scope —
+        // otherwise printf-style macros default to `%p` and emit hex.
+        if ty == null && s.let_value != null {
+            ty = infer_for_codegen(g, s.let_value);
+        }
+        if ty != null { g.declare(s.name, ty); }
     }
     if s.for_init != null { populate_scope_from_stmt(g, s.for_init); }
     if s.then_body != null {

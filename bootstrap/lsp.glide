@@ -193,16 +193,16 @@ fn uri_to_path(uri: string) -> string {
     return rest;
 }
 
-// Find stdlib/vector.glide. Try cwd first, then alongside the running glide
-// executable. Returns the directory prefix (with no trailing slash) where
-// stdlib lives, or "" if not found.
+// Find stdlib/vector.glide. Prefer the exe-relative location so paths
+// stamped on Stmt.origin are absolute (the LSP uses them for goto-def URIs).
+// Falls back to a cwd-relative path only if the exe-side lookup fails.
 fn find_stdlib_root() -> string {
-    if !read_file("stdlib/vector.glide").eq("") { return ""; }
     let exe_dir: string = __glide_exe_dir();
     if !exe_dir.eq("") {
         let probe: string = exe_dir.concat("/stdlib/vector.glide");
         if !read_file(probe).eq("") { return exe_dir.concat("/"); }
     }
+    if !read_file("stdlib/vector.glide").eq("") { return ""; }
     return "";
 }
 
@@ -344,6 +344,35 @@ fn find_top_decl(stmts: *Vector<Stmt>, name: string) -> *Stmt {
     return null;
 }
 
+// Search inside `impl Type { ... }` blocks for a method by name. The returned
+// Stmt's `origin` is taken from the parent impl, since impl_methods stmts are
+// populated by parse_fn before load_into_str stamps origin on the impl.
+fn find_method_in_impl(stmts: *Vector<Stmt>, type_name: string, method_name: string) -> *Stmt {
+    if stmts == null { return null; }
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if s.kind != ST_IMPL { continue; }
+        if s.impl_target == null { continue; }
+        let mut tname: string = "";
+        if s.impl_target.kind == TY_NAMED { tname = s.impl_target.name; }
+        if s.impl_target.kind == TY_GENERIC { tname = s.impl_target.name; }
+        if !tname.eq(type_name) { continue; }
+        if s.impl_methods == null { continue; }
+        for let j: int = 0; j < s.impl_methods.len(); j++ {
+            let m: Stmt = s.impl_methods.get(j);
+            if m.kind == ST_FN && m.name.eq(method_name) {
+                let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+                *p = m;
+                if (p.origin == null || p.origin.eq("")) && s.origin != null {
+                    p.origin = s.origin;
+                }
+                return p;
+            }
+        }
+    }
+    return null;
+}
+
 // Crude "word at position": lex once, find the token whose range contains the
 // (line0, col0) — both 0-indexed from the LSP. Returns the token's lexeme or "".
 fn word_at(text: string, line0: int, col0: int) -> string {
@@ -361,6 +390,216 @@ fn word_at(text: string, line0: int, col0: int) -> string {
         }
     }
     return "";
+}
+
+// Best-effort type inference for hover. Mirrors what the codegen does in
+// `try_resolve_open_let`: when a variable is declared as `Generic::new()`
+// without an annotation, walk subsequent uses in the same body looking for
+// a method call that constrains the type parameter. Single-T case only.
+fn lsp_infer_expr(stmts: *Vector<Stmt>, host: *Stmt, e: *Expr) -> *Type {
+    if e == null { return null; }
+    if e.kind == EX_INT { return ty_named("int"); }
+    if e.kind == EX_FLOAT { return ty_named("float"); }
+    if e.kind == EX_STRING { return ty_named("string"); }
+    if e.kind == EX_BOOL { return ty_named("bool"); }
+    if e.kind == EX_CHAR { return ty_named("char"); }
+    if e.kind == EX_IDENT && e.str_val != null && host != null {
+        if host.fn_params != null {
+            for let i: int = 0; i < host.fn_params.len(); i++ {
+                let p: Param = host.fn_params.get(i);
+                if p.name.eq(e.str_val) { return p.ty; }
+            }
+        }
+        let lst: *Stmt = find_local_let_in_body(host.fn_body, e.str_val);
+        if lst != null {
+            if lst.let_ty != null { return lst.let_ty; }
+            if lst.let_value != null { return lsp_infer_expr(stmts, host, lst.let_value); }
+        }
+    }
+    return null;
+}
+
+// Look up the impl block whose target name matches `gen_name`, returning its
+// type-param names and method list so the caller can probe constraints.
+fn find_generic_impl(stmts: *Vector<Stmt>, gen_name: string) -> *Stmt {
+    if stmts == null { return null; }
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if s.kind != ST_IMPL { continue; }
+        if s.impl_target == null { continue; }
+        let mut tname: string = "";
+        if s.impl_target.kind == TY_NAMED { tname = s.impl_target.name; }
+        if s.impl_target.kind == TY_GENERIC { tname = s.impl_target.name; }
+        if tname.eq(gen_name) {
+            let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+            *p = s;
+            return p;
+        }
+    }
+    return null;
+}
+
+fn name_in_tparams(name: string, tparams: *Vector<string>) -> bool {
+    if tparams == null { return false; }
+    for let i: int = 0; i < tparams.len(); i++ {
+        if tparams.get(i).eq(name) { return true; }
+    }
+    return false;
+}
+
+// If `e` is `var.method(args)`, find the impl method's first parameter (after
+// `self`) whose declared type is a type-param, and return the inferred type
+// of the corresponding user arg. Returns null when no constraint exists.
+fn try_constrain_call(stmts: *Vector<Stmt>, host: *Stmt, e: *Expr, var: string,
+                       impl_methods: *Vector<Stmt>, tparams: *Vector<string>) -> *Type {
+    if e == null || e.kind != EX_CALL || e.lhs == null || e.lhs.kind != EX_MEMBER { return null; }
+    if e.lhs.lhs == null || e.lhs.lhs.kind != EX_IDENT { return null; }
+    if e.lhs.lhs.str_val == null || !e.lhs.lhs.str_val.eq(var) { return null; }
+    let method: string = e.lhs.field;
+    if impl_methods == null { return null; }
+    for let i: int = 0; i < impl_methods.len(); i++ {
+        let m: Stmt = impl_methods.get(i);
+        if m.kind != ST_FN || !m.name.eq(method) { continue; }
+        if m.fn_params == null || e.args == null { return null; }
+        for let j: int = 1; j < m.fn_params.len(); j++ {
+            let mp: Param = m.fn_params.get(j);
+            if mp.ty == null || mp.ty.kind != TY_NAMED { continue; }
+            if !name_in_tparams(mp.ty.name, tparams) { continue; }
+            let arg_idx: int = j - 1;
+            if arg_idx >= e.args.len() { continue; }
+            let a: Expr = e.args.get(arg_idx);
+            let at: *Type = lsp_infer_expr(stmts, host, &a);
+            if at != null { return at; }
+        }
+    }
+    return null;
+}
+
+fn walk_constraint_in_expr(stmts: *Vector<Stmt>, host: *Stmt, e: *Expr, var: string,
+                            impl_methods: *Vector<Stmt>, tparams: *Vector<string>) -> *Type {
+    if e == null { return null; }
+    let r: *Type = try_constrain_call(stmts, host, e, var, impl_methods, tparams);
+    if r != null { return r; }
+    if e.lhs != null {
+        let r2: *Type = walk_constraint_in_expr(stmts, host, e.lhs, var, impl_methods, tparams);
+        if r2 != null { return r2; }
+    }
+    if e.rhs != null {
+        let r2: *Type = walk_constraint_in_expr(stmts, host, e.rhs, var, impl_methods, tparams);
+        if r2 != null { return r2; }
+    }
+    if e.operand != null {
+        let r2: *Type = walk_constraint_in_expr(stmts, host, e.operand, var, impl_methods, tparams);
+        if r2 != null { return r2; }
+    }
+    if e.args != null {
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            let r2: *Type = walk_constraint_in_expr(stmts, host, &a, var, impl_methods, tparams);
+            if r2 != null { return r2; }
+        }
+    }
+    return null;
+}
+
+fn walk_constraint_in_body(stmts: *Vector<Stmt>, host: *Stmt, body: *Vector<Stmt>, var: string,
+                            impl_methods: *Vector<Stmt>, tparams: *Vector<string>) -> *Type {
+    if body == null { return null; }
+    for let i: int = 0; i < body.len(); i++ {
+        let s: Stmt = body.get(i);
+        if s.expr_value != null {
+            let r: *Type = walk_constraint_in_expr(stmts, host, s.expr_value, var, impl_methods, tparams);
+            if r != null { return r; }
+        }
+        if s.let_value != null {
+            let r: *Type = walk_constraint_in_expr(stmts, host, s.let_value, var, impl_methods, tparams);
+            if r != null { return r; }
+        }
+        if s.cond != null {
+            let r: *Type = walk_constraint_in_expr(stmts, host, s.cond, var, impl_methods, tparams);
+            if r != null { return r; }
+        }
+        if s.for_step != null {
+            let r: *Type = walk_constraint_in_expr(stmts, host, s.for_step, var, impl_methods, tparams);
+            if r != null { return r; }
+        }
+        if s.then_body != null {
+            let r: *Type = walk_constraint_in_body(stmts, host, s.then_body, var, impl_methods, tparams);
+            if r != null { return r; }
+        }
+        if s.else_body != null {
+            let r: *Type = walk_constraint_in_body(stmts, host, s.else_body, var, impl_methods, tparams);
+            if r != null { return r; }
+        }
+    }
+    return null;
+}
+
+// Walk the fn body recursively, return the first ST_LET (or for-loop's let
+// init) matching `name`. Heap-copies so the caller has stable pointer.
+fn find_local_let_in_body(body: *Vector<Stmt>, name: string) -> *Stmt {
+    if body == null { return null; }
+    for let i: int = 0; i < body.len(); i++ {
+        let s: Stmt = body.get(i);
+        if s.kind == ST_LET && s.name != null && s.name.eq(name) {
+            let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+            *p = s;
+            return p;
+        }
+        if s.kind == ST_FOR && s.for_init != null && s.for_init.kind == ST_LET
+           && s.for_init.name != null && s.for_init.name.eq(name) {
+            let p: *Stmt = malloc(sizeof(Stmt)) as *Stmt;
+            *p = *s.for_init;
+            return p;
+        }
+        if s.then_body != null {
+            let r: *Stmt = find_local_let_in_body(s.then_body, name);
+            if r != null { return r; }
+        }
+        if s.else_body != null {
+            let r: *Stmt = find_local_let_in_body(s.else_body, name);
+            if r != null { return r; }
+        }
+    }
+    return null;
+}
+
+// Render a hover string for a local `let`. Prefers the explicit annotation;
+// otherwise infers from the initializer (literals, or `Generic::new()` plus
+// a constraint from later usage like `var.push(x)` to resolve T).
+fn render_hover_for_let(stmts: *Vector<Stmt>, host: *Stmt, s: *Stmt) -> string {
+    let mut header: string = "let ";
+    if s.is_mut { header = header.concat("mut "); }
+    header = header.concat(s.name);
+    let mut inferred: bool = false;
+    if s.let_ty != null {
+        header = header.concat(": ").concat(type_to_string_pretty(s.let_ty));
+    } else if s.let_value != null {
+        let e: *Expr = s.let_value;
+        if e.kind == EX_CALL && e.lhs != null && e.lhs.kind == EX_PATH {
+            // `Generic::new()` form. Try to resolve the type-param by walking
+            // subsequent uses of `s.name` in the host fn's body.
+            let gen_name: string = e.lhs.str_val;
+            let mut t_str: string = "?";
+            let imp: *Stmt = find_generic_impl(stmts, gen_name);
+            if imp != null && host != null && host.fn_body != null {
+                let r: *Type = walk_constraint_in_body(stmts, host, host.fn_body, s.name,
+                                                       imp.impl_methods, imp.type_params);
+                if r != null { t_str = type_to_string_pretty(r); }
+            }
+            header = header.concat(": *").concat(gen_name).concat("<").concat(t_str).concat(">");
+            inferred = true;
+        } else if e.kind == EX_INT    { header = header.concat(": int"); inferred = true; }
+        else if e.kind == EX_FLOAT  { header = header.concat(": float"); inferred = true; }
+        else if e.kind == EX_STRING { header = header.concat(": string"); inferred = true; }
+        else if e.kind == EX_BOOL   { header = header.concat(": bool"); inferred = true; }
+        else if e.kind == EX_CHAR   { header = header.concat(": char"); inferred = true; }
+    }
+    let mut block: string = "```glide\n".concat(header).concat("\n```");
+    if inferred {
+        block = block.concat("\n\n*type inferred*");
+    }
+    return block;
 }
 
 fn handle_hover(req: *JsonValue, state: *LspState) {
@@ -396,6 +635,31 @@ fn handle_hover(req: *JsonValue, state: *LspState) {
         // Append the decl's doc comment (the contiguous `//` block above it).
         if !content.eq("") && decl.doc_comment != null && !decl.doc_comment.eq("") {
             content = content.concat("\n\n---\n\n").concat(decl.doc_comment);
+        }
+    }
+
+    // Local: search the fn body for a `let` (or `for let`) by name, and the
+    // fn's params, so hover on a variable shows its type.
+    if content.eq("") {
+        let host: *Stmt = fn_containing(doc.stmts, line0);
+        if host != null {
+            if host.fn_params != null {
+                for let i: int = 0; i < host.fn_params.len(); i++ {
+                    let pp: Param = host.fn_params.get(i);
+                    if pp.name.eq(word) {
+                        let mut h: string = "param ".concat(pp.name);
+                        if pp.ty != null { h = h.concat(": ").concat(type_to_string_pretty(pp.ty)); }
+                        content = "```glide\n".concat(h).concat("\n```");
+                        break;
+                    }
+                }
+            }
+            if content.eq("") {
+                let lst: *Stmt = find_local_let_in_body(host.fn_body, word);
+                if lst != null {
+                    content = render_hover_for_let(doc.stmts, host, lst);
+                }
+            }
         }
     }
 
@@ -455,12 +719,29 @@ fn range_for_decl_name(s: *Stmt) -> *JsonValue {
     return r;
 }
 
+// Replace backslashes with forward slashes so Windows paths like
+// `C:\Users\...\stdlib\vector.glide` produce a clean `file:///C:/...` URI.
+fn normalize_path(path: string) -> string {
+    if path == null || path.len() == 0 { return ""; }
+    let n: int = path.len();
+    let mut out: string = "";
+    let mut i: int = 0;
+    while i < n {
+        let c: int = path.at(i).to_int();
+        if c == 92 { out = out.concat("/"); }
+        else { out = out.concat(path.substring(i, i + 1)); }
+        i = i + 1;
+    }
+    return out;
+}
+
 // Convert an absolute filesystem path to a `file://` URI. Handles both
 // POSIX (`/path/to/x`) and Windows (`c:/path/to/x`).
 fn path_to_uri(path: string) -> string {
     if path == null || path.len() == 0 { return ""; }
-    if path.at(0).to_int() == 47 { return "file://".concat(path); }
-    return "file:///".concat(path);
+    let p: string = normalize_path(path);
+    if p.at(0).to_int() == 47 { return "file://".concat(p); }
+    return "file:///".concat(p);
 }
 
 fn handle_document_symbol(req: *JsonValue, state: *LspState) {
@@ -507,7 +788,26 @@ fn handle_definition(req: *JsonValue, state: *LspState) {
     let doc: LspDoc = state.docs.get(uri);
     let word: string = word_at(doc.text, line0, col0);
     if word.eq("") { lsp_send_response(id, json_null()); return; }
-    let decl: *Stmt = find_top_decl(doc.stmts, word);
+
+    // First try qualified resolution so `Vector::new` and `v.push` jump to
+    // the impl method. cursor_before_partial walks back over ident chars,
+    // so passing the cursor anywhere inside the word lands on the start of
+    // the partial, where the helpers can see `::` or `.` right before it.
+    let mut decl: *Stmt = null;
+    let path_q: string = path_qualifier_before(doc.text, line0, col0);
+    if !path_q.eq("") {
+        decl = find_method_in_impl(doc.stmts, path_q, word);
+    }
+    if decl == null {
+        let mem_var: string = member_qualifier_before(doc.text, line0, col0);
+        if !mem_var.eq("") {
+            let var_type: string = lookup_local_type(doc.stmts, line0, mem_var);
+            if !var_type.eq("") {
+                decl = find_method_in_impl(doc.stmts, var_type, word);
+            }
+        }
+    }
+    if decl == null { decl = find_top_decl(doc.stmts, word); }
     if decl == null { lsp_send_response(id, json_null()); return; }
 
     // Build the URI from the decl's origin so jumps to stdlib (Vector,
@@ -690,7 +990,11 @@ fn list_fields_for_type(stmts: *Vector<Stmt>, type_name: string, items: *JsonVal
     }
 }
 
-fn list_methods_for_type(stmts: *Vector<Stmt>, type_name: string, items: *JsonValue, seen: *HashMap<bool>) {
+// `want_self`: true → list instance methods (first param is `self`).
+//              false → list static methods (no `self`).
+fn list_methods_for_type(stmts: *Vector<Stmt>, type_name: string,
+                          items: *JsonValue, seen: *HashMap<bool>,
+                          want_self: bool) {
     if stmts == null { return; }
     for let i: int = 0; i < stmts.len(); i++ {
         let s: Stmt = stmts.get(i);
@@ -704,6 +1008,13 @@ fn list_methods_for_type(stmts: *Vector<Stmt>, type_name: string, items: *JsonVa
         for let j: int = 0; j < s.impl_methods.len(); j++ {
             let m: Stmt = s.impl_methods.get(j);
             if m.kind != ST_FN { continue; }
+            let mut has_self: bool = false;
+            if m.fn_params != null && m.fn_params.len() > 0 {
+                let p0: Param = m.fn_params.get(0);
+                if p0.name.eq("self") { has_self = true; }
+            }
+            if want_self && !has_self { continue; }
+            if !want_self && has_self { continue; }
             if seen.contains(m.name) { continue; }
             seen.insert(m.name, true);
             json_arr_push(items, completion_item(m.name, 2, fn_signature(&m)));
@@ -728,21 +1039,22 @@ fn handle_completion(req: *JsonValue, state: *LspState) {
     // Path completion: cursor is right after `Type::` (or `Type::partial`).
     let qualifier: string = path_qualifier_before(doc.text, line0, col0);
     if !qualifier.eq("") {
-        list_methods_for_type(doc.stmts, qualifier, items, seen);
+        // After `Type::` only static methods (no `self`) make sense.
+        list_methods_for_type(doc.stmts, qualifier, items, seen, false);
         seen.free();
         lsp_send_response(id, items);
         return;
     }
 
     // Member completion: cursor is right after `var.` (or `var.partial`).
-    // Resolve the local's type and list both its struct fields (if any) and
-    // its impl methods.
+    // Resolve the local's type and list its struct fields plus the
+    // instance methods (those whose first param is `self`).
     let member_var: string = member_qualifier_before(doc.text, line0, col0);
     if !member_var.eq("") {
         let var_type: string = lookup_local_type(doc.stmts, line0, member_var);
         if !var_type.eq("") {
             list_fields_for_type(doc.stmts, var_type, items, seen);
-            list_methods_for_type(doc.stmts, var_type, items, seen);
+            list_methods_for_type(doc.stmts, var_type, items, seen, true);
         }
         seen.free();
         lsp_send_response(id, items);
