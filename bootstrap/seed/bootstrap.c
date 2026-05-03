@@ -3128,7 +3128,11 @@ void   Typer_free (Typer*   self) {
 }
 
 void   Typer_push_diag (Typer*   self, int   line, int   col, int   severity, const char*   code, const char*   msg) {
-    DiagEntry   e = (( DiagEntry ){. line  = line, . col  = col, . end_line  = line, . end_col  = (col  +  1), . severity  = severity, . code  = code, . message  = msg, . origin  = (self-> current_origin )});
+    const char*   origin = (self-> current_origin );
+    if ((origin  ==  NULL)) {
+        (origin  =  "");
+    }
+    DiagEntry   e = (( DiagEntry ){. line  = line, . col  = col, . end_line  = line, . end_col  = (col  +  1), . severity  = severity, . code  = code, . message  = msg, . origin  = origin});
     Vector_push__DiagEntry((self-> diagnostics ), e);
 }
 
@@ -9119,6 +9123,7 @@ void   analysis_unused_vars (Typer*   t, Vector__Stmt*   program) {
         if ((((s. kind )  !=  ST_FN)  ||  ((s. fn_body )  ==  NULL))) {
             continue;
         }
+        ((t-> current_origin )  =  (s. origin ));
         check_unused_in_body(t, (s. fn_body ));
     }
 }
@@ -9141,7 +9146,6 @@ void   check_unused_in_body (Typer*   t, Vector__Stmt*   body) {
                 }
             }
             if ((!used)) {
-                ((t-> current_origin )  =  (s. origin ));
                 Typer_warn(t, (s. line ), (s. column ), "unused-var", __glide_string_concat(__glide_string_concat("unused local `", name), "` (prefix with `_` to silence)"));
             }
         }
@@ -9225,6 +9229,7 @@ void   analysis_arena_not_freed (Typer*   t, Vector__Stmt*   program) {
         if ((((s. kind )  !=  ST_FN)  ||  ((s. fn_body )  ==  NULL))) {
             continue;
         }
+        ((t-> current_origin )  =  (s. origin ));
         check_arena_in_body(t, (s. fn_body ));
     }
 }
@@ -9237,7 +9242,6 @@ void   check_arena_in_body (Typer*   t, Vector__Stmt*   body) {
             Expr*   v = (s. let_value );
             if (((((((v  !=  NULL)  &&  ((v-> kind )  ==  EX_CALL))  &&  ((v-> lhs )  !=  NULL))  &&  (((v-> lhs )-> kind )  ==  EX_PATH))  &&  __glide_string_eq(((v-> lhs )-> str_val ), "Arena"))  &&  __glide_string_eq(((v-> lhs )-> field ), "new"))) {
                 if ((!arena_is_freed_in_body((s. name ), body, (i  +  1)))) {
-                    ((t-> current_origin )  =  (s. origin ));
                     Typer_warn(t, (s. line ), (s. column ), "arena-not-freed", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("arena `", (s. name )), "` is never freed (use `let "), (s. name )), "* = Arena::new(...)` or add `defer "), (s. name )), ".free()`)"));
                 }
             }
@@ -9328,9 +9332,11 @@ void   analysis_addr_of_temporary (Typer*   t, Vector__Stmt*   program) {
     for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
         Stmt   s = Vector_get__Stmt(program, i);
         if ((((s. kind )  ==  ST_FN)  &&  ((s. fn_body )  !=  NULL))) {
+            ((t-> current_origin )  =  (s. origin ));
             check_addr_temp_body(t, (s. fn_body ));
         }
         if ((((s. kind )  ==  ST_IMPL)  &&  ((s. impl_methods )  !=  NULL))) {
+            ((t-> current_origin )  =  (s. origin ));
             for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
                 Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
                 if (((m. fn_body )  !=  NULL)) {
@@ -9347,7 +9353,6 @@ void   check_addr_temp_body (Typer*   t, Vector__Stmt*   body) {
         if ((((s. kind )  ==  ST_RETURN)  &&  ((s. expr_value )  !=  NULL))) {
             Expr*   e = (s. expr_value );
             if ((((((e-> kind )  ==  EX_UNARY)  &&  (((e-> op_code )  ==  UN_ADDR)  ||  ((e-> op_code )  ==  UN_ADDR_MUT)))  &&  ((e-> operand )  !=  NULL))  &&  ((((e-> operand )-> kind )  ==  EX_STRUCT_LIT)  ||  (((e-> operand )-> kind )  ==  EX_NEW)))) {
-                ((t-> current_origin )  =  (s. origin ));
                 Typer_err_code(t, (s. line ), (s. column ), "addr-of-temporary", "cannot return address of a temporary value (would dangle); use `new T { ... }` to heap-allocate or return by value");
             }
         }
@@ -9364,9 +9369,11 @@ void   analysis_dead_code (Typer*   t, Vector__Stmt*   program) {
     for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
         Stmt   s = Vector_get__Stmt(program, i);
         if ((((s. kind )  ==  ST_FN)  &&  ((s. fn_body )  !=  NULL))) {
+            ((t-> current_origin )  =  (s. origin ));
             check_dead_code_body(t, (s. fn_body ));
         }
         if ((((s. kind )  ==  ST_IMPL)  &&  ((s. impl_methods )  !=  NULL))) {
+            ((t-> current_origin )  =  (s. origin ));
             for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
                 Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
                 if (((m. fn_body )  !=  NULL)) {
@@ -9383,7 +9390,6 @@ void   check_dead_code_body (Typer*   t, Vector__Stmt*   body) {
     for (int   i = 0; (i  <  n); i++) {
         Stmt   s = Vector_get__Stmt(body, i);
         if (terminated) {
-            ((t-> current_origin )  =  (s. origin ));
             Typer_warn(t, (s. line ), (s. column ), "dead-code", "unreachable code after return / break / continue");
             return;
         }
@@ -9518,9 +9524,11 @@ void   analysis_unnecessary_mut (Typer*   t, Vector__Stmt*   program) {
     for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
         Stmt   s = Vector_get__Stmt(program, i);
         if ((((s. kind )  ==  ST_FN)  &&  ((s. fn_body )  !=  NULL))) {
+            ((t-> current_origin )  =  (s. origin ));
             check_mut_body(t, (s. fn_body ));
         }
         if ((((s. kind )  ==  ST_IMPL)  &&  ((s. impl_methods )  !=  NULL))) {
+            ((t-> current_origin )  =  (s. origin ));
             for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
                 Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
                 if (((m. fn_body )  !=  NULL)) {
@@ -9545,7 +9553,6 @@ void   check_mut_body (Typer*   t, Vector__Stmt*   body) {
                 }
             }
             if ((!reassigned)) {
-                ((t-> current_origin )  =  (s. origin ));
                 Typer_warn(t, (s. line ), (s. column ), "unnecessary-mut", __glide_string_concat(__glide_string_concat("`mut` on `", (s. name )), "` is unnecessary; binding is never reassigned"));
             }
         }

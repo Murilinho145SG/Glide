@@ -157,11 +157,16 @@ impl Typer {
     }
 
     fn push_diag(self: *Typer, line: int, col: int, severity: int, code: string, msg: string) {
+        // current_origin can be null when an analysis sets it from an inner
+        // stmt's `s.origin` (only top-level stmts get stamped at parse time).
+        // Normalize to empty so downstream `.eq()` calls don't deref NULL.
+        let mut origin: string = self.current_origin;
+        if origin == null { origin = ""; }
         let e: DiagEntry = DiagEntry {
             line: line, col: col,
             end_line: line, end_col: col + 1,
             severity: severity, code: code, message: msg,
-            origin: self.current_origin,
+            origin: origin,
         };
         self.diagnostics.push(e);
     }
