@@ -1,9 +1,0 @@
-// Auto-drop inside a loop body — does it free per iteration?
-fn main() -> int {
-    for let i: int = 0; i < 3; i++ {
-        let v* = Vector::new();
-        v.push(i);
-        v.push(i + 10);
-    }
-    return 0;
-}

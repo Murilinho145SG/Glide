@@ -1,9 +1,0 @@
-// Should fail: two &mut x at the same scope.
-fn bad() -> int {
-    let mut x: int = 5;
-    let r1: &mut int = &mut x;
-    let r2: &mut int = &mut x;
-    return *r1 + *r2;
-}
-
-fn main() -> int { return 0; }

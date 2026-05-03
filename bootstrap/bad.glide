@@ -1,9 +1,0 @@
-fn add(a: int, b: int) -> int {
-    let x: bool = a + b;   // type mismatch: int = int + int but x is bool
-    return x;              // mismatch again
-}
-
-fn main() -> int {
-    let r: int = unknown_name + 1;   // unknown_name not declared
-    return r;
-}

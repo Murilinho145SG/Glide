@@ -1,6 +1,0 @@
-fn main() -> int {
-    let m = HashMap::new();
-    m.insert("a", 10);
-    m.insert("b", 32);
-    return m.get("a") + m.get("b");
-}

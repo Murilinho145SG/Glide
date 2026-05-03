@@ -1,8 +1,0 @@
-struct Box<T> {
-    val: T,
-}
-
-fn main() -> int {
-    let b: Box<int> = Box { val: 42 };
-    return b.val;
-}

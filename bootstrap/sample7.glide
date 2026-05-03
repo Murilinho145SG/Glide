@@ -1,9 +1,0 @@
-fn main() -> int {
-    let s: string = "hello";
-    let n: int = s.len();
-    let m: bool = s.eq("hello");
-    if m {
-        return n;
-    }
-    return 0;
-}

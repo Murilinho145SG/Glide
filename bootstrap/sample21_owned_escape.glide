@@ -1,9 +1,0 @@
-struct Point { x: int, y: int }
-
-// Should fail: returning auto-drop owned value would free at scope end.
-fn make() -> *Point {
-    let p: *Point = Point { x: 1, y: 2 };
-    return p;
-}
-
-fn main() -> int { return 0; }

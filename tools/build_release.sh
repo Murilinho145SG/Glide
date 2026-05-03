@@ -1,50 +1,79 @@
 #!/usr/bin/env bash
 # Stage everything a Glide install needs into dist/glide-<os>-<arch>-<ver>/
-# and pack it up. Layout:
+# and pack it up.
 #
-#   glide/
+# Modes:
+#   tools/build_release.sh                          # host only
+#   tools/build_release.sh --target=x86_64-linux    # cross-compile via Zig
+#
+# When --target is given, the script:
+#   1. Downloads the target-platform Zig toolchain into a staging dir
+#   2. Cross-builds the glide binary using the local Zig as `cc` with
+#      --target=<triple>
+#   3. Bundles target glide + target Zig + stdlib
+#
+# Layout:
+#   glide-<os>-<arch>-<ver>/
 #     glide(.exe)
 #     stdlib/
 #     runtime/zig/...
 #     README.md
 #     LICENSE
-#
-# Assumes:
-#   - tools/install_zig.sh has already been run (runtime/zig/ exists)
-#   - A working `glide` binary exists at ./glide(.exe), built via the
-#     bootstrap from bootstrap/seed/bootstrap.c.
 
 set -e
 
 VERSION="${VERSION:-0.1.0}"
+ZIG_VERSION="${ZIG_VERSION:-0.14.1}"
+TARGET=""
 
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --target=*) TARGET="${1#--target=}"; shift ;;
+        --version=*) VERSION="${1#--version=}"; shift ;;
+        *) echo "unknown arg: $1" >&2; exit 1 ;;
+    esac
+done
+
+# ---- Resolve host (where the script runs) ----
 case "$(uname -s)" in
-    Linux*)              OS=linux ;;
-    Darwin*)             OS=macos ;;
-    CYGWIN*|MINGW*|MSYS*) OS=windows ;;
-    *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
+    Linux*)              HOST_OS=linux ;;
+    Darwin*)             HOST_OS=macos ;;
+    CYGWIN*|MINGW*|MSYS*) HOST_OS=windows ;;
+    *) echo "unsupported host OS: $(uname -s)" >&2; exit 1 ;;
 esac
 case "$(uname -m)" in
-    x86_64|amd64) ARCH=x86_64 ;;
-    aarch64|arm64) ARCH=aarch64 ;;
-    *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
+    x86_64|amd64) HOST_ARCH=x86_64 ;;
+    aarch64|arm64) HOST_ARCH=aarch64 ;;
+    *) echo "unsupported host arch: $(uname -m)" >&2; exit 1 ;;
 esac
 
-if [ "$OS" = "windows" ]; then
-    BIN="glide.exe"
-    ARCHIVE_EXT="zip"
+# ---- Resolve target (what we're building for) ----
+if [ -z "$TARGET" ]; then
+    TARGET_OS="$HOST_OS"
+    TARGET_ARCH="$HOST_ARCH"
 else
-    BIN="glide"
-    ARCHIVE_EXT="tar.gz"
+    # Accept arch-os, e.g. x86_64-linux, aarch64-macos, x86_64-windows
+    TARGET_ARCH="${TARGET%-*}"
+    TARGET_OS="${TARGET##*-}"
 fi
 
-NAME="glide-${OS}-${ARCH}-${VERSION}"
-STAGE="dist/${NAME}"
+# Map our short OS names to Zig's triplet vocabulary.
+case "$TARGET_OS" in
+    windows) ZIG_TRIPLE="${TARGET_ARCH}-windows-gnu";  EXE_EXT=".exe" ;;
+    linux)   ZIG_TRIPLE="${TARGET_ARCH}-linux-gnu";    EXE_EXT="" ;;
+    macos)   ZIG_TRIPLE="${TARGET_ARCH}-macos-none";   EXE_EXT="" ;;
+    *) echo "unsupported target OS: $TARGET_OS" >&2; exit 1 ;;
+esac
 
-if [ ! -x "$BIN" ]; then
-    echo "no $BIN found in repo root. Build it first:" >&2
+NAME="glide-${TARGET_OS}-${TARGET_ARCH}-${VERSION}"
+STAGE="dist/${NAME}"
+HOST_GLIDE="glide${HOST_OS:+$([ "$HOST_OS" = windows ] && echo .exe)}"
+[ "$HOST_OS" = windows ] && HOST_GLIDE="glide.exe" || HOST_GLIDE="glide"
+
+if [ ! -x "$HOST_GLIDE" ]; then
+    echo "no host $HOST_GLIDE found in repo root. Build it first:" >&2
     echo "  cc bootstrap/seed/bootstrap.c -o glide_seed -O2 -lpthread -lm" >&2
-    echo "  ./glide_seed build bootstrap/main.glide -o $BIN" >&2
+    echo "  ./glide_seed build bootstrap/main.glide -o $HOST_GLIDE" >&2
     exit 1
 fi
 if [ ! -d runtime/zig ]; then
@@ -52,32 +81,74 @@ if [ ! -d runtime/zig ]; then
     exit 1
 fi
 
-echo ">> Staging at $STAGE"
-rm -rf "$STAGE"
+# ---- Download the target-platform Zig if cross-building ----
+TARGET_ZIG_DIR=""
+if [ "$TARGET_OS" != "$HOST_OS" ] || [ "$TARGET_ARCH" != "$HOST_ARCH" ]; then
+    TARGET_ZIG_DIR="dist/staging/zig-${TARGET_ARCH}-${TARGET_OS}-${ZIG_VERSION}"
+    if [ ! -d "$TARGET_ZIG_DIR" ]; then
+        echo ">> Fetching Zig $ZIG_VERSION for ${TARGET_ARCH}-${TARGET_OS}"
+        case "$TARGET_OS" in
+            windows) ZEXT="zip" ;;
+            *)       ZEXT="tar.xz" ;;
+        esac
+        ZNAME="zig-${TARGET_ARCH}-${TARGET_OS}-${ZIG_VERSION}"
+        URL="https://ziglang.org/download/${ZIG_VERSION}/${ZNAME}.${ZEXT}"
+        TMP="$(mktemp -d)"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fL --progress-bar -o "$TMP/zig.${ZEXT}" "$URL"
+        else
+            wget --show-progress -O "$TMP/zig.${ZEXT}" "$URL"
+        fi
+        ( cd "$TMP" && \
+          if [ "$ZEXT" = "zip" ]; then unzip -q "zig.${ZEXT}"; else tar -xf "zig.${ZEXT}"; fi )
+        mkdir -p dist/staging
+        mv "$TMP/$ZNAME" "$TARGET_ZIG_DIR"
+        rm -rf "$TMP"
+    fi
+fi
+
+# ---- Cross-build glide for target if needed ----
+TARGET_GLIDE="$STAGE/glide${EXE_EXT}"
 mkdir -p "$STAGE"
-cp "$BIN" "$STAGE/"
+
+if [ "$TARGET_OS" = "$HOST_OS" ] && [ "$TARGET_ARCH" = "$HOST_ARCH" ]; then
+    echo ">> Bundling host glide"
+    cp "$HOST_GLIDE" "$TARGET_GLIDE"
+else
+    echo ">> Cross-building glide for $ZIG_TRIPLE"
+    "./$HOST_GLIDE" build bootstrap/main.glide --target="$ZIG_TRIPLE" -o "$TARGET_GLIDE"
+fi
+
+# ---- Stage stdlib + Zig + docs ----
+echo ">> Staging $STAGE"
+rm -rf "$STAGE/stdlib" "$STAGE/runtime"
 cp -r stdlib "$STAGE/"
-cp -r runtime "$STAGE/"
+mkdir -p "$STAGE/runtime"
+if [ -n "$TARGET_ZIG_DIR" ]; then
+    cp -r "$TARGET_ZIG_DIR" "$STAGE/runtime/zig"
+else
+    cp -r runtime/zig "$STAGE/runtime/zig"
+fi
 cp README.md "$STAGE/" 2>/dev/null || true
 cp LICENSE "$STAGE/" 2>/dev/null || true
 
+# ---- Archive ----
 echo ">> Archiving"
-case "$ARCHIVE_EXT" in
-    zip)
+case "$TARGET_OS" in
+    windows)
         ( cd dist && rm -f "${NAME}.zip" && \
           if command -v zip >/dev/null 2>&1; then \
               zip -qr "${NAME}.zip" "$NAME"; \
           else \
               powershell -NoProfile -Command "Compress-Archive -Path '$NAME' -DestinationPath '${NAME}.zip' -Force"; \
           fi )
-        echo ">> dist/${NAME}.zip"
+        ARCHIVE="dist/${NAME}.zip"
         ;;
-    tar.gz)
+    linux|macos)
         ( cd dist && tar -czf "${NAME}.tar.gz" "$NAME" )
-        echo ">> dist/${NAME}.tar.gz"
+        ARCHIVE="dist/${NAME}.tar.gz"
         ;;
 esac
 
-# Report final size
-SIZE=$(du -sh "dist/${NAME}.${ARCHIVE_EXT}" | cut -f1)
-echo ">> Done: dist/${NAME}.${ARCHIVE_EXT} ($SIZE)"
+SIZE=$(du -sh "$ARCHIVE" | cut -f1)
+echo ">> Done: $ARCHIVE ($SIZE)"
