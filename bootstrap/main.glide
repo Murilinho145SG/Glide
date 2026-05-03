@@ -6,6 +6,8 @@ import "ast.glide";
 import "parser.glide";
 import "typer.glide";
 import "codegen.glide";
+import "json.glide";
+import "lsp.glide";
 
 fn print_indent(n: int) {
     for let i: int = 0; i < n; i++ { print!("  "); }
@@ -164,6 +166,7 @@ fn print_usage() {
     println!("  glide run <file>");
     println!("  glide emit <file>          (print generated C to stdout)");
     println!("  glide check <file>         (parse + type-check, no codegen)");
+    println!("  glide lsp                  (language server on stdio)");
 }
 
 fn parse_program_into(stmts: *Vector<Stmt>, path: string) -> bool {
@@ -265,6 +268,9 @@ fn main() -> int {
     }
     let cmd: string = args_at(1);
 
+    // `lsp` takes no positional file arg.
+    if cmd.eq("lsp") { return lsp_main(); }
+
     let mut mode: int = MODE_EMIT;
     let mut src_arg_idx: int = 2;
     if cmd.eq("build") { mode = MODE_BUILD; }
@@ -322,8 +328,18 @@ fn main() -> int {
     if mode == MODE_CHECK {
         let t: *Typer = Typer::new();
         check_program(t, stmts);
+        for let i: int = 0; i < t.diagnostics.len(); i++ {
+            let d: DiagEntry = t.diagnostics.get(i);
+            let mut tag: string = "error";
+            if d.severity == 2 { tag = "warning"; }
+            if d.severity == 3 { tag = "info"; }
+            if d.severity == 4 { tag = "hint"; }
+            print!(src_path, ":", d.line, ":", d.col, ": ", tag);
+            if !d.code.eq("") { print!(" [", d.code, "]"); }
+            println!(": ", d.message);
+        }
         if t.error_count > 0 {
-            println!(t.error_count, "type error(s)");
+            println!(t.error_count, "error(s)");
             t.free();
             return 1;
         }

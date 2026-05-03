@@ -1,0 +1,415 @@
+// Glide LSP server. JSON-RPC over stdio per the Language Server Protocol.
+//
+// Implemented:
+//   initialize / initialized / shutdown / exit
+//   textDocument/didOpen, didChange, didClose
+//   publishDiagnostics (errors + warnings from the typer; null safety;
+//   unused-var; arena-not-freed)
+//
+// Coming next sessions: hover, definition, completion, references.
+
+import "ast.glide";
+import "lexer.glide";
+import "parser.glide";
+import "typer.glide";
+import "json.glide";
+
+// FFI to runtime helpers (defined in codegen runtime emit).
+extern fn __glide_read_line() -> string;
+extern fn __glide_read_bytes(n: int) -> string;
+extern fn __glide_write_str(s: string);
+extern fn __glide_flush_stdout();
+extern fn __glide_log(s: string);
+extern fn __glide_set_binary_io();
+
+// ---- Document store ----------------------------------------------------
+
+pub struct LspDoc {
+    uri: string,
+    text: string,
+    version: int,
+}
+
+pub struct LspState {
+    docs: *HashMap<LspDoc>,
+    shutdown_requested: bool,
+}
+
+pub fn lsp_state_new() -> *LspState {
+    let s: *LspState = malloc(sizeof(LspState)) as *LspState;
+    let m: *HashMap<LspDoc> = HashMap::new();
+    s.docs = m;
+    s.shutdown_requested = false;
+    return s;
+}
+
+// ---- Wire protocol -----------------------------------------------------
+
+// Read a single LSP message: parse `Content-Length: N` header, blank line,
+// then read N bytes of payload. Returns "" on EOF.
+fn lsp_read_message() -> string {
+    let mut content_length: int = 0;
+    while true {
+        let line: string = __glide_read_line();
+        if line.eq("") { return ""; }
+        let n: int = line.len();
+        // Strip trailing \r\n / \n
+        let mut end: int = n;
+        while end > 0 {
+            let c: int = line.at(end - 1).to_int();
+            if c == 10 || c == 13 { end = end - 1; }
+            else { break; }
+        }
+        if end == 0 { break; }   // blank line ends header
+        // Look for "Content-Length: N"
+        let trimmed: string = line.substring(0, end);
+        if trimmed.len() > 16 {
+            let prefix: string = trimmed.substring(0, 16);
+            if prefix.eq("Content-Length: ") {
+                content_length = parse_int_str(trimmed.substring(16, trimmed.len()));
+            }
+        }
+    }
+    if content_length <= 0 { return ""; }
+    return __glide_read_bytes(content_length);
+}
+
+fn parse_int_str(s: string) -> int {
+    let mut n: int = 0;
+    let len: int = s.len();
+    for let i: int = 0; i < len; i++ {
+        let c: int = s.at(i).to_int();
+        if c < 48 || c > 57 { break; }
+        n = n * 10 + (c - 48);
+    }
+    return n;
+}
+
+fn lsp_send(payload: string) {
+    let header: string = "Content-Length: ".concat(int_to_str(payload.len())).concat("\r\n\r\n");
+    __glide_write_str(header);
+    __glide_write_str(payload);
+    __glide_flush_stdout();
+}
+
+fn lsp_send_response(id: *JsonValue, result: *JsonValue) {
+    let resp: *JsonValue = json_object();
+    json_obj_set(resp, "jsonrpc", json_string("2.0"));
+    if id != null { json_obj_set(resp, "id", id); }
+    json_obj_set(resp, "result", result);
+    lsp_send(json_emit(resp));
+}
+
+fn lsp_send_notification(method: string, params: *JsonValue) {
+    let n: *JsonValue = json_object();
+    json_obj_set(n, "jsonrpc", json_string("2.0"));
+    json_obj_set(n, "method", json_string(method));
+    json_obj_set(n, "params", params);
+    lsp_send(json_emit(n));
+}
+
+// ---- Method handlers ---------------------------------------------------
+
+fn handle_initialize(req: *JsonValue) {
+    let id: *JsonValue = json_get(req, "id");
+    let result: *JsonValue = json_object();
+    let caps: *JsonValue = json_object();
+    // textDocumentSync: 1 = Full sync. We re-parse on every change.
+    json_obj_set(caps, "textDocumentSync", json_int(1));
+    // Future capabilities (off for now): hoverProvider, definitionProvider, completionProvider.
+    json_obj_set(result, "capabilities", caps);
+    let info: *JsonValue = json_object();
+    json_obj_set(info, "name", json_string("glide-lsp"));
+    json_obj_set(info, "version", json_string("0.1.0"));
+    json_obj_set(result, "serverInfo", info);
+    lsp_send_response(id, result);
+}
+
+fn handle_shutdown(req: *JsonValue, state: *LspState) {
+    state.shutdown_requested = true;
+    let id: *JsonValue = json_get(req, "id");
+    lsp_send_response(id, json_null());
+}
+
+// Convert one DiagEntry into the LSP Diagnostic JSON shape.
+fn diag_to_json(d: *DiagEntry) -> *JsonValue {
+    let dj: *JsonValue = json_object();
+    let range: *JsonValue = json_object();
+    let start: *JsonValue = json_object();
+    let endp: *JsonValue = json_object();
+    // LSP positions are 0-indexed; the typer reports 1-indexed lines/cols.
+    let mut line0: int = d.line - 1;  if line0 < 0 { line0 = 0; }
+    let mut col0:  int = d.col  - 1;  if col0  < 0 { col0 = 0; }
+    let mut endl: int = d.end_line - 1; if endl < 0 { endl = 0; }
+    let mut endc: int = d.end_col  - 1; if endc < 0 { endc = 0; }
+    json_obj_set(start, "line", json_int(line0));
+    json_obj_set(start, "character", json_int(col0));
+    json_obj_set(endp,  "line", json_int(endl));
+    json_obj_set(endp,  "character", json_int(endc));
+    json_obj_set(range, "start", start);
+    json_obj_set(range, "end", endp);
+    json_obj_set(dj, "range", range);
+    json_obj_set(dj, "severity", json_int(d.severity));
+    if !d.code.eq("") { json_obj_set(dj, "code", json_string(d.code)); }
+    json_obj_set(dj, "source", json_string("glide"));
+    json_obj_set(dj, "message", json_string(d.message));
+    return dj;
+}
+
+fn run_analysis_and_publish(uri: string, text: string) {
+    // Parse the user's source. No imports / no stdlib autoload here — for
+    // editor responsiveness we keep the analysis local. This means the typer
+    // will sometimes flag identifiers that are actually defined in stdlib
+    // or in imported files. That's fine for v1; future versions will resolve
+    // imports relative to the URI.
+    let lex: *Lexer = Lexer::new(text);
+    let p: *Parser = Parser::new(lex);
+    let stmts: *Vector<Stmt> = parse_program(p);
+
+    // Type check.
+    let t: *Typer = Typer::new();
+    check_program(t, stmts);
+
+    // Run extra analysis passes.
+    analysis_unused_vars(t, stmts);
+    analysis_arena_not_freed(t, stmts);
+
+    // Build diagnostics array.
+    let arr: *JsonValue = json_array();
+    for let i: int = 0; i < t.diagnostics.len(); i++ {
+        let d: DiagEntry = t.diagnostics.get(i);
+        json_arr_push(arr, diag_to_json(&d));
+    }
+
+    let params: *JsonValue = json_object();
+    json_obj_set(params, "uri", json_string(uri));
+    json_obj_set(params, "diagnostics", arr);
+    lsp_send_notification("textDocument/publishDiagnostics", params);
+
+    t.free();
+}
+
+fn handle_did_open(req: *JsonValue, state: *LspState) {
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    let text: string = json_as_string(json_get(td, "text"));
+    let version: int = json_as_int(json_get(td, "version"));
+    let doc: LspDoc = LspDoc { uri: uri, text: text, version: version };
+    state.docs.insert(uri, doc);
+    run_analysis_and_publish(uri, text);
+}
+
+fn handle_did_change(req: *JsonValue, state: *LspState) {
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    let version: int = json_as_int(json_get(td, "version"));
+    // Full-sync mode: contentChanges[0].text is the full new content.
+    let changes: *JsonValue = json_get(params, "contentChanges");
+    let first: *JsonValue = json_at(changes, 0);
+    let text: string = json_as_string(json_get(first, "text"));
+    if text.eq("") {
+        // didChange w/ empty diff in incremental mode would land here; ignore.
+        return;
+    }
+    let doc: LspDoc = LspDoc { uri: uri, text: text, version: version };
+    state.docs.insert(uri, doc);
+    run_analysis_and_publish(uri, text);
+}
+
+fn handle_did_close(req: *JsonValue, state: *LspState) {
+    let params: *JsonValue = json_get(req, "params");
+    let td: *JsonValue = json_get(params, "textDocument");
+    let uri: string = json_as_string(json_get(td, "uri"));
+    state.docs.remove(uri);
+    // Clear diagnostics for this URI.
+    let p: *JsonValue = json_object();
+    json_obj_set(p, "uri", json_string(uri));
+    json_obj_set(p, "diagnostics", json_array());
+    lsp_send_notification("textDocument/publishDiagnostics", p);
+}
+
+// ---- Custom analysis passes --------------------------------------------
+
+// Walk a fn body collecting let names, then walk again to find references.
+// Anything declared but never referenced (and not prefixed with `_`) gets a
+// warning. Skips fn params for v1.
+fn analysis_unused_vars(t: *Typer, program: *Vector<Stmt>) {
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind != ST_FN || s.fn_body == null { continue; }
+        check_unused_in_body(t, s.fn_body);
+    }
+}
+
+fn check_unused_in_body(t: *Typer, body: *Vector<Stmt>) {
+    let n: int = body.len();
+    for let i: int = 0; i < n; i++ {
+        let s: Stmt = body.get(i);
+        if s.kind == ST_LET {
+            let name: string = s.name;
+            // Skip names beginning with `_` (intentional discard convention).
+            if name.len() > 0 && name.at(0).to_int() == 95 { continue; }
+            let mut used: bool = false;
+            for let j: int = i + 1; j < n; j++ {
+                let s2: Stmt = body.get(j);
+                if stmt_uses_name(&s2, name) { used = true; break; }
+            }
+            if !used {
+                t.warn(s.line, s.column, "unused-var",
+                    "unused local `".concat(name).concat("` (prefix with `_` to silence)"));
+            }
+        }
+        // Recurse into nested bodies.
+        if s.then_body != null { check_unused_in_body(t, s.then_body); }
+        if s.else_body != null { check_unused_in_body(t, s.else_body); }
+    }
+}
+
+fn stmt_uses_name(s: *Stmt, name: string) -> bool {
+    if s == null { return false; }
+    if s.let_value != null && expr_uses_name(s.let_value, name) { return true; }
+    if s.expr_value != null && expr_uses_name(s.expr_value, name) { return true; }
+    if s.cond != null && expr_uses_name(s.cond, name) { return true; }
+    if s.for_step != null && expr_uses_name(s.for_step, name) { return true; }
+    if s.for_init != null && stmt_uses_name(s.for_init, name) { return true; }
+    if s.then_body != null {
+        for let i: int = 0; i < s.then_body.len(); i++ {
+            let b: Stmt = s.then_body.get(i);
+            if stmt_uses_name(&b, name) { return true; }
+        }
+    }
+    if s.else_body != null {
+        for let i: int = 0; i < s.else_body.len(); i++ {
+            let b: Stmt = s.else_body.get(i);
+            if stmt_uses_name(&b, name) { return true; }
+        }
+    }
+    return false;
+}
+
+fn expr_uses_name(e: *Expr, name: string) -> bool {
+    if e == null { return false; }
+    if e.kind == EX_IDENT && e.str_val.eq(name) { return true; }
+    if e.lhs != null && expr_uses_name(e.lhs, name) { return true; }
+    if e.rhs != null && expr_uses_name(e.rhs, name) { return true; }
+    if e.operand != null && expr_uses_name(e.operand, name) { return true; }
+    if e.args != null {
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            if expr_uses_name(&a, name) { return true; }
+        }
+    }
+    return false;
+}
+
+// `let arena: *Arena = Arena::new(...)` without a paired `defer arena.free()`
+// or `arena.free()` somewhere later in the scope is a leak.
+// `let arena* = Arena::new(...)` is fine — auto-drop handles it.
+fn analysis_arena_not_freed(t: *Typer, program: *Vector<Stmt>) {
+    for let i: int = 0; i < program.len(); i++ {
+        let s: Stmt = program.get(i);
+        if s.kind != ST_FN || s.fn_body == null { continue; }
+        check_arena_in_body(t, s.fn_body);
+    }
+}
+
+fn check_arena_in_body(t: *Typer, body: *Vector<Stmt>) {
+    let n: int = body.len();
+    for let i: int = 0; i < n; i++ {
+        let s: Stmt = body.get(i);
+        if s.kind == ST_LET && !s.is_auto_owned {
+            // Detect `Arena::new(...)` initializer (ignore type annot — we
+            // recognize the constructor pattern).
+            let v: *Expr = s.let_value;
+            if v != null && v.kind == EX_CALL && v.lhs != null
+               && v.lhs.kind == EX_PATH && v.lhs.str_val.eq("Arena")
+               && v.lhs.field.eq("new") {
+                if !arena_is_freed_in_body(s.name, body, i + 1) {
+                    t.warn(s.line, s.column, "arena-not-freed",
+                        "arena `".concat(s.name)
+                        .concat("` is never freed (use `let ").concat(s.name)
+                        .concat("* = Arena::new(...)` or add `defer ").concat(s.name)
+                        .concat(".free()`)"));
+                }
+            }
+        }
+        if s.then_body != null { check_arena_in_body(t, s.then_body); }
+        if s.else_body != null { check_arena_in_body(t, s.else_body); }
+    }
+}
+
+fn arena_is_freed_in_body(name: string, body: *Vector<Stmt>, start: int) -> bool {
+    let n: int = body.len();
+    for let i: int = start; i < n; i++ {
+        let s: Stmt = body.get(i);
+        if stmt_calls_method(&s, name, "free") { return true; }
+    }
+    return false;
+}
+
+fn stmt_calls_method(s: *Stmt, var: string, method: string) -> bool {
+    if s == null { return false; }
+    if s.expr_value != null && expr_calls_method(s.expr_value, var, method) { return true; }
+    if s.let_value != null && expr_calls_method(s.let_value, var, method) { return true; }
+    if s.cond != null && expr_calls_method(s.cond, var, method) { return true; }
+    if s.for_step != null && expr_calls_method(s.for_step, var, method) { return true; }
+    if s.then_body != null {
+        for let i: int = 0; i < s.then_body.len(); i++ {
+            let b: Stmt = s.then_body.get(i);
+            if stmt_calls_method(&b, var, method) { return true; }
+        }
+    }
+    if s.else_body != null {
+        for let i: int = 0; i < s.else_body.len(); i++ {
+            let b: Stmt = s.else_body.get(i);
+            if stmt_calls_method(&b, var, method) { return true; }
+        }
+    }
+    return false;
+}
+
+fn expr_calls_method(e: *Expr, var: string, method: string) -> bool {
+    if e == null { return false; }
+    if e.kind == EX_CALL && e.lhs != null && e.lhs.kind == EX_MEMBER
+       && e.lhs.lhs != null && e.lhs.lhs.kind == EX_IDENT
+       && e.lhs.lhs.str_val.eq(var) && e.lhs.field.eq(method) {
+        return true;
+    }
+    if e.lhs != null && expr_calls_method(e.lhs, var, method) { return true; }
+    if e.rhs != null && expr_calls_method(e.rhs, var, method) { return true; }
+    if e.operand != null && expr_calls_method(e.operand, var, method) { return true; }
+    if e.args != null {
+        for let i: int = 0; i < e.args.len(); i++ {
+            let a: Expr = e.args.get(i);
+            if expr_calls_method(&a, var, method) { return true; }
+        }
+    }
+    return false;
+}
+
+// ---- Main loop ---------------------------------------------------------
+
+pub fn lsp_main() -> int {
+    __glide_set_binary_io();
+    let state: *LspState = lsp_state_new();
+    while true {
+        let raw: string = lsp_read_message();
+        if raw.eq("") { break; }
+        let req: *JsonValue = json_parse(raw);
+        if req == null { continue; }
+        let method: string = json_as_string(json_get(req, "method"));
+        if method.eq("initialize") { handle_initialize(req); continue; }
+        if method.eq("initialized") { continue; }
+        if method.eq("shutdown") { handle_shutdown(req, state); continue; }
+        if method.eq("exit") { break; }
+        if method.eq("textDocument/didOpen") { handle_did_open(req, state); continue; }
+        if method.eq("textDocument/didChange") { handle_did_change(req, state); continue; }
+        if method.eq("textDocument/didClose") { handle_did_close(req, state); continue; }
+        // Any unhandled request gets an empty-result reply so clients don't hang.
+        let id: *JsonValue = json_get(req, "id");
+        if id != null { lsp_send_response(id, json_null()); }
+    }
+    return 0;
+}

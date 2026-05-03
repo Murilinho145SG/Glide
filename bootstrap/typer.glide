@@ -80,6 +80,18 @@ pub struct BorrowEvent {
     is_mut: bool,
 }
 
+// Severity levels match LSP's DiagnosticSeverity:
+//   1 = error, 2 = warning, 3 = information, 4 = hint
+pub struct DiagEntry {
+    line: int,
+    col: int,
+    end_line: int,
+    end_col: int,
+    severity: int,
+    code: string,        // stable identifier (e.g. "unused-var", "type-mismatch")
+    message: string,
+}
+
 pub struct Typer {
     fns: *HashMap<FnSig>,
     structs: *HashMap<bool>,        // just registry of names for now
@@ -88,6 +100,7 @@ pub struct Typer {
     borrows: *Vector<BorrowEvent>,  // active let-bound borrows; save/restore per block
     current_ret: *Type,
     error_count: int,
+    diagnostics: *Vector<DiagEntry>,
 }
 
 impl Typer {
@@ -98,11 +111,13 @@ impl Typer {
         let scope: *HashMap<Type> = HashMap::new();
         let owned: *HashMap<bool> = HashMap::new();
         let bw: *Vector<BorrowEvent> = Vector::new();
+        let dg: *Vector<DiagEntry> = Vector::new();
         t.fns = fns;
         t.structs = structs;
         t.scope = scope;
         t.owned_locals = owned;
         t.borrows = bw;
+        t.diagnostics = dg;
         t.current_ret = null;
         t.error_count = 0;
         return t;
@@ -114,12 +129,31 @@ impl Typer {
         self.scope.free();
         self.owned_locals.free();
         self.borrows.free();
+        self.diagnostics.free();
         free(self as *void);
     }
 
+    fn push_diag(self: *Typer, line: int, col: int, severity: int, code: string, msg: string) {
+        let e: DiagEntry = DiagEntry {
+            line: line, col: col,
+            end_line: line, end_col: col + 1,
+            severity: severity, code: code, message: msg,
+        };
+        self.diagnostics.push(e);
+    }
+
     fn err(self: *Typer, line: int, col: int, msg: string) {
-        println!("type error at", line, ":", col, "-", msg);
+        self.push_diag(line, col, 1, "", msg);
         self.error_count = self.error_count + 1;
+    }
+
+    fn err_code(self: *Typer, line: int, col: int, code: string, msg: string) {
+        self.push_diag(line, col, 1, code, msg);
+        self.error_count = self.error_count + 1;
+    }
+
+    fn warn(self: *Typer, line: int, col: int, code: string, msg: string) {
+        self.push_diag(line, col, 2, code, msg);
     }
 }
 
@@ -144,7 +178,7 @@ pub fn pre_register(t: *Typer, program: *Vector<Stmt>) {
                 for let j: int = 0; j < s.struct_fields.len(); j++ {
                     let f: Field = s.struct_fields.get(j);
                     if f.ty != null && (f.ty.kind == TY_BORROW || f.ty.kind == TY_BORROW_MUT) {
-                        t.err(s.line, s.column,
+                        t.err_code(s.line, s.column, "borrow-in-field",
                             "borrow `".concat(type_to_string(f.ty))
                             .concat("` not allowed in struct field `").concat(f.name)
                             .concat("` (use `*T` instead)"));
@@ -172,13 +206,13 @@ fn record_borrow(t: *Typer, source: string, is_mut: bool, line: int, col: int) {
     let n_mut: int = count_borrows(t, source, true);
     if is_mut {
         if n_mut > 0 || n_shared > 0 {
-            t.err(line, col,
+            t.err_code(line, col, "overlap-borrow",
                 "cannot borrow `".concat(source)
                 .concat("` as mutable: already borrowed (across statements)"));
         }
     } else {
         if n_mut > 0 {
-            t.err(line, col,
+            t.err_code(line, col, "overlap-borrow",
                 "cannot borrow `".concat(source)
                 .concat("` as immutable: already mutably borrowed"));
         }
@@ -216,7 +250,7 @@ fn check_call_aliasing(t: *Typer, call: *Expr) {
                 let im: bool = muts.get(i);
                 let jm: bool = muts.get(j);
                 if im || jm {
-                    t.err(call.line, call.column,
+                    t.err_code(call.line, call.column, "borrow-alias-in-call",
                         "cannot pass `".concat(names.get(i))
                         .concat("` aliased through both shared and mutable borrow in same call"));
                 }
@@ -379,11 +413,30 @@ fn check_stmt(t: *Typer, s: *Stmt) {
 fn check_let_or_const(t: *Typer, s: *Stmt) {
     let mut final_ty: *Type = s.let_ty;
 
+    // Null safety: borrows can never be null. `let r: &T = null` and friends
+    // are rejected. This applies to any borrow-typed binding, regardless of
+    // initializer.
+    if s.let_ty != null && (s.let_ty.kind == TY_BORROW || s.let_ty.kind == TY_BORROW_MUT) {
+        if s.let_value != null && s.let_value.kind == EX_NULL {
+            t.err_code(s.line, s.column, "null-borrow",
+                "borrow `".concat(type_to_string(s.let_ty))
+                .concat("` cannot be null"));
+        }
+    }
+    // Null safety: auto-drop owned (`let v* = expr`) cannot be initialized
+    // with null — auto-free would call free(null) or hit a method on null.
+    if s.kind == ST_LET && s.is_auto_owned && s.let_value != null
+       && s.let_value.kind == EX_NULL {
+        t.err_code(s.line, s.column, "null-auto-drop",
+            "auto-drop binding `".concat(s.name)
+            .concat("` cannot be initialized with null"));
+    }
+
     // Borrow rule: rebinding an owned local would double-free at scope end.
     if s.let_value != null && s.let_value.kind == EX_IDENT {
         let src: string = s.let_value.str_val;
         if t.owned_locals.contains(src) {
-            t.err(s.line, s.column,
+            t.err_code(s.line, s.column, "owned-move",
                 "cannot move owned value `".concat(src)
                 .concat("` into another binding (auto-drop conflict)"));
         }

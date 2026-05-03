@@ -104,6 +104,37 @@ static const char* __glide_getenv(const char* name) { const char* v = getenv(nam
 static bool __glide_file_exists(const char* path) {
     FILE* f = fopen(path, "rb"); if (!f) return false; fclose(f); return true;
 }
+#ifdef _WIN32
+#include <fcntl.h>
+static void __glide_set_binary_io(void) {
+    _setmode(_fileno(stdin), _O_BINARY);
+    _setmode(_fileno(stdout), _O_BINARY);
+}
+#else
+static void __glide_set_binary_io(void) {}
+#endif
+static const char* __glide_read_line(void) {
+    static char buf[8192];
+    if (!fgets(buf, sizeof(buf), stdin)) { buf[0] = 0; return buf; }
+    return buf;
+}
+static const char* __glide_read_bytes(int n) {
+    if (n <= 0) return "";
+    char* buf = (char*)malloc((size_t)n + 1);
+    size_t got = fread(buf, 1, (size_t)n, stdin);
+    buf[got] = 0;
+    return buf;
+}
+static void __glide_write_str(const char* s) {
+    fputs(s, stdout);
+}
+static void __glide_write_bytes(const char* s, int n) {
+    if (n > 0) fwrite(s, 1, (size_t)n, stdout);
+}
+static void __glide_flush_stdout(void) { fflush(stdout); }
+static void __glide_log(const char* s) {
+    fputs(s, stderr); fputc('\n', stderr); fflush(stderr);
+}
 static int __glide_is_windows(void) {
 #ifdef _WIN32
     return 1;
@@ -172,10 +203,13 @@ typedef struct  HashMap__FnSig   HashMap__FnSig ;
 typedef struct  HashMap__bool   HashMap__bool ;
 typedef struct  HashMap__Type   HashMap__Type ;
 typedef struct  Vector__BorrowEvent   Vector__BorrowEvent ;
+typedef struct  Vector__DiagEntry   Vector__DiagEntry ;
 typedef struct  Vector__bool   Vector__bool ;
 typedef struct  HashMap__Stmt   HashMap__Stmt ;
 typedef struct  Vector__FnMonoEntry   Vector__FnMonoEntry ;
 typedef struct  Vector__AnonFn   Vector__AnonFn ;
+typedef struct  Vector__JsonValue   Vector__JsonValue ;
+typedef struct  HashMap__LspDoc   HashMap__LspDoc ;
 typedef struct  Token   Token ;
 typedef struct  Lexer   Lexer ;
 typedef struct  Type   Type ;
@@ -189,10 +223,15 @@ typedef struct  StructLitField   StructLitField ;
 typedef struct  Parser   Parser ;
 typedef struct  FnSig   FnSig ;
 typedef struct  BorrowEvent   BorrowEvent ;
+typedef struct  DiagEntry   DiagEntry ;
 typedef struct  Typer   Typer ;
 typedef struct  FnMonoEntry   FnMonoEntry ;
 typedef struct  AnonFn   AnonFn ;
 typedef struct  CG   CG ;
+typedef struct  JsonValue   JsonValue ;
+typedef struct  JsonParser   JsonParser ;
+typedef struct  LspDoc   LspDoc ;
+typedef struct  LspState   LspState ;
 
 struct  Vector__Type  {
      Type*   data;
@@ -272,6 +311,12 @@ struct  Vector__BorrowEvent  {
      int   cap;
 };
 
+struct  Vector__DiagEntry  {
+     DiagEntry*   data;
+     int   len;
+     int   cap;
+};
+
 struct  Vector__bool  {
      bool*   data;
      int   len;
@@ -294,6 +339,20 @@ struct  Vector__FnMonoEntry  {
 
 struct  Vector__AnonFn  {
      AnonFn*   data;
+     int   len;
+     int   cap;
+};
+
+struct  Vector__JsonValue  {
+     JsonValue*   data;
+     int   len;
+     int   cap;
+};
+
+struct  HashMap__LspDoc  {
+     const char**   keys;
+     LspDoc*   values;
+     bool*   occupied;
      int   len;
      int   cap;
 };
@@ -414,6 +473,16 @@ typedef struct  BorrowEvent  {
      bool   is_mut;
 }  BorrowEvent ;
 
+typedef struct  DiagEntry  {
+     int   line;
+     int   col;
+     int   end_line;
+     int   end_col;
+     int   severity;
+     const char*   code;
+     const char*   message;
+}  DiagEntry ;
+
 typedef struct  Typer  {
      HashMap__FnSig*   fns;
      HashMap__bool*   structs;
@@ -422,6 +491,7 @@ typedef struct  Typer  {
      Vector__BorrowEvent*   borrows;
      Type*   current_ret;
      int   error_count;
+     Vector__DiagEntry*   diagnostics;
 }  Typer ;
 
 typedef struct  FnMonoEntry  {
@@ -455,6 +525,33 @@ typedef struct  CG  {
      Vector__Type*   result_types;
      Type*   current_ret_ty;
 }  CG ;
+
+typedef struct  JsonValue  {
+     int   kind;
+     bool   b;
+     int   i;
+     const char*   s;
+     Vector__JsonValue*   arr;
+     Vector__string*   obj_keys;
+     Vector__JsonValue*   obj_vals;
+}  JsonValue ;
+
+typedef struct  JsonParser  {
+     const char*   src;
+     int   pos;
+     int   n;
+}  JsonParser ;
+
+typedef struct  LspDoc  {
+     const char*   uri;
+     const char*   text;
+     int   version;
+}  LspDoc ;
+
+typedef struct  LspState  {
+     HashMap__LspDoc*   docs;
+     bool   shutdown_requested;
+}  LspState ;
 
 #define  TOK_EOF  0
 #define  TOK_IDENT  1
@@ -543,6 +640,12 @@ typedef struct  CG  {
 #define  ST_ENUM  15
 #define  ST_MATCH  16
 #define  ST_SPAWN  17
+#define  JSON_NULL  0
+#define  JSON_BOOL  1
+#define  JSON_INT  2
+#define  JSON_STRING  3
+#define  JSON_ARRAY  4
+#define  JSON_OBJECT  5
 #define  MODE_EMIT  0
 #define  MODE_BUILD  1
 #define  MODE_RUN  2
@@ -688,6 +791,63 @@ void   emit_top_const (CG*   g, Stmt*   s);
 void   emit_struct_mono (CG*   g, Type*   t);
 void   collect_generic_uses_in_type (Type*   t, Vector__Type*   out);
 void   collect_generic_uses_in_stmt (Stmt*   s, Vector__Type*   out);
+JsonValue*   json_null (void);
+JsonValue*   json_bool (bool   b);
+JsonValue*   json_int (int   n);
+JsonValue*   json_string (const char*   s);
+JsonValue*   json_array (void);
+JsonValue*   json_object (void);
+void   json_arr_push (JsonValue*   arr, JsonValue*   v);
+void   json_obj_set (JsonValue*   obj, const char*   key, JsonValue*   v);
+JsonValue*   json_get (JsonValue*   v, const char*   key);
+JsonValue*   json_at (JsonValue*   v, int   idx);
+const char*   json_as_string (JsonValue*   v);
+int   json_as_int (JsonValue*   v);
+bool   json_as_bool (JsonValue*   v);
+bool   json_is_null (JsonValue*   v);
+int   jp_peek (JsonParser*   p);
+int   jp_advance (JsonParser*   p);
+void   jp_skip_ws (JsonParser*   p);
+JsonValue*   jp_value (JsonParser*   p);
+JsonValue*   jp_object (JsonParser*   p);
+JsonValue*   jp_array (JsonParser*   p);
+JsonValue*   jp_string_value (JsonParser*   p);
+const char*   jp_unescape (const char*   raw);
+JsonValue*   jp_bool (JsonParser*   p);
+JsonValue*   jp_null (JsonParser*   p);
+JsonValue*   jp_number (JsonParser*   p);
+JsonValue*   json_parse (const char*   src);
+const char*   json_escape (const char*   s);
+const char*   json_emit (JsonValue*   v);
+const char*   __glide_read_line (void);
+const char*   __glide_read_bytes (int   n);
+void   __glide_write_str (const char*   s);
+void   __glide_flush_stdout (void);
+void   __glide_log (const char*   s);
+void   __glide_set_binary_io (void);
+LspState*   lsp_state_new (void);
+const char*   lsp_read_message (void);
+int   parse_int_str (const char*   s);
+void   lsp_send (const char*   payload);
+void   lsp_send_response (JsonValue*   id, JsonValue*   result);
+void   lsp_send_notification (const char*   method, JsonValue*   params);
+void   handle_initialize (JsonValue*   req);
+void   handle_shutdown (JsonValue*   req, LspState*   state);
+JsonValue*   diag_to_json (DiagEntry*   d);
+void   run_analysis_and_publish (const char*   uri, const char*   text);
+void   handle_did_open (JsonValue*   req, LspState*   state);
+void   handle_did_change (JsonValue*   req, LspState*   state);
+void   handle_did_close (JsonValue*   req, LspState*   state);
+void   analysis_unused_vars (Typer*   t, Vector__Stmt*   program);
+void   check_unused_in_body (Typer*   t, Vector__Stmt*   body);
+bool   stmt_uses_name (Stmt*   s, const char*   name);
+bool   expr_uses_name (Expr*   e, const char*   name);
+void   analysis_arena_not_freed (Typer*   t, Vector__Stmt*   program);
+void   check_arena_in_body (Typer*   t, Vector__Stmt*   body);
+bool   arena_is_freed_in_body (const char*   name, Vector__Stmt*   body, int   start);
+bool   stmt_calls_method (Stmt*   s, const char*   var, const char*   method);
+bool   expr_calls_method (Expr*   e, const char*   var, const char*   method);
+int   lsp_main (void);
 void   print_indent (int   n);
 void   print_type (Type*   t);
 const char*   op_name (int   op);
@@ -733,10 +893,13 @@ HashMap__FnSig*   HashMap_new__FnSig (void);
 HashMap__bool*   HashMap_new__bool (void);
 HashMap__Type*   HashMap_new__Type (void);
 Vector__BorrowEvent*   Vector_new__BorrowEvent (void);
+Vector__DiagEntry*   Vector_new__DiagEntry (void);
 void   HashMap_free__FnSig (HashMap__FnSig*   self);
 void   HashMap_free__bool (HashMap__bool*   self);
 void   HashMap_free__Type (HashMap__Type*   self);
 void   Vector_free__BorrowEvent (Vector__BorrowEvent*   self);
+void   Vector_free__DiagEntry (Vector__DiagEntry*   self);
+void   Vector_push__DiagEntry (Vector__DiagEntry*   self, DiagEntry   x);
 void   HashMap_insert__FnSig (HashMap__FnSig*   self, const char*   k, FnSig   v);
 void   HashMap_insert__bool (HashMap__bool*   self, const char*   k, bool   v);
 int   Vector_len__Field (Vector__Field*   self);
@@ -783,6 +946,15 @@ void   HashMap_insert__Stmt (HashMap__Stmt*   self, const char*   k, Stmt   v);
 int   Vector_len__FnMonoEntry (Vector__FnMonoEntry*   self);
 FnMonoEntry   Vector_get__FnMonoEntry (Vector__FnMonoEntry*   self, int   i);
 FnMonoEntry   Vector_pop__FnMonoEntry (Vector__FnMonoEntry*   self);
+Vector__JsonValue*   Vector_new__JsonValue (void);
+void   Vector_push__JsonValue (Vector__JsonValue*   self, JsonValue   x);
+JsonValue   Vector_get__JsonValue (Vector__JsonValue*   self, int   i);
+int   Vector_len__JsonValue (Vector__JsonValue*   self);
+HashMap__LspDoc*   HashMap_new__LspDoc (void);
+int   Vector_len__DiagEntry (Vector__DiagEntry*   self);
+DiagEntry   Vector_get__DiagEntry (Vector__DiagEntry*   self, int   i);
+void   HashMap_insert__LspDoc (HashMap__LspDoc*   self, const char*   k, LspDoc   v);
+bool   HashMap_remove__LspDoc (HashMap__LspDoc*   self, const char*   k);
 void   HashMap_resize__FnSig (HashMap__FnSig*   self, int   new_cap);
 int   HashMap_slot__FnSig (HashMap__FnSig*   self, const char*   k);
 void   HashMap_resize__bool (HashMap__bool*   self, int   new_cap);
@@ -791,10 +963,13 @@ void   HashMap_resize__Type (HashMap__Type*   self, int   new_cap);
 int   HashMap_slot__Type (HashMap__Type*   self, const char*   k);
 int   HashMap_slot__Stmt (HashMap__Stmt*   self, const char*   k);
 void   HashMap_resize__Stmt (HashMap__Stmt*   self, int   new_cap);
+void   HashMap_resize__LspDoc (HashMap__LspDoc*   self, int   new_cap);
+int   HashMap_slot__LspDoc (HashMap__LspDoc*   self, const char*   k);
 int   HashMap_hash_key__FnSig (HashMap__FnSig*   self, const char*   k);
 int   HashMap_hash_key__bool (HashMap__bool*   self, const char*   k);
 int   HashMap_hash_key__Type (HashMap__Type*   self, const char*   k);
 int   HashMap_hash_key__Stmt (HashMap__Stmt*   self, const char*   k);
+int   HashMap_hash_key__LspDoc (HashMap__LspDoc*   self, const char*   k);
 
 
 Lexer*   Lexer_new (const char*   src) {
@@ -2820,11 +2995,13 @@ Typer*   Typer_new (void) {
     HashMap__Type*   scope = HashMap_new__Type();
     HashMap__bool*   owned = HashMap_new__bool();
     Vector__BorrowEvent*   bw = Vector_new__BorrowEvent();
+    Vector__DiagEntry*   dg = Vector_new__DiagEntry();
     ((t-> fns )  =  fns);
     ((t-> structs )  =  structs);
     ((t-> scope )  =  scope);
     ((t-> owned_locals )  =  owned);
     ((t-> borrows )  =  bw);
+    ((t-> diagnostics )  =  dg);
     ((t-> current_ret )  =  NULL);
     ((t-> error_count )  =  0);
     return t;
@@ -2836,12 +3013,27 @@ void   Typer_free (Typer*   self) {
     HashMap_free__Type((self-> scope ));
     HashMap_free__bool((self-> owned_locals ));
     Vector_free__BorrowEvent((self-> borrows ));
+    Vector_free__DiagEntry((self-> diagnostics ));
     free((( void* )self));
 }
 
+void   Typer_push_diag (Typer*   self, int   line, int   col, int   severity, const char*   code, const char*   msg) {
+    DiagEntry   e = (( DiagEntry ){. line  = line, . col  = col, . end_line  = line, . end_col  = (col  +  1), . severity  = severity, . code  = code, . message  = msg});
+    Vector_push__DiagEntry((self-> diagnostics ), e);
+}
+
 void   Typer_err (Typer*   self, int   line, int   col, const char*   msg) {
-    printf("%s %d %s %d %s %s\n", "type error at", line, ":", col, "-", msg);
+    Typer_push_diag(self, line, col, 1, "", msg);
     ((self-> error_count )  =  ((self-> error_count )  +  1));
+}
+
+void   Typer_err_code (Typer*   self, int   line, int   col, const char*   code, const char*   msg) {
+    Typer_push_diag(self, line, col, 1, code, msg);
+    ((self-> error_count )  =  ((self-> error_count )  +  1));
+}
+
+void   Typer_warn (Typer*   self, int   line, int   col, const char*   code, const char*   msg) {
+    Typer_push_diag(self, line, col, 2, code, msg);
 }
 
 void   pre_register (Typer*   t, Vector__Stmt*   program) {
@@ -2857,7 +3049,7 @@ void   pre_register (Typer*   t, Vector__Stmt*   program) {
                 for (int   j = 0; (j  <  Vector_len__Field((s. struct_fields ))); j++) {
                     Field   f = Vector_get__Field((s. struct_fields ), j);
                     if ((((f. ty )  !=  NULL)  &&  ((((f. ty )-> kind )  ==  TY_BORROW)  ||  (((f. ty )-> kind )  ==  TY_BORROW_MUT)))) {
-                        Typer_err(t, (s. line ), (s. column ), __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("borrow `", type_to_string((f. ty ))), "` not allowed in struct field `"), (f. name )), "` (use `*T` instead)"));
+                        Typer_err_code(t, (s. line ), (s. column ), "borrow-in-field", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("borrow `", type_to_string((f. ty ))), "` not allowed in struct field `"), (f. name )), "` (use `*T` instead)"));
                     }
                 }
             }
@@ -2882,11 +3074,11 @@ void   record_borrow (Typer*   t, const char*   source, bool   is_mut, int   lin
     int   n_mut = count_borrows(t, source, true);
     if (is_mut) {
         if (((n_mut  >  0)  ||  (n_shared  >  0))) {
-            Typer_err(t, line, col, __glide_string_concat(__glide_string_concat("cannot borrow `", source), "` as mutable: already borrowed (across statements)"));
+            Typer_err_code(t, line, col, "overlap-borrow", __glide_string_concat(__glide_string_concat("cannot borrow `", source), "` as mutable: already borrowed (across statements)"));
         }
     } else {
         if ((n_mut  >  0)) {
-            Typer_err(t, line, col, __glide_string_concat(__glide_string_concat("cannot borrow `", source), "` as immutable: already mutably borrowed"));
+            Typer_err_code(t, line, col, "overlap-borrow", __glide_string_concat(__glide_string_concat("cannot borrow `", source), "` as immutable: already mutably borrowed"));
         }
     }
     BorrowEvent   ev = (( BorrowEvent ){. source  = source, . is_mut  = is_mut});
@@ -2923,7 +3115,7 @@ void   check_call_aliasing (Typer*   t, Expr*   call) {
                 bool   im = Vector_get__bool(muts, i);
                 bool   jm = Vector_get__bool(muts, j);
                 if ((im  ||  jm)) {
-                    Typer_err(t, (call-> line ), (call-> column ), __glide_string_concat(__glide_string_concat("cannot pass `", Vector_get__string(names, i)), "` aliased through both shared and mutable borrow in same call"));
+                    Typer_err_code(t, (call-> line ), (call-> column ), "borrow-alias-in-call", __glide_string_concat(__glide_string_concat("cannot pass `", Vector_get__string(names, i)), "` aliased through both shared and mutable borrow in same call"));
                 }
             }
         }
@@ -3095,10 +3287,18 @@ void   check_stmt (Typer*   t, Stmt*   s) {
 
 void   check_let_or_const (Typer*   t, Stmt*   s) {
     Type*   final_ty = (s-> let_ty );
+    if ((((s-> let_ty )  !=  NULL)  &&  ((((s-> let_ty )-> kind )  ==  TY_BORROW)  ||  (((s-> let_ty )-> kind )  ==  TY_BORROW_MUT)))) {
+        if ((((s-> let_value )  !=  NULL)  &&  (((s-> let_value )-> kind )  ==  EX_NULL))) {
+            Typer_err_code(t, (s-> line ), (s-> column ), "null-borrow", __glide_string_concat(__glide_string_concat("borrow `", type_to_string((s-> let_ty ))), "` cannot be null"));
+        }
+    }
+    if ((((((s-> kind )  ==  ST_LET)  &&  (s-> is_auto_owned ))  &&  ((s-> let_value )  !=  NULL))  &&  (((s-> let_value )-> kind )  ==  EX_NULL))) {
+        Typer_err_code(t, (s-> line ), (s-> column ), "null-auto-drop", __glide_string_concat(__glide_string_concat("auto-drop binding `", (s-> name )), "` cannot be initialized with null"));
+    }
     if ((((s-> let_value )  !=  NULL)  &&  (((s-> let_value )-> kind )  ==  EX_IDENT))) {
         const char*   src = ((s-> let_value )-> str_val );
         if (HashMap_contains__bool((t-> owned_locals ), src)) {
-            Typer_err(t, (s-> line ), (s-> column ), __glide_string_concat(__glide_string_concat("cannot move owned value `", src), "` into another binding (auto-drop conflict)"));
+            Typer_err_code(t, (s-> line ), (s-> column ), "owned-move", __glide_string_concat(__glide_string_concat("cannot move owned value `", src), "` into another binding (auto-drop conflict)"));
         }
     }
     bool   is_auto_owned = false;
@@ -4039,6 +4239,37 @@ void   emit_stdlib_runtime (void) {
     printf("%s\n", "static const char* __glide_getenv(const char* name) { const char* v = getenv(name); return v ? v : \"\"; }");
     printf("%s\n", "static bool __glide_file_exists(const char* path) {");
     printf("%s\n", "    FILE* f = fopen(path, \"rb\"); if (!f) return false; fclose(f); return true;");
+    printf("%s\n", "}");
+    printf("%s\n", "#ifdef _WIN32");
+    printf("%s\n", "#include <fcntl.h>");
+    printf("%s\n", "static void __glide_set_binary_io(void) {");
+    printf("%s\n", "    _setmode(_fileno(stdin), _O_BINARY);");
+    printf("%s\n", "    _setmode(_fileno(stdout), _O_BINARY);");
+    printf("%s\n", "}");
+    printf("%s\n", "#else");
+    printf("%s\n", "static void __glide_set_binary_io(void) {}");
+    printf("%s\n", "#endif");
+    printf("%s\n", "static const char* __glide_read_line(void) {");
+    printf("%s\n", "    static char buf[8192];");
+    printf("%s\n", "    if (!fgets(buf, sizeof(buf), stdin)) { buf[0] = 0; return buf; }");
+    printf("%s\n", "    return buf;");
+    printf("%s\n", "}");
+    printf("%s\n", "static const char* __glide_read_bytes(int n) {");
+    printf("%s\n", "    if (n <= 0) return \"\";");
+    printf("%s\n", "    char* buf = (char*)malloc((size_t)n + 1);");
+    printf("%s\n", "    size_t got = fread(buf, 1, (size_t)n, stdin);");
+    printf("%s\n", "    buf[got] = 0;");
+    printf("%s\n", "    return buf;");
+    printf("%s\n", "}");
+    printf("%s\n", "static void __glide_write_str(const char* s) {");
+    printf("%s\n", "    fputs(s, stdout);");
+    printf("%s\n", "}");
+    printf("%s\n", "static void __glide_write_bytes(const char* s, int n) {");
+    printf("%s\n", "    if (n > 0) fwrite(s, 1, (size_t)n, stdout);");
+    printf("%s\n", "}");
+    printf("%s\n", "static void __glide_flush_stdout(void) { fflush(stdout); }");
+    printf("%s\n", "static void __glide_log(const char* s) {");
+    printf("%s\n", "    fputs(s, stderr); fputc('\\n', stderr); fflush(stderr);");
     printf("%s\n", "}");
     printf("%s\n", "static int __glide_is_windows(void) {");
     printf("%s\n", "#ifdef _WIN32");
@@ -6695,6 +6926,906 @@ void   collect_generic_uses_in_stmt (Stmt*   s, Vector__Type*   out) {
     }
 }
 
+JsonValue*   json_null (void) {
+    JsonValue*   v = (( JsonValue* )calloc(1, sizeof( JsonValue )));
+    ((v-> kind )  =  JSON_NULL);
+    return v;
+}
+
+JsonValue*   json_bool (bool   b) {
+    JsonValue*   v = (( JsonValue* )calloc(1, sizeof( JsonValue )));
+    ((v-> kind )  =  JSON_BOOL);
+    ((v-> b )  =  b);
+    return v;
+}
+
+JsonValue*   json_int (int   n) {
+    JsonValue*   v = (( JsonValue* )calloc(1, sizeof( JsonValue )));
+    ((v-> kind )  =  JSON_INT);
+    ((v-> i )  =  n);
+    return v;
+}
+
+JsonValue*   json_string (const char*   s) {
+    JsonValue*   v = (( JsonValue* )calloc(1, sizeof( JsonValue )));
+    ((v-> kind )  =  JSON_STRING);
+    ((v-> s )  =  s);
+    return v;
+}
+
+JsonValue*   json_array (void) {
+    JsonValue*   v = (( JsonValue* )calloc(1, sizeof( JsonValue )));
+    ((v-> kind )  =  JSON_ARRAY);
+    Vector__JsonValue*   arr = Vector_new__JsonValue();
+    ((v-> arr )  =  arr);
+    return v;
+}
+
+JsonValue*   json_object (void) {
+    JsonValue*   v = (( JsonValue* )calloc(1, sizeof( JsonValue )));
+    ((v-> kind )  =  JSON_OBJECT);
+    Vector__string*   keys = Vector_new__string();
+    Vector__JsonValue*   vals = Vector_new__JsonValue();
+    ((v-> obj_keys )  =  keys);
+    ((v-> obj_vals )  =  vals);
+    return v;
+}
+
+void   json_arr_push (JsonValue*   arr, JsonValue*   v) {
+    if (((arr  ==  NULL)  ||  ((arr-> kind )  !=  JSON_ARRAY))) {
+        return;
+    }
+    Vector_push__JsonValue((arr-> arr ), (*v));
+}
+
+void   json_obj_set (JsonValue*   obj, const char*   key, JsonValue*   v) {
+    if (((obj  ==  NULL)  ||  ((obj-> kind )  !=  JSON_OBJECT))) {
+        return;
+    }
+    Vector_push__string((obj-> obj_keys ), key);
+    Vector_push__JsonValue((obj-> obj_vals ), (*v));
+}
+
+JsonValue*   json_get (JsonValue*   v, const char*   key) {
+    if (((v  ==  NULL)  ||  ((v-> kind )  !=  JSON_OBJECT))) {
+        return NULL;
+    }
+    for (int   i = 0; (i  <  Vector_len__string((v-> obj_keys ))); i++) {
+        if (__glide_string_eq(Vector_get__string((v-> obj_keys ), i), key)) {
+            JsonValue   val = Vector_get__JsonValue((v-> obj_vals ), i);
+            JsonValue*   p = (( JsonValue* )malloc(sizeof( JsonValue )));
+            ((*p)  =  val);
+            return p;
+        }
+    }
+    return NULL;
+}
+
+JsonValue*   json_at (JsonValue*   v, int   idx) {
+    if (((v  ==  NULL)  ||  ((v-> kind )  !=  JSON_ARRAY))) {
+        return NULL;
+    }
+    if (((idx  <  0)  ||  (idx  >=  Vector_len__JsonValue((v-> arr ))))) {
+        return NULL;
+    }
+    JsonValue   val = Vector_get__JsonValue((v-> arr ), idx);
+    JsonValue*   p = (( JsonValue* )malloc(sizeof( JsonValue )));
+    ((*p)  =  val);
+    return p;
+}
+
+const char*   json_as_string (JsonValue*   v) {
+    if (((v  ==  NULL)  ||  ((v-> kind )  !=  JSON_STRING))) {
+        return "";
+    }
+    return (v-> s );
+}
+
+int   json_as_int (JsonValue*   v) {
+    if ((v  ==  NULL)) {
+        return 0;
+    }
+    if (((v-> kind )  ==  JSON_INT)) {
+        return (v-> i );
+    }
+    return 0;
+}
+
+bool   json_as_bool (JsonValue*   v) {
+    if (((v  ==  NULL)  ||  ((v-> kind )  !=  JSON_BOOL))) {
+        return false;
+    }
+    return (v-> b );
+}
+
+bool   json_is_null (JsonValue*   v) {
+    if ((v  ==  NULL)) {
+        return true;
+    }
+    return ((v-> kind )  ==  JSON_NULL);
+}
+
+int   jp_peek (JsonParser*   p) {
+    if (((p-> pos )  >=  (p-> n ))) {
+        return (-1);
+    }
+    return __glide_char_to_int(__glide_string_at((p-> src ), (p-> pos )));
+}
+
+int   jp_advance (JsonParser*   p) {
+    int   c = jp_peek(p);
+    ((p-> pos )  =  ((p-> pos )  +  1));
+    return c;
+}
+
+void   jp_skip_ws (JsonParser*   p) {
+    while (((p-> pos )  <  (p-> n ))) {
+        int   c = jp_peek(p);
+        if (((((c  ==  32)  ||  (c  ==  9))  ||  (c  ==  10))  ||  (c  ==  13))) {
+            ((p-> pos )  =  ((p-> pos )  +  1));
+        } else {
+            break;
+        }
+    }
+}
+
+JsonValue*   jp_value (JsonParser*   p) {
+    jp_skip_ws(p);
+    int   c = jp_peek(p);
+    if ((c  ==  123)) {
+        return jp_object(p);
+    }
+    if ((c  ==  91)) {
+        return jp_array(p);
+    }
+    if ((c  ==  34)) {
+        return jp_string_value(p);
+    }
+    if (((c  ==  116)  ||  (c  ==  102))) {
+        return jp_bool(p);
+    }
+    if ((c  ==  110)) {
+        return jp_null(p);
+    }
+    if (((c  ==  45)  ||  ((c  >=  48)  &&  (c  <=  57)))) {
+        return jp_number(p);
+    }
+    return NULL;
+}
+
+JsonValue*   jp_object (JsonParser*   p) {
+    JsonValue*   obj = json_object();
+    ((p-> pos )  =  ((p-> pos )  +  1));
+    jp_skip_ws(p);
+    if ((jp_peek(p)  ==  125)) {
+        ((p-> pos )  =  ((p-> pos )  +  1));
+        return obj;
+    }
+    while (((p-> pos )  <  (p-> n ))) {
+        jp_skip_ws(p);
+        JsonValue*   k = jp_string_value(p);
+        if ((k  ==  NULL)) {
+            return obj;
+        }
+        jp_skip_ws(p);
+        if ((jp_peek(p)  ==  58)) {
+            ((p-> pos )  =  ((p-> pos )  +  1));
+        }
+        JsonValue*   v = jp_value(p);
+        if ((v  ==  NULL)) {
+            (v  =  json_null());
+        }
+        Vector_push__string((obj-> obj_keys ), (k-> s ));
+        Vector_push__JsonValue((obj-> obj_vals ), (*v));
+        jp_skip_ws(p);
+        int   c = jp_peek(p);
+        if ((c  ==  44)) {
+            ((p-> pos )  =  ((p-> pos )  +  1));
+            continue;
+        }
+        if ((c  ==  125)) {
+            ((p-> pos )  =  ((p-> pos )  +  1));
+            break;
+        }
+        break;
+    }
+    return obj;
+}
+
+JsonValue*   jp_array (JsonParser*   p) {
+    JsonValue*   arr = json_array();
+    ((p-> pos )  =  ((p-> pos )  +  1));
+    jp_skip_ws(p);
+    if ((jp_peek(p)  ==  93)) {
+        ((p-> pos )  =  ((p-> pos )  +  1));
+        return arr;
+    }
+    while (((p-> pos )  <  (p-> n ))) {
+        JsonValue*   v = jp_value(p);
+        if ((v  ==  NULL)) {
+            return arr;
+        }
+        Vector_push__JsonValue((arr-> arr ), (*v));
+        jp_skip_ws(p);
+        int   c = jp_peek(p);
+        if ((c  ==  44)) {
+            ((p-> pos )  =  ((p-> pos )  +  1));
+            continue;
+        }
+        if ((c  ==  93)) {
+            ((p-> pos )  =  ((p-> pos )  +  1));
+            break;
+        }
+        break;
+    }
+    return arr;
+}
+
+JsonValue*   jp_string_value (JsonParser*   p) {
+    if ((jp_peek(p)  !=  34)) {
+        return NULL;
+    }
+    ((p-> pos )  =  ((p-> pos )  +  1));
+    int   start = (p-> pos );
+    bool   has_escape = false;
+    while (((p-> pos )  <  (p-> n ))) {
+        int   c = jp_peek(p);
+        if ((c  ==  34)) {
+            break;
+        }
+        if ((c  ==  92)) {
+            (has_escape  =  true);
+            ((p-> pos )  =  ((p-> pos )  +  1));
+            if (((p-> pos )  <  (p-> n ))) {
+                ((p-> pos )  =  ((p-> pos )  +  1));
+            }
+            continue;
+        }
+        ((p-> pos )  =  ((p-> pos )  +  1));
+    }
+    const char*   raw = __glide_string_substring((p-> src ), start, (p-> pos ));
+    if ((jp_peek(p)  ==  34)) {
+        ((p-> pos )  =  ((p-> pos )  +  1));
+    }
+    if ((!has_escape)) {
+        return json_string(raw);
+    }
+    return json_string(jp_unescape(raw));
+}
+
+const char*   jp_unescape (const char*   raw) {
+    const char*   out = "";
+    int   n = __glide_string_len(raw);
+    int   i = 0;
+    while ((i  <  n)) {
+        int   c = __glide_char_to_int(__glide_string_at(raw, i));
+        if ((c  !=  92)) {
+            (out  =  __glide_string_concat(out, __glide_string_substring(raw, i, (i  +  1))));
+            (i  =  (i  +  1));
+            continue;
+        }
+        (i  =  (i  +  1));
+        if ((i  >=  n)) {
+            break;
+        }
+        int   e = __glide_char_to_int(__glide_string_at(raw, i));
+        (i  =  (i  +  1));
+        if ((e  ==  110)) {
+            (out  =  __glide_string_concat(out, "\n"));
+            continue;
+        }
+        if ((e  ==  116)) {
+            (out  =  __glide_string_concat(out, "\t"));
+            continue;
+        }
+        if ((e  ==  114)) {
+            (out  =  __glide_string_concat(out, "\r"));
+            continue;
+        }
+        if ((e  ==  34)) {
+            (out  =  __glide_string_concat(out, "\""));
+            continue;
+        }
+        if ((e  ==  92)) {
+            (out  =  __glide_string_concat(out, "\\"));
+            continue;
+        }
+        if ((e  ==  47)) {
+            (out  =  __glide_string_concat(out, "/"));
+            continue;
+        }
+        if (((e  ==  117)  &&  ((i  +  4)  <=  n))) {
+            (i  =  (i  +  4));
+            (out  =  __glide_string_concat(out, "?"));
+            continue;
+        }
+    }
+    return out;
+}
+
+JsonValue*   jp_bool (JsonParser*   p) {
+    int   c = jp_peek(p);
+    if ((c  ==  116)) {
+        ((p-> pos )  =  ((p-> pos )  +  4));
+        return json_bool(true);
+    }
+    ((p-> pos )  =  ((p-> pos )  +  5));
+    return json_bool(false);
+}
+
+JsonValue*   jp_null (JsonParser*   p) {
+    ((p-> pos )  =  ((p-> pos )  +  4));
+    return json_null();
+}
+
+JsonValue*   jp_number (JsonParser*   p) {
+    bool   neg = false;
+    if ((jp_peek(p)  ==  45)) {
+        (neg  =  true);
+        ((p-> pos )  =  ((p-> pos )  +  1));
+    }
+    int   n = 0;
+    while (((p-> pos )  <  (p-> n ))) {
+        int   c = jp_peek(p);
+        if (((c  <  48)  ||  (c  >  57))) {
+            break;
+        }
+        (n  =  ((n  *  10)  +  (c  -  48)));
+        ((p-> pos )  =  ((p-> pos )  +  1));
+    }
+    if ((jp_peek(p)  ==  46)) {
+        ((p-> pos )  =  ((p-> pos )  +  1));
+        while (((p-> pos )  <  (p-> n ))) {
+            int   c = jp_peek(p);
+            if (((c  <  48)  ||  (c  >  57))) {
+                break;
+            }
+            ((p-> pos )  =  ((p-> pos )  +  1));
+        }
+    }
+    if (neg) {
+        (n  =  (-n));
+    }
+    return json_int(n);
+}
+
+JsonValue*   json_parse (const char*   src) {
+    JsonParser   p = (( JsonParser ){. src  = src, . pos  = 0, . n  = __glide_string_len(src)});
+    return jp_value((&p));
+}
+
+const char*   json_escape (const char*   s) {
+    const char*   out = "\"";
+    int   n = __glide_string_len(s);
+    for (int   i = 0; (i  <  n); i++) {
+        int   c = __glide_char_to_int(__glide_string_at(s, i));
+        if ((c  ==  34)) {
+            (out  =  __glide_string_concat(out, "\\\""));
+        } else {
+            if ((c  ==  92)) {
+                (out  =  __glide_string_concat(out, "\\\\"));
+            } else {
+                if ((c  ==  10)) {
+                    (out  =  __glide_string_concat(out, "\\n"));
+                } else {
+                    if ((c  ==  13)) {
+                        (out  =  __glide_string_concat(out, "\\r"));
+                    } else {
+                        if ((c  ==  9)) {
+                            (out  =  __glide_string_concat(out, "\\t"));
+                        } else {
+                            if ((c  <  32)) {
+                                (out  =  __glide_string_concat(out, "?"));
+                            } else {
+                                (out  =  __glide_string_concat(out, __glide_string_substring(s, i, (i  +  1))));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return __glide_string_concat(out, "\"");
+}
+
+const char*   json_emit (JsonValue*   v) {
+    if ((v  ==  NULL)) {
+        return "null";
+    }
+    if (((v-> kind )  ==  JSON_NULL)) {
+        return "null";
+    }
+    if (((v-> kind )  ==  JSON_BOOL)) {
+        if ((v-> b )) {
+            return "true";
+        }
+        return "false";
+    }
+    if (((v-> kind )  ==  JSON_INT)) {
+        return int_to_str((v-> i ));
+    }
+    if (((v-> kind )  ==  JSON_STRING)) {
+        return json_escape((v-> s ));
+    }
+    if (((v-> kind )  ==  JSON_ARRAY)) {
+        const char*   out = "[";
+        int   n = Vector_len__JsonValue((v-> arr ));
+        for (int   i = 0; (i  <  n); i++) {
+            if ((i  >  0)) {
+                (out  =  __glide_string_concat(out, ","));
+            }
+            JsonValue   e = Vector_get__JsonValue((v-> arr ), i);
+            (out  =  __glide_string_concat(out, json_emit((&e))));
+        }
+        return __glide_string_concat(out, "]");
+    }
+    if (((v-> kind )  ==  JSON_OBJECT)) {
+        const char*   out = "{";
+        int   n = Vector_len__string((v-> obj_keys ));
+        for (int   i = 0; (i  <  n); i++) {
+            if ((i  >  0)) {
+                (out  =  __glide_string_concat(out, ","));
+            }
+            (out  =  __glide_string_concat(out, json_escape(Vector_get__string((v-> obj_keys ), i))));
+            (out  =  __glide_string_concat(out, ":"));
+            JsonValue   val = Vector_get__JsonValue((v-> obj_vals ), i);
+            (out  =  __glide_string_concat(out, json_emit((&val))));
+        }
+        return __glide_string_concat(out, "}");
+    }
+    return "null";
+}
+
+LspState*   lsp_state_new (void) {
+    LspState*   s = (( LspState* )malloc(sizeof( LspState )));
+    HashMap__LspDoc*   m = HashMap_new__LspDoc();
+    ((s-> docs )  =  m);
+    ((s-> shutdown_requested )  =  false);
+    return s;
+}
+
+const char*   lsp_read_message (void) {
+    int   content_length = 0;
+    while (true) {
+        const char*   line = __glide_read_line();
+        if (__glide_string_eq(line, "")) {
+            return "";
+        }
+        int   n = __glide_string_len(line);
+        int   end = n;
+        while ((end  >  0)) {
+            int   c = __glide_char_to_int(__glide_string_at(line, (end  -  1)));
+            if (((c  ==  10)  ||  (c  ==  13))) {
+                (end  =  (end  -  1));
+            } else {
+                break;
+            }
+        }
+        if ((end  ==  0)) {
+            break;
+        }
+        const char*   trimmed = __glide_string_substring(line, 0, end);
+        if ((__glide_string_len(trimmed)  >  16)) {
+            const char*   prefix = __glide_string_substring(trimmed, 0, 16);
+            if (__glide_string_eq(prefix, "Content-Length: ")) {
+                (content_length  =  parse_int_str(__glide_string_substring(trimmed, 16, __glide_string_len(trimmed))));
+            }
+        }
+    }
+    if ((content_length  <=  0)) {
+        return "";
+    }
+    return __glide_read_bytes(content_length);
+}
+
+int   parse_int_str (const char*   s) {
+    int   n = 0;
+    int   len = __glide_string_len(s);
+    for (int   i = 0; (i  <  len); i++) {
+        int   c = __glide_char_to_int(__glide_string_at(s, i));
+        if (((c  <  48)  ||  (c  >  57))) {
+            break;
+        }
+        (n  =  ((n  *  10)  +  (c  -  48)));
+    }
+    return n;
+}
+
+void   lsp_send (const char*   payload) {
+    const char*   header = __glide_string_concat(__glide_string_concat("Content-Length: ", int_to_str(__glide_string_len(payload))), "\r\n\r\n");
+    __glide_write_str(header);
+    __glide_write_str(payload);
+    __glide_flush_stdout();
+}
+
+void   lsp_send_response (JsonValue*   id, JsonValue*   result) {
+    JsonValue*   resp = json_object();
+    json_obj_set(resp, "jsonrpc", json_string("2.0"));
+    if ((id  !=  NULL)) {
+        json_obj_set(resp, "id", id);
+    }
+    json_obj_set(resp, "result", result);
+    lsp_send(json_emit(resp));
+}
+
+void   lsp_send_notification (const char*   method, JsonValue*   params) {
+    JsonValue*   n = json_object();
+    json_obj_set(n, "jsonrpc", json_string("2.0"));
+    json_obj_set(n, "method", json_string(method));
+    json_obj_set(n, "params", params);
+    lsp_send(json_emit(n));
+}
+
+void   handle_initialize (JsonValue*   req) {
+    JsonValue*   id = json_get(req, "id");
+    JsonValue*   result = json_object();
+    JsonValue*   caps = json_object();
+    json_obj_set(caps, "textDocumentSync", json_int(1));
+    json_obj_set(result, "capabilities", caps);
+    JsonValue*   info = json_object();
+    json_obj_set(info, "name", json_string("glide-lsp"));
+    json_obj_set(info, "version", json_string("0.1.0"));
+    json_obj_set(result, "serverInfo", info);
+    lsp_send_response(id, result);
+}
+
+void   handle_shutdown (JsonValue*   req, LspState*   state) {
+    ((state-> shutdown_requested )  =  true);
+    JsonValue*   id = json_get(req, "id");
+    lsp_send_response(id, json_null());
+}
+
+JsonValue*   diag_to_json (DiagEntry*   d) {
+    JsonValue*   dj = json_object();
+    JsonValue*   range = json_object();
+    JsonValue*   start = json_object();
+    JsonValue*   endp = json_object();
+    int   line0 = ((d-> line )  -  1);
+    if ((line0  <  0)) {
+        (line0  =  0);
+    }
+    int   col0 = ((d-> col )  -  1);
+    if ((col0  <  0)) {
+        (col0  =  0);
+    }
+    int   endl = ((d-> end_line )  -  1);
+    if ((endl  <  0)) {
+        (endl  =  0);
+    }
+    int   endc = ((d-> end_col )  -  1);
+    if ((endc  <  0)) {
+        (endc  =  0);
+    }
+    json_obj_set(start, "line", json_int(line0));
+    json_obj_set(start, "character", json_int(col0));
+    json_obj_set(endp, "line", json_int(endl));
+    json_obj_set(endp, "character", json_int(endc));
+    json_obj_set(range, "start", start);
+    json_obj_set(range, "end", endp);
+    json_obj_set(dj, "range", range);
+    json_obj_set(dj, "severity", json_int((d-> severity )));
+    if ((!__glide_string_eq((d-> code ), ""))) {
+        json_obj_set(dj, "code", json_string((d-> code )));
+    }
+    json_obj_set(dj, "source", json_string("glide"));
+    json_obj_set(dj, "message", json_string((d-> message )));
+    return dj;
+}
+
+void   run_analysis_and_publish (const char*   uri, const char*   text) {
+    Lexer*   lex = Lexer_new(text);
+    Parser*   p = Parser_new(lex);
+    Vector__Stmt*   stmts = parse_program(p);
+    Typer*   t = Typer_new();
+    check_program(t, stmts);
+    analysis_unused_vars(t, stmts);
+    analysis_arena_not_freed(t, stmts);
+    JsonValue*   arr = json_array();
+    for (int   i = 0; (i  <  Vector_len__DiagEntry((t-> diagnostics ))); i++) {
+        DiagEntry   d = Vector_get__DiagEntry((t-> diagnostics ), i);
+        json_arr_push(arr, diag_to_json((&d)));
+    }
+    JsonValue*   params = json_object();
+    json_obj_set(params, "uri", json_string(uri));
+    json_obj_set(params, "diagnostics", arr);
+    lsp_send_notification("textDocument/publishDiagnostics", params);
+    Typer_free(t);
+}
+
+void   handle_did_open (JsonValue*   req, LspState*   state) {
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    const char*   text = json_as_string(json_get(td, "text"));
+    int   version = json_as_int(json_get(td, "version"));
+    LspDoc   doc = (( LspDoc ){. uri  = uri, . text  = text, . version  = version});
+    HashMap_insert__LspDoc((state-> docs ), uri, doc);
+    run_analysis_and_publish(uri, text);
+}
+
+void   handle_did_change (JsonValue*   req, LspState*   state) {
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    int   version = json_as_int(json_get(td, "version"));
+    JsonValue*   changes = json_get(params, "contentChanges");
+    JsonValue*   first = json_at(changes, 0);
+    const char*   text = json_as_string(json_get(first, "text"));
+    if (__glide_string_eq(text, "")) {
+        return;
+    }
+    LspDoc   doc = (( LspDoc ){. uri  = uri, . text  = text, . version  = version});
+    HashMap_insert__LspDoc((state-> docs ), uri, doc);
+    run_analysis_and_publish(uri, text);
+}
+
+void   handle_did_close (JsonValue*   req, LspState*   state) {
+    JsonValue*   params = json_get(req, "params");
+    JsonValue*   td = json_get(params, "textDocument");
+    const char*   uri = json_as_string(json_get(td, "uri"));
+    HashMap_remove__LspDoc((state-> docs ), uri);
+    JsonValue*   p = json_object();
+    json_obj_set(p, "uri", json_string(uri));
+    json_obj_set(p, "diagnostics", json_array());
+    lsp_send_notification("textDocument/publishDiagnostics", p);
+}
+
+void   analysis_unused_vars (Typer*   t, Vector__Stmt*   program) {
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if ((((s. kind )  !=  ST_FN)  ||  ((s. fn_body )  ==  NULL))) {
+            continue;
+        }
+        check_unused_in_body(t, (s. fn_body ));
+    }
+}
+
+void   check_unused_in_body (Typer*   t, Vector__Stmt*   body) {
+    int   n = Vector_len__Stmt(body);
+    for (int   i = 0; (i  <  n); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        if (((s. kind )  ==  ST_LET)) {
+            const char*   name = (s. name );
+            if (((__glide_string_len(name)  >  0)  &&  (__glide_char_to_int(__glide_string_at(name, 0))  ==  95))) {
+                continue;
+            }
+            bool   used = false;
+            for (int   j = (i  +  1); (j  <  n); j++) {
+                Stmt   s2 = Vector_get__Stmt(body, j);
+                if (stmt_uses_name((&s2), name)) {
+                    (used  =  true);
+                    break;
+                }
+            }
+            if ((!used)) {
+                Typer_warn(t, (s. line ), (s. column ), "unused-var", __glide_string_concat(__glide_string_concat("unused local `", name), "` (prefix with `_` to silence)"));
+            }
+        }
+        if (((s. then_body )  !=  NULL)) {
+            check_unused_in_body(t, (s. then_body ));
+        }
+        if (((s. else_body )  !=  NULL)) {
+            check_unused_in_body(t, (s. else_body ));
+        }
+    }
+}
+
+bool   stmt_uses_name (Stmt*   s, const char*   name) {
+    if ((s  ==  NULL)) {
+        return false;
+    }
+    if ((((s-> let_value )  !=  NULL)  &&  expr_uses_name((s-> let_value ), name))) {
+        return true;
+    }
+    if ((((s-> expr_value )  !=  NULL)  &&  expr_uses_name((s-> expr_value ), name))) {
+        return true;
+    }
+    if ((((s-> cond )  !=  NULL)  &&  expr_uses_name((s-> cond ), name))) {
+        return true;
+    }
+    if ((((s-> for_step )  !=  NULL)  &&  expr_uses_name((s-> for_step ), name))) {
+        return true;
+    }
+    if ((((s-> for_init )  !=  NULL)  &&  stmt_uses_name((s-> for_init ), name))) {
+        return true;
+    }
+    if (((s-> then_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> then_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> then_body ), i);
+            if (stmt_uses_name((&b), name)) {
+                return true;
+            }
+        }
+    }
+    if (((s-> else_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> else_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> else_body ), i);
+            if (stmt_uses_name((&b), name)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool   expr_uses_name (Expr*   e, const char*   name) {
+    if ((e  ==  NULL)) {
+        return false;
+    }
+    if ((((e-> kind )  ==  EX_IDENT)  &&  __glide_string_eq((e-> str_val ), name))) {
+        return true;
+    }
+    if ((((e-> lhs )  !=  NULL)  &&  expr_uses_name((e-> lhs ), name))) {
+        return true;
+    }
+    if ((((e-> rhs )  !=  NULL)  &&  expr_uses_name((e-> rhs ), name))) {
+        return true;
+    }
+    if ((((e-> operand )  !=  NULL)  &&  expr_uses_name((e-> operand ), name))) {
+        return true;
+    }
+    if (((e-> args )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
+            Expr   a = Vector_get__Expr((e-> args ), i);
+            if (expr_uses_name((&a), name)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+void   analysis_arena_not_freed (Typer*   t, Vector__Stmt*   program) {
+    for (int   i = 0; (i  <  Vector_len__Stmt(program)); i++) {
+        Stmt   s = Vector_get__Stmt(program, i);
+        if ((((s. kind )  !=  ST_FN)  ||  ((s. fn_body )  ==  NULL))) {
+            continue;
+        }
+        check_arena_in_body(t, (s. fn_body ));
+    }
+}
+
+void   check_arena_in_body (Typer*   t, Vector__Stmt*   body) {
+    int   n = Vector_len__Stmt(body);
+    for (int   i = 0; (i  <  n); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        if ((((s. kind )  ==  ST_LET)  &&  (!(s. is_auto_owned )))) {
+            Expr*   v = (s. let_value );
+            if (((((((v  !=  NULL)  &&  ((v-> kind )  ==  EX_CALL))  &&  ((v-> lhs )  !=  NULL))  &&  (((v-> lhs )-> kind )  ==  EX_PATH))  &&  __glide_string_eq(((v-> lhs )-> str_val ), "Arena"))  &&  __glide_string_eq(((v-> lhs )-> field ), "new"))) {
+                if ((!arena_is_freed_in_body((s. name ), body, (i  +  1)))) {
+                    Typer_warn(t, (s. line ), (s. column ), "arena-not-freed", __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat("arena `", (s. name )), "` is never freed (use `let "), (s. name )), "* = Arena::new(...)` or add `defer "), (s. name )), ".free()`)"));
+                }
+            }
+        }
+        if (((s. then_body )  !=  NULL)) {
+            check_arena_in_body(t, (s. then_body ));
+        }
+        if (((s. else_body )  !=  NULL)) {
+            check_arena_in_body(t, (s. else_body ));
+        }
+    }
+}
+
+bool   arena_is_freed_in_body (const char*   name, Vector__Stmt*   body, int   start) {
+    int   n = Vector_len__Stmt(body);
+    for (int   i = start; (i  <  n); i++) {
+        Stmt   s = Vector_get__Stmt(body, i);
+        if (stmt_calls_method((&s), name, "free")) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool   stmt_calls_method (Stmt*   s, const char*   var, const char*   method) {
+    if ((s  ==  NULL)) {
+        return false;
+    }
+    if ((((s-> expr_value )  !=  NULL)  &&  expr_calls_method((s-> expr_value ), var, method))) {
+        return true;
+    }
+    if ((((s-> let_value )  !=  NULL)  &&  expr_calls_method((s-> let_value ), var, method))) {
+        return true;
+    }
+    if ((((s-> cond )  !=  NULL)  &&  expr_calls_method((s-> cond ), var, method))) {
+        return true;
+    }
+    if ((((s-> for_step )  !=  NULL)  &&  expr_calls_method((s-> for_step ), var, method))) {
+        return true;
+    }
+    if (((s-> then_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> then_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> then_body ), i);
+            if (stmt_calls_method((&b), var, method)) {
+                return true;
+            }
+        }
+    }
+    if (((s-> else_body )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Stmt((s-> else_body ))); i++) {
+            Stmt   b = Vector_get__Stmt((s-> else_body ), i);
+            if (stmt_calls_method((&b), var, method)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool   expr_calls_method (Expr*   e, const char*   var, const char*   method) {
+    if ((e  ==  NULL)) {
+        return false;
+    }
+    if (((((((((e-> kind )  ==  EX_CALL)  &&  ((e-> lhs )  !=  NULL))  &&  (((e-> lhs )-> kind )  ==  EX_MEMBER))  &&  (((e-> lhs )-> lhs )  !=  NULL))  &&  ((((e-> lhs )-> lhs )-> kind )  ==  EX_IDENT))  &&  __glide_string_eq((((e-> lhs )-> lhs )-> str_val ), var))  &&  __glide_string_eq(((e-> lhs )-> field ), method))) {
+        return true;
+    }
+    if ((((e-> lhs )  !=  NULL)  &&  expr_calls_method((e-> lhs ), var, method))) {
+        return true;
+    }
+    if ((((e-> rhs )  !=  NULL)  &&  expr_calls_method((e-> rhs ), var, method))) {
+        return true;
+    }
+    if ((((e-> operand )  !=  NULL)  &&  expr_calls_method((e-> operand ), var, method))) {
+        return true;
+    }
+    if (((e-> args )  !=  NULL)) {
+        for (int   i = 0; (i  <  Vector_len__Expr((e-> args ))); i++) {
+            Expr   a = Vector_get__Expr((e-> args ), i);
+            if (expr_calls_method((&a), var, method)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+int   lsp_main (void) {
+    __glide_set_binary_io();
+    LspState*   state = lsp_state_new();
+    while (true) {
+        const char*   raw = lsp_read_message();
+        if (__glide_string_eq(raw, "")) {
+            break;
+        }
+        JsonValue*   req = json_parse(raw);
+        if ((req  ==  NULL)) {
+            continue;
+        }
+        const char*   method = json_as_string(json_get(req, "method"));
+        if (__glide_string_eq(method, "initialize")) {
+            handle_initialize(req);
+            continue;
+        }
+        if (__glide_string_eq(method, "initialized")) {
+            continue;
+        }
+        if (__glide_string_eq(method, "shutdown")) {
+            handle_shutdown(req, state);
+            continue;
+        }
+        if (__glide_string_eq(method, "exit")) {
+            break;
+        }
+        if (__glide_string_eq(method, "textDocument/didOpen")) {
+            handle_did_open(req, state);
+            continue;
+        }
+        if (__glide_string_eq(method, "textDocument/didChange")) {
+            handle_did_change(req, state);
+            continue;
+        }
+        if (__glide_string_eq(method, "textDocument/didClose")) {
+            handle_did_close(req, state);
+            continue;
+        }
+        JsonValue*   id = json_get(req, "id");
+        if ((id  !=  NULL)) {
+            lsp_send_response(id, json_null());
+        }
+    }
+    return 0;
+}
+
 void   print_indent (int   n) {
     for (int   i = 0; (i  <  n); i++) {
         printf("%s", "  ");
@@ -6905,6 +8036,7 @@ void   print_usage (void) {
     printf("%s\n", "  glide run <file>");
     printf("%s\n", "  glide emit <file>          (print generated C to stdout)");
     printf("%s\n", "  glide check <file>         (parse + type-check, no codegen)");
+    printf("%s\n", "  glide lsp                  (language server on stdio)");
 }
 
 bool   parse_program_into (Vector__Stmt*   stmts, const char*   path) {
@@ -6999,6 +8131,9 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
         return 1;
     }
     const char*   cmd = args_at(1);
+    if (__glide_string_eq(cmd, "lsp")) {
+        return lsp_main();
+    }
     int   mode = MODE_EMIT;
     int   src_arg_idx = 2;
     if (__glide_string_eq(cmd, "build")) {
@@ -7070,8 +8205,26 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
     if ((mode  ==  MODE_CHECK)) {
         Typer*   t = Typer_new();
         check_program(t, stmts);
+        for (int   i = 0; (i  <  Vector_len__DiagEntry((t-> diagnostics ))); i++) {
+            DiagEntry   d = Vector_get__DiagEntry((t-> diagnostics ), i);
+            const char*   tag = "error";
+            if (((d. severity )  ==  2)) {
+                (tag  =  "warning");
+            }
+            if (((d. severity )  ==  3)) {
+                (tag  =  "info");
+            }
+            if (((d. severity )  ==  4)) {
+                (tag  =  "hint");
+            }
+            printf("%s %s %d %s %d %s %s", src_path, ":", (d. line ), ":", (d. col ), ": ", tag);
+            if ((!__glide_string_eq((d. code ), ""))) {
+                printf("%s %s %s", " [", (d. code ), "]");
+            }
+            printf("%s %s\n", ": ", (d. message ));
+        }
         if (((t-> error_count )  >  0)) {
-            printf("%d %s\n", (t-> error_count ), "type error(s)");
+            printf("%d %s\n", (t-> error_count ), "error(s)");
             Typer_free(t);
             return 1;
         }
@@ -7081,6 +8234,18 @@ int main(int __glide_main_argc, char** __glide_main_argv) {
     }
     emit_program(stmts);
     return 0;
+}
+
+int   HashMap_hash_key__LspDoc (HashMap__LspDoc*   self, const char*   k) {
+    int   h = 0;
+    int   n = __glide_string_len(k);
+    for (int   i = 0; (i  <  n); i++) {
+        (h  =  ((h  *  31)  +  __glide_char_to_int(__glide_string_at(k, i))));
+    }
+    if ((h  <  0)) {
+        (h  =  (-h));
+    }
+    return h;
 }
 
 int   HashMap_hash_key__Stmt (HashMap__Stmt*   self, const char*   k) {
@@ -7129,6 +8294,46 @@ int   HashMap_hash_key__FnSig (HashMap__FnSig*   self, const char*   k) {
         (h  =  (-h));
     }
     return h;
+}
+
+int   HashMap_slot__LspDoc (HashMap__LspDoc*   self, const char*   k) {
+    if (((self-> cap )  ==  0)) {
+        return (-1);
+    }
+    int   mask = ((self-> cap )  -  1);
+    int   i = (HashMap_hash_key__LspDoc(self, k)  &  mask);
+    while ((self-> occupied )[i]) {
+        if (__glide_string_eq((self-> keys )[i], k)) {
+            return i;
+        }
+        (i  =  ((i  +  1)  &  mask));
+    }
+    return i;
+}
+
+void   HashMap_resize__LspDoc (HashMap__LspDoc*   self, int   new_cap) {
+    const char**   old_keys = (self-> keys );
+    LspDoc*   old_values = (self-> values );
+    bool*   old_occupied = (self-> occupied );
+    int   old_cap = (self-> cap );
+    ((self-> keys )  =  (( const char** )malloc((new_cap  *  sizeof( const char* )))));
+    ((self-> values )  =  (( LspDoc* )malloc((new_cap  *  sizeof( LspDoc )))));
+    ((self-> occupied )  =  (( bool* )malloc((new_cap  *  sizeof( bool )))));
+    ((self-> cap )  =  new_cap);
+    ((self-> len )  =  0);
+    for (int   i = 0; (i  <  new_cap); i++) {
+        ((self-> occupied )[i]  =  false);
+    }
+    for (int   i = 0; (i  <  old_cap); i++) {
+        if (old_occupied[i]) {
+            HashMap_insert__LspDoc(self, old_keys[i], old_values[i]);
+        }
+    }
+    if ((old_cap  >  0)) {
+        free((( void* )old_keys));
+        free((( void* )old_values));
+        free((( void* )old_occupied));
+    }
 }
 
 void   HashMap_resize__Stmt (HashMap__Stmt*   self, int   new_cap) {
@@ -7289,6 +8494,103 @@ void   HashMap_resize__FnSig (HashMap__FnSig*   self, int   new_cap) {
         free((( void* )old_values));
         free((( void* )old_occupied));
     }
+}
+
+bool   HashMap_remove__LspDoc (HashMap__LspDoc*   self, const char*   k) {
+    int   i = HashMap_slot__LspDoc(self, k);
+    if ((i  <  0)) {
+        return false;
+    }
+    if ((!(self-> occupied )[i])) {
+        return false;
+    }
+    if ((!__glide_string_eq((self-> keys )[i], k))) {
+        return false;
+    }
+    ((self-> occupied )[i]  =  false);
+    ((self-> len )  =  ((self-> len )  -  1));
+    int   mask = ((self-> cap )  -  1);
+    int   j = ((i  +  1)  &  mask);
+    while ((self-> occupied )[j]) {
+        const char*   rk = (self-> keys )[j];
+        LspDoc   rv = (self-> values )[j];
+        ((self-> occupied )[j]  =  false);
+        ((self-> len )  =  ((self-> len )  -  1));
+        HashMap_insert__LspDoc(self, rk, rv);
+        (j  =  ((j  +  1)  &  mask));
+    }
+    return true;
+}
+
+void   HashMap_insert__LspDoc (HashMap__LspDoc*   self, const char*   k, LspDoc   v) {
+    if (((self-> cap )  ==  0)) {
+        HashMap_resize__LspDoc(self, 8);
+    } else {
+        if ((((self-> len )  *  4)  >=  ((self-> cap )  *  3))) {
+            HashMap_resize__LspDoc(self, ((self-> cap )  *  2));
+        }
+    }
+    int   i = HashMap_slot__LspDoc(self, k);
+    if ((!(self-> occupied )[i])) {
+        ((self-> occupied )[i]  =  true);
+        ((self-> len )  =  ((self-> len )  +  1));
+    }
+    ((self-> keys )[i]  =  k);
+    ((self-> values )[i]  =  v);
+}
+
+DiagEntry   Vector_get__DiagEntry (Vector__DiagEntry*   self, int   i) {
+    return (self-> data )[i];
+}
+
+int   Vector_len__DiagEntry (Vector__DiagEntry*   self) {
+    return (self-> len );
+}
+
+HashMap__LspDoc*   HashMap_new__LspDoc (void) {
+    HashMap__LspDoc*   m = (( HashMap__LspDoc* )malloc(sizeof( HashMap__LspDoc )));
+    ((m-> keys )  =  NULL);
+    ((m-> values )  =  NULL);
+    ((m-> occupied )  =  NULL);
+    ((m-> len )  =  0);
+    ((m-> cap )  =  0);
+    return m;
+}
+
+int   Vector_len__JsonValue (Vector__JsonValue*   self) {
+    return (self-> len );
+}
+
+JsonValue   Vector_get__JsonValue (Vector__JsonValue*   self, int   i) {
+    return (self-> data )[i];
+}
+
+void   Vector_push__JsonValue (Vector__JsonValue*   self, JsonValue   x) {
+    if (((self-> len )  ==  (self-> cap ))) {
+        int   new_cap = 4;
+        if (((self-> cap )  >  0)) {
+            (new_cap  =  ((self-> cap )  *  2));
+        }
+        JsonValue*   new_data = (( JsonValue* )malloc((new_cap  *  sizeof( JsonValue ))));
+        for (int   i = 0; (i  <  (self-> len )); i++) {
+            (new_data[i]  =  (self-> data )[i]);
+        }
+        if (((self-> cap )  >  0)) {
+            free((( void* )(self-> data )));
+        }
+        ((self-> data )  =  new_data);
+        ((self-> cap )  =  new_cap);
+    }
+    ((self-> data )[(self-> len )]  =  x);
+    ((self-> len )  =  ((self-> len )  +  1));
+}
+
+Vector__JsonValue*   Vector_new__JsonValue (void) {
+    Vector__JsonValue*   v = (( Vector__JsonValue* )malloc(sizeof( Vector__JsonValue )));
+    ((v-> data )  =  NULL);
+    ((v-> len )  =  0);
+    ((v-> cap )  =  0);
+    return v;
 }
 
 FnMonoEntry   Vector_pop__FnMonoEntry (Vector__FnMonoEntry*   self) {
@@ -7639,6 +8941,33 @@ void   HashMap_insert__FnSig (HashMap__FnSig*   self, const char*   k, FnSig   v
     ((self-> values )[i]  =  v);
 }
 
+void   Vector_push__DiagEntry (Vector__DiagEntry*   self, DiagEntry   x) {
+    if (((self-> len )  ==  (self-> cap ))) {
+        int   new_cap = 4;
+        if (((self-> cap )  >  0)) {
+            (new_cap  =  ((self-> cap )  *  2));
+        }
+        DiagEntry*   new_data = (( DiagEntry* )malloc((new_cap  *  sizeof( DiagEntry ))));
+        for (int   i = 0; (i  <  (self-> len )); i++) {
+            (new_data[i]  =  (self-> data )[i]);
+        }
+        if (((self-> cap )  >  0)) {
+            free((( void* )(self-> data )));
+        }
+        ((self-> data )  =  new_data);
+        ((self-> cap )  =  new_cap);
+    }
+    ((self-> data )[(self-> len )]  =  x);
+    ((self-> len )  =  ((self-> len )  +  1));
+}
+
+void   Vector_free__DiagEntry (Vector__DiagEntry*   self) {
+    if (((self-> cap )  >  0)) {
+        free((( void* )(self-> data )));
+    }
+    free((( void* )self));
+}
+
 void   Vector_free__BorrowEvent (Vector__BorrowEvent*   self) {
     if (((self-> cap )  >  0)) {
         free((( void* )(self-> data )));
@@ -7671,6 +9000,14 @@ void   HashMap_free__FnSig (HashMap__FnSig*   self) {
         free((( void* )(self-> occupied )));
     }
     free((( void* )self));
+}
+
+Vector__DiagEntry*   Vector_new__DiagEntry (void) {
+    Vector__DiagEntry*   v = (( Vector__DiagEntry* )malloc(sizeof( Vector__DiagEntry )));
+    ((v-> data )  =  NULL);
+    ((v-> len )  =  0);
+    ((v-> cap )  =  0);
+    return v;
 }
 
 Vector__BorrowEvent*   Vector_new__BorrowEvent (void) {
