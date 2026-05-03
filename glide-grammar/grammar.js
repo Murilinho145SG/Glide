@@ -48,6 +48,21 @@ module.exports = grammar({
       $.const_stmt,
       $.type_alias,
       $.macro_def,
+      // Statement-level forms also accepted at the root so doc-comment code
+      // snippets (which are typically fn-body fragments) parse and highlight
+      // cleanly. Glide proper rejects most of these outside a fn — that's the
+      // typer's job, not the grammar's.
+      $.if_stmt,
+      $.while_stmt,
+      $.for_stmt,
+      $.match_stmt,
+      $.return_stmt,
+      $.spawn_stmt,
+      $.defer_stmt,
+      $.break_stmt,
+      $.continue_stmt,
+      $.block,
+      $.expression_statement,
     ),
 
     c_include: $ => seq('c_include', $.string_literal, ';'),

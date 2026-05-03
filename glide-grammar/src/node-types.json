@@ -5139,6 +5139,14 @@
       "required": false,
       "types": [
         {
+          "type": "block",
+          "named": true
+        },
+        {
+          "type": "break_stmt",
+          "named": true
+        },
+        {
           "type": "c_include",
           "named": true
         },
@@ -5151,7 +5159,19 @@
           "named": true
         },
         {
+          "type": "continue_stmt",
+          "named": true
+        },
+        {
+          "type": "defer_stmt",
+          "named": true
+        },
+        {
           "type": "enum_decl",
+          "named": true
+        },
+        {
+          "type": "expression_statement",
           "named": true
         },
         {
@@ -5164,6 +5184,14 @@
         },
         {
           "type": "fn_decl",
+          "named": true
+        },
+        {
+          "type": "for_stmt",
+          "named": true
+        },
+        {
+          "type": "if_stmt",
           "named": true
         },
         {
@@ -5187,11 +5215,27 @@
           "named": true
         },
         {
+          "type": "match_stmt",
+          "named": true
+        },
+        {
+          "type": "return_stmt",
+          "named": true
+        },
+        {
+          "type": "spawn_stmt",
+          "named": true
+        },
+        {
           "type": "struct_decl",
           "named": true
         },
         {
           "type": "type_alias",
+          "named": true
+        },
+        {
+          "type": "while_stmt",
           "named": true
         }
       ]
