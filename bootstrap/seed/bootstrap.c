@@ -199,6 +199,7 @@ typedef struct  Vector__Stmt   Vector__Stmt ;
 typedef struct  Vector__Field   Vector__Field ;
 typedef struct  Vector__EnumVariant   Vector__EnumVariant ;
 typedef struct  Vector__MatchArm   Vector__MatchArm ;
+typedef struct  Vector__ParseDiag   Vector__ParseDiag ;
 typedef struct  HashMap__FnSig   HashMap__FnSig ;
 typedef struct  HashMap__bool   HashMap__bool ;
 typedef struct  HashMap__Type   HashMap__Type ;
@@ -221,6 +222,7 @@ typedef struct  EnumVariant   EnumVariant ;
 typedef struct  MatchArm   MatchArm ;
 typedef struct  Stmt   Stmt ;
 typedef struct  StructLitField   StructLitField ;
+typedef struct  ParseDiag   ParseDiag ;
 typedef struct  Parser   Parser ;
 typedef struct  FnSig   FnSig ;
 typedef struct  BorrowEvent   BorrowEvent ;
@@ -279,6 +281,12 @@ struct  Vector__EnumVariant  {
 
 struct  Vector__MatchArm  {
      MatchArm*   data;
+     int   len;
+     int   cap;
+};
+
+struct  Vector__ParseDiag  {
+     ParseDiag*   data;
      int   len;
      int   cap;
 };
@@ -469,12 +477,19 @@ typedef struct  StructLitField  {
      Expr*   value;
 }  StructLitField ;
 
+typedef struct  ParseDiag  {
+     int   line;
+     int   col;
+     const char*   msg;
+}  ParseDiag ;
+
 typedef struct  Parser  {
      Lexer*   lex;
      Token   current;
      Token   peek;
      int   error_count;
      bool   no_struct_lit;
+     Vector__ParseDiag*   diags;
 }  Parser ;
 
 typedef struct  FnSig  {
@@ -855,7 +870,9 @@ const char*   fmt_expr (Expr*   e);
 const char*   fmt_struct_lit (Expr*   e, const char*   prefix);
 const char*   fmt_stmt_inline (Stmt*   s);
 const char*   fmt_let_const_inline (Stmt*   s);
+const char*   render_doc_lines (const char*   raw, const char*   pad);
 const char*   fmt_stmt (Stmt*   s, int   depth);
+const char*   fmt_stmt_inner (Stmt*   s, int   depth);
 const char*   fmt_for_init (Stmt*   s);
 const char*   fmt_type_params (Stmt*   s);
 const char*   fmt_fn (Stmt*   s, int   depth);
@@ -902,6 +919,8 @@ Stmt*   fn_containing (Vector__Stmt*   stmts, int   line0);
 void   collect_locals (Vector__Stmt*   body, int   before_line, Vector__Stmt*   out);
 void   collect_locals_stmt (Stmt*   s, int   before_line, Vector__Stmt*   out);
 JsonValue*   completion_item (const char*   label, int   kind, const char*   detail);
+const char*   path_qualifier_before (const char*   text, int   line0, int   col0);
+void   list_methods_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen);
 void   handle_completion (JsonValue*   req, LspState*   state);
 void   collect_uses_in_expr (Expr*   e, const char*   name, Vector__UseSite*   out);
 void   collect_uses_in_stmt (Stmt*   s, const char*   name, Vector__UseSite*   out);
@@ -964,6 +983,8 @@ bool   parse_program_into (Vector__Stmt*   stmts, const char*   path);
 const char*   pick_cc (void);
 int   run_build (const char*   src_path, const char*   out_path, const char*   target, bool   then_run);
 int main(int __glide_main_argc, char** __glide_main_argv);
+Vector__ParseDiag*   Vector_new__ParseDiag (void);
+void   Vector_push__ParseDiag (Vector__ParseDiag*   self, ParseDiag   x);
 Vector__Stmt*   Vector_new__Stmt (void);
 void   Vector_push__Stmt (Vector__Stmt*   self, Stmt   x);
 Vector__Param*   Vector_new__Param (void);
@@ -1881,6 +1902,8 @@ Parser*   Parser_new (Lexer*   lex) {
     ((p-> peek )  =  Lexer_next_token(lex));
     ((p-> error_count )  =  0);
     ((p-> no_struct_lit )  =  false);
+    Vector__ParseDiag*   dv = Vector_new__ParseDiag();
+    ((p-> diags )  =  dv);
     return p;
 }
 
@@ -1937,7 +1960,9 @@ bool   Parser_eat_op (Parser*   self, const char*   lexeme) {
 }
 
 void   Parser_err (Parser*   self, const char*   msg) {
-    printf("%s %d %s %d %s %s %s %s %s\n", "parse error at", ((self-> current ). line ), ":", ((self-> current ). column ), "-", msg, "near '", ((self-> current ). lexeme ), "'");
+    const char*   full = __glide_string_concat(__glide_string_concat(__glide_string_concat(msg, " near '"), ((self-> current ). lexeme )), "'");
+    ParseDiag   d = (( ParseDiag ){. line  = ((self-> current ). line ), . col  = ((self-> current ). column ), . msg  = full});
+    Vector_push__ParseDiag((self-> diags ), d);
     ((self-> error_count )  =  ((self-> error_count )  +  1));
 }
 
@@ -2244,8 +2269,12 @@ Vector__Stmt*   parse_block (Parser*   p) {
         return stmts;
     }
     while (((!Parser_at_op(p, "}"))  &&  (!Parser_at_eof(p)))) {
+        const char*   doc = ((p-> current ). doc );
         Stmt*   s = parse_stmt(p);
         if ((s  !=  NULL)) {
+            if (((doc  !=  NULL)  &&  (!__glide_string_eq(doc, "")))) {
+                ((s-> doc_comment )  =  doc);
+            }
             Vector_push__Stmt(stmts, (*s));
         }
     }
@@ -7996,10 +8025,44 @@ const char*   fmt_let_const_inline (Stmt*   s) {
     return __glide_string_concat(out, ";");
 }
 
+const char*   render_doc_lines (const char*   raw, const char*   pad) {
+    if ((raw  ==  NULL)) {
+        return "";
+    }
+    if (__glide_string_eq(raw, "")) {
+        return "";
+    }
+    const char*   out = "";
+    int   n = __glide_string_len(raw);
+    int   i = 0;
+    while ((i  <  n)) {
+        int   j = i;
+        while (((j  <  n)  &&  (__glide_char_to_int(__glide_string_at(raw, j))  !=  10))) {
+            (j  =  (j  +  1));
+        }
+        const char*   line = __glide_string_substring(raw, i, j);
+        (out  =  __glide_string_concat(__glide_string_concat(__glide_string_concat(__glide_string_concat(out, pad), "// "), line), "\n"));
+        if ((j  >=  n)) {
+            break;
+        }
+        (i  =  (j  +  1));
+    }
+    return out;
+}
+
 const char*   fmt_stmt (Stmt*   s, int   depth) {
     if ((s  ==  NULL)) {
         return "";
     }
+    const char*   pad = fmt_indent(depth);
+    const char*   prefix = "";
+    if ((((s-> doc_comment )  !=  NULL)  &&  (!__glide_string_eq((s-> doc_comment ), "")))) {
+        (prefix  =  render_doc_lines((s-> doc_comment ), pad));
+    }
+    return __glide_string_concat(prefix, fmt_stmt_inner(s, depth));
+}
+
+const char*   fmt_stmt_inner (Stmt*   s, int   depth) {
     const char*   pad = fmt_indent(depth);
     if ((((s-> kind )  ==  ST_LET)  ||  ((s-> kind )  ==  ST_CONST))) {
         return __glide_string_concat(__glide_string_concat(pad, fmt_let_const_inline(s)), "\n");
@@ -8856,6 +8919,86 @@ JsonValue*   completion_item (const char*   label, int   kind, const char*   det
     return it;
 }
 
+const char*   path_qualifier_before (const char*   text, int   line0, int   col0) {
+    int   pos = 0;
+    int   line = 0;
+    int   n = __glide_string_len(text);
+    while (((pos  <  n)  &&  (line  <  line0))) {
+        if ((__glide_char_to_int(__glide_string_at(text, pos))  ==  10)) {
+            (line  =  (line  +  1));
+        }
+        (pos  =  (pos  +  1));
+    }
+    (pos  =  (pos  +  col0));
+    if ((pos  >  n)) {
+        (pos  =  n);
+    }
+    int   p = pos;
+    while ((p  >  0)) {
+        int   c = __glide_char_to_int(__glide_string_at(text, (p  -  1)));
+        if ((((((c  >=  65)  &&  (c  <=  90))  ||  ((c  >=  97)  &&  (c  <=  122)))  ||  ((c  >=  48)  &&  (c  <=  57)))  ||  (c  ==  95))) {
+            (p  =  (p  -  1));
+        } else {
+            break;
+        }
+    }
+    if ((p  <  2)) {
+        return "";
+    }
+    if (((__glide_char_to_int(__glide_string_at(text, (p  -  1)))  !=  58)  ||  (__glide_char_to_int(__glide_string_at(text, (p  -  2)))  !=  58))) {
+        return "";
+    }
+    int   start = (p  -  2);
+    while ((start  >  0)) {
+        int   c = __glide_char_to_int(__glide_string_at(text, (start  -  1)));
+        if ((((((c  >=  65)  &&  (c  <=  90))  ||  ((c  >=  97)  &&  (c  <=  122)))  ||  ((c  >=  48)  &&  (c  <=  57)))  ||  (c  ==  95))) {
+            (start  =  (start  -  1));
+        } else {
+            break;
+        }
+    }
+    return __glide_string_substring(text, start, (p  -  2));
+}
+
+void   list_methods_for_type (Vector__Stmt*   stmts, const char*   type_name, JsonValue*   items, HashMap__bool*   seen) {
+    if ((stmts  ==  NULL)) {
+        return;
+    }
+    for (int   i = 0; (i  <  Vector_len__Stmt(stmts)); i++) {
+        Stmt   s = Vector_get__Stmt(stmts, i);
+        if (((s. kind )  !=  ST_IMPL)) {
+            continue;
+        }
+        if (((s. impl_target )  ==  NULL)) {
+            continue;
+        }
+        const char*   tname = "";
+        if ((((s. impl_target )-> kind )  ==  TY_NAMED)) {
+            (tname  =  ((s. impl_target )-> name ));
+        }
+        if ((((s. impl_target )-> kind )  ==  TY_GENERIC)) {
+            (tname  =  ((s. impl_target )-> name ));
+        }
+        if ((!__glide_string_eq(tname, type_name))) {
+            continue;
+        }
+        if (((s. impl_methods )  ==  NULL)) {
+            continue;
+        }
+        for (int   j = 0; (j  <  Vector_len__Stmt((s. impl_methods ))); j++) {
+            Stmt   m = Vector_get__Stmt((s. impl_methods ), j);
+            if (((m. kind )  !=  ST_FN)) {
+                continue;
+            }
+            if (HashMap_contains__bool(seen, (m. name ))) {
+                continue;
+            }
+            HashMap_insert__bool(seen, (m. name ), true);
+            json_arr_push(items, completion_item((m. name ), 2, fn_signature((&m))));
+        }
+    }
+}
+
 void   handle_completion (JsonValue*   req, LspState*   state) {
     JsonValue*   id = json_get(req, "id");
     JsonValue*   params = json_get(req, "params");
@@ -8863,7 +9006,7 @@ void   handle_completion (JsonValue*   req, LspState*   state) {
     const char*   uri = json_as_string(json_get(td, "uri"));
     JsonValue*   pos = json_get(params, "position");
     int   line0 = json_as_int(json_get(pos, "line"));
-    int   _col0 = json_as_int(json_get(pos, "character"));
+    int   col0 = json_as_int(json_get(pos, "character"));
     if ((!HashMap_contains__LspDoc((state-> docs ), uri))) {
         lsp_send_response(id, json_array());
         return;
@@ -8871,6 +9014,13 @@ void   handle_completion (JsonValue*   req, LspState*   state) {
     LspDoc   doc = HashMap_get__LspDoc((state-> docs ), uri);
     JsonValue*   items = json_array();
     HashMap__bool*   seen = HashMap_new__bool();
+    const char*   qualifier = path_qualifier_before((doc. text ), line0, col0);
+    if ((!__glide_string_eq(qualifier, ""))) {
+        list_methods_for_type((doc. stmts ), qualifier, items, seen);
+        HashMap_free__bool(seen);
+        lsp_send_response(id, items);
+        return;
+    }
     Stmt*   host = fn_containing((doc. stmts ), line0);
     if ((host  !=  NULL)) {
         if (((host-> fn_params )  !=  NULL)) {
@@ -8926,6 +9076,9 @@ void   handle_completion (JsonValue*   req, LspState*   state) {
                         }
                     }
                 }
+            }
+            if ((((s. origin )  !=  NULL)  &&  (!__glide_string_eq((s. origin ), "")))) {
+                (detail  =  __glide_string_concat(__glide_string_concat(__glide_string_concat(detail, "    ["), (s. origin )), "]"));
             }
             json_arr_push(items, completion_item((s. name ), ci_kind_for((&s)), detail));
         }
@@ -11586,6 +11739,34 @@ void   Vector_push__Stmt (Vector__Stmt*   self, Stmt   x) {
 
 Vector__Stmt*   Vector_new__Stmt (void) {
     Vector__Stmt*   v = (( Vector__Stmt* )malloc(sizeof( Vector__Stmt )));
+    ((v-> data )  =  NULL);
+    ((v-> len )  =  0);
+    ((v-> cap )  =  0);
+    return v;
+}
+
+void   Vector_push__ParseDiag (Vector__ParseDiag*   self, ParseDiag   x) {
+    if (((self-> len )  ==  (self-> cap ))) {
+        int   new_cap = 4;
+        if (((self-> cap )  >  0)) {
+            (new_cap  =  ((self-> cap )  *  2));
+        }
+        ParseDiag*   new_data = (( ParseDiag* )malloc((new_cap  *  sizeof( ParseDiag ))));
+        for (int   i = 0; (i  <  (self-> len )); i++) {
+            (new_data[i]  =  (self-> data )[i]);
+        }
+        if (((self-> cap )  >  0)) {
+            free((( void* )(self-> data )));
+        }
+        ((self-> data )  =  new_data);
+        ((self-> cap )  =  new_cap);
+    }
+    ((self-> data )[(self-> len )]  =  x);
+    ((self-> len )  =  ((self-> len )  +  1));
+}
+
+Vector__ParseDiag*   Vector_new__ParseDiag (void) {
+    Vector__ParseDiag*   v = (( Vector__ParseDiag* )malloc(sizeof( Vector__ParseDiag )));
     ((v-> data )  =  NULL);
     ((v-> len )  =  0);
     ((v-> cap )  =  0);

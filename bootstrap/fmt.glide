@@ -237,8 +237,36 @@ fn fmt_let_const_inline(s: *Stmt) -> string {
 
 // ---- Statements -------------------------------------------------------
 
+// Render a captured doc-comment block (newline-separated lines from the
+// lexer) back to canonical `//` comment lines at the current indent.
+fn render_doc_lines(raw: string, pad: string) -> string {
+    if raw == null { return ""; }
+    if raw.eq("") { return ""; }
+    let mut out: string = "";
+    let n: int = raw.len();
+    let mut i: int = 0;
+    while i < n {
+        let mut j: int = i;
+        while j < n && raw.at(j).to_int() != 10 { j = j + 1; }
+        let line: string = raw.substring(i, j);
+        out = out.concat(pad).concat("// ").concat(line).concat("\n");
+        if j >= n { break; }
+        i = j + 1;
+    }
+    return out;
+}
+
 pub fn fmt_stmt(s: *Stmt, depth: int) -> string {
     if s == null { return ""; }
+    let pad: string = fmt_indent(depth);
+    let mut prefix: string = "";
+    if s.doc_comment != null && !s.doc_comment.eq("") {
+        prefix = render_doc_lines(s.doc_comment, pad);
+    }
+    return prefix.concat(fmt_stmt_inner(s, depth));
+}
+
+fn fmt_stmt_inner(s: *Stmt, depth: int) -> string {
     let pad: string = fmt_indent(depth);
 
     if s.kind == ST_LET || s.kind == ST_CONST {

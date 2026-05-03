@@ -3,12 +3,19 @@
 import "lexer.glide";
 import "ast.glide";
 
+pub struct ParseDiag {
+    line: int,
+    col: int,
+    msg: string,
+}
+
 pub struct Parser {
     lex: *Lexer,
     current: Token,
     peek: Token,
     error_count: int,
     no_struct_lit: bool,
+    diags: *Vector<ParseDiag>,
 }
 
 impl Parser {
@@ -19,6 +26,8 @@ impl Parser {
         p.peek = lex.next_token();
         p.error_count = 0;
         p.no_struct_lit = false;
+        let dv: *Vector<ParseDiag> = Vector::new();
+        p.diags = dv;
         return p;
     }
 
@@ -55,7 +64,9 @@ impl Parser {
     }
 
     fn err(self: *Parser, msg: string) {
-        println!("parse error at", self.current.line, ":", self.current.column, "-", msg, "near '", self.current.lexeme, "'");
+        let full: string = msg.concat(" near '").concat(self.current.lexeme).concat("'");
+        let d: ParseDiag = ParseDiag { line: self.current.line, col: self.current.column, msg: full };
+        self.diags.push(d);
         self.error_count = self.error_count + 1;
     }
 
@@ -294,8 +305,14 @@ fn parse_block(p: *Parser) -> *Vector<Stmt> {
     let stmts: *Vector<Stmt> = Vector::new();
     if !p.expect_op("{") { return stmts; }
     while !p.at_op("}") && !p.at_eof() {
+        // Pick up any `//` comment chain that lives above this stmt so the
+        // formatter can re-emit it. Same pattern as parse_program.
+        let doc: string = p.current.doc;
         let s: *Stmt = parse_stmt(p);
-        if s != null { stmts.push(*s); }
+        if s != null {
+            if doc != null && !doc.eq("") { s.doc_comment = doc; }
+            stmts.push(*s);
+        }
     }
     p.expect_op("}");
     return stmts;

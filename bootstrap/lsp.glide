@@ -561,6 +561,58 @@ fn completion_item(label: string, kind: int, detail: string) -> *JsonValue {
     return it;
 }
 
+// Walk back from (line0, col0) and return the identifier that immediately
+// precedes a `::`, or "" if the cursor isn't right after `Type::[partial]`.
+fn path_qualifier_before(text: string, line0: int, col0: int) -> string {
+    let mut pos: int = 0;
+    let mut line: int = 0;
+    let n: int = text.len();
+    while pos < n && line < line0 {
+        if text.at(pos).to_int() == 10 { line = line + 1; }
+        pos = pos + 1;
+    }
+    pos = pos + col0;
+    if pos > n { pos = n; }
+    let mut p: int = pos;
+    while p > 0 {
+        let c: int = text.at(p - 1).to_int();
+        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 {
+            p = p - 1;
+        } else { break; }
+    }
+    if p < 2 { return ""; }
+    if text.at(p - 1).to_int() != 58 || text.at(p - 2).to_int() != 58 { return ""; }
+    let mut start: int = p - 2;
+    while start > 0 {
+        let c: int = text.at(start - 1).to_int();
+        if (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 {
+            start = start - 1;
+        } else { break; }
+    }
+    return text.substring(start, p - 2);
+}
+
+fn list_methods_for_type(stmts: *Vector<Stmt>, type_name: string, items: *JsonValue, seen: *HashMap<bool>) {
+    if stmts == null { return; }
+    for let i: int = 0; i < stmts.len(); i++ {
+        let s: Stmt = stmts.get(i);
+        if s.kind != ST_IMPL { continue; }
+        if s.impl_target == null { continue; }
+        let mut tname: string = "";
+        if s.impl_target.kind == TY_NAMED { tname = s.impl_target.name; }
+        if s.impl_target.kind == TY_GENERIC { tname = s.impl_target.name; }
+        if !tname.eq(type_name) { continue; }
+        if s.impl_methods == null { continue; }
+        for let j: int = 0; j < s.impl_methods.len(); j++ {
+            let m: Stmt = s.impl_methods.get(j);
+            if m.kind != ST_FN { continue; }
+            if seen.contains(m.name) { continue; }
+            seen.insert(m.name, true);
+            json_arr_push(items, completion_item(m.name, 2, fn_signature(&m)));
+        }
+    }
+}
+
 fn handle_completion(req: *JsonValue, state: *LspState) {
     let id: *JsonValue = json_get(req, "id");
     let params: *JsonValue = json_get(req, "params");
@@ -568,12 +620,22 @@ fn handle_completion(req: *JsonValue, state: *LspState) {
     let uri: string = json_as_string(json_get(td, "uri"));
     let pos: *JsonValue = json_get(params, "position");
     let line0: int = json_as_int(json_get(pos, "line"));
-    let _col0: int = json_as_int(json_get(pos, "character"));
+    let col0: int = json_as_int(json_get(pos, "character"));
 
     if !state.docs.contains(uri) { lsp_send_response(id, json_array()); return; }
     let doc: LspDoc = state.docs.get(uri);
     let items: *JsonValue = json_array();
     let seen: *HashMap<bool> = HashMap::new();
+
+    // Path completion: cursor is right after `Type::` (or `Type::partial`).
+    // List that type's methods and return immediately.
+    let qualifier: string = path_qualifier_before(doc.text, line0, col0);
+    if !qualifier.eq("") {
+        list_methods_for_type(doc.stmts, qualifier, items, seen);
+        seen.free();
+        lsp_send_response(id, items);
+        return;
+    }
 
     // 1. Locals in scope (params + lets above the cursor in the containing fn).
     let host: *Stmt = fn_containing(doc.stmts, line0);
@@ -614,6 +676,11 @@ fn handle_completion(req: *JsonValue, state: *LspState) {
             else if s.kind == ST_CONST {
                 detail = "const ".concat(s.name);
                 if s.let_ty != null { detail = detail.concat(": ").concat(type_to_string_pretty(s.let_ty)); }
+            }
+            // Tag the source so users can tell stdlib symbols apart from
+            // their own. The path is shown after the signature.
+            if s.origin != null && !s.origin.eq("") {
+                detail = detail.concat("    [").concat(s.origin).concat("]");
             }
             json_arr_push(items, completion_item(s.name, ci_kind_for(&s), detail));
         }
