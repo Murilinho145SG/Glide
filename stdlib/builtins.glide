@@ -159,3 +159,16 @@ extern fn write_file(path: string, content: string) -> bool;
 /// }
 /// ```
 extern fn yield_now();
+
+/// Sleep for at least `ms` milliseconds. Currently blocks the worker
+/// thread (uses libc `nanosleep` / WinAPI `Sleep`) — once the reactor
+/// lands in Phase 2, this will become a proper async timer that parks
+/// the coroutine and frees the worker for other tasks.
+///
+/// ```glide
+/// for i in 0..3 {
+///     println!("tick", i);
+///     sleep_ms(500);
+/// }
+/// ```
+extern fn sleep_ms(ms: int);

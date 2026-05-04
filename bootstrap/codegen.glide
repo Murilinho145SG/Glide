@@ -644,6 +644,15 @@ fn emit_scheduler_runtime() {
     println!("#endif");
     println!("}");
     println!("");
+    println!("void sleep_ms(int ms) {");
+    println!("#ifdef _WIN32");
+    println!("    Sleep((DWORD)ms);");
+    println!("#else");
+    println!("    struct timespec ts; ts.tv_sec = ms / 1000; ts.tv_nsec = (ms % 1000) * 1000000;");
+    println!("    nanosleep(&ts, NULL);");
+    println!("#endif");
+    println!("}");
+    println!("");
     println!("/* Coro park: caller holds `lock` and wants to wait on `list`. Returns");
     println!("   1 if parked (caller must re-acquire `lock` and re-check state), 0");
     println!("   if the caller is not in a coroutine context (caller should fall");
