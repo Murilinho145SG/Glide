@@ -818,6 +818,105 @@ fn emit_scheduler_runtime() {
     println!("");
 }
 
+// Sync TCP socket runtime. Wraps libc/winsock so Glide programs can write
+// servers/clients with the same API on POSIX and Windows. The blocking
+// versions are emitted now; once Phase 2 (reactor) lands, accept/read/write
+// will auto-yield to the scheduler when called from a coroutine.
+fn emit_socket_runtime() {
+    println!("");
+    println!("// ============================ socket runtime =============================");
+    println!("#ifdef _WIN32");
+    println!("# include <winsock2.h>");
+    println!("# include <ws2tcpip.h>");
+    println!("typedef SOCKET __glide_sock_t;");
+    println!("static int __glide_wsa_inited = 0;");
+    println!("static void __glide_wsa_ensure(void) {");
+    println!("    if (__glide_wsa_inited) return;");
+    println!("    WSADATA d; WSAStartup(MAKEWORD(2, 2), &d);");
+    println!("    __glide_wsa_inited = 1;");
+    println!("}");
+    println!("#else");
+    println!("# include <sys/socket.h>");
+    println!("# include <netinet/in.h>");
+    println!("# include <unistd.h>");
+    println!("# include <arpa/inet.h>");
+    println!("typedef int __glide_sock_t;");
+    println!("static void __glide_wsa_ensure(void) {}");
+    println!("#endif");
+    println!("");
+    println!("int listen_tcp(int port) {");
+    println!("    __glide_wsa_ensure();");
+    println!("    __glide_sock_t s = socket(AF_INET, SOCK_STREAM, 0);");
+    println!("#ifdef _WIN32");
+    println!("    if (s == INVALID_SOCKET) return -1;");
+    println!("#else");
+    println!("    if (s < 0) return -1;");
+    println!("#endif");
+    println!("    int yes = 1;");
+    println!("    setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (const char*)&yes, sizeof(yes));");
+    println!("    struct sockaddr_in addr; memset(&addr, 0, sizeof(addr));");
+    println!("    addr.sin_family = AF_INET;");
+    println!("    addr.sin_port = htons((unsigned short)port);");
+    println!("    addr.sin_addr.s_addr = htonl(INADDR_ANY);");
+    println!("    if (bind(s, (struct sockaddr*)&addr, sizeof(addr)) < 0) {");
+    println!("#ifdef _WIN32");
+    println!("        closesocket(s);");
+    println!("#else");
+    println!("        close(s);");
+    println!("#endif");
+    println!("        return -1;");
+    println!("    }");
+    println!("    if (listen(s, 128) < 0) {");
+    println!("#ifdef _WIN32");
+    println!("        closesocket(s);");
+    println!("#else");
+    println!("        close(s);");
+    println!("#endif");
+    println!("        return -1;");
+    println!("    }");
+    println!("    return (int)s;");
+    println!("}");
+    println!("");
+    println!("int accept_tcp(int listener) {");
+    println!("#ifdef _WIN32");
+    println!("    SOCKET c = accept((SOCKET)listener, NULL, NULL);");
+    println!("    return (c == INVALID_SOCKET) ? -1 : (int)c;");
+    println!("#else");
+    println!("    int c = accept(listener, NULL, NULL);");
+    println!("    return c < 0 ? -1 : c;");
+    println!("#endif");
+    println!("}");
+    println!("");
+    println!("int tcp_read(int fd, void* buf, int max) {");
+    println!("#ifdef _WIN32");
+    println!("    int n = recv((SOCKET)fd, (char*)buf, max, 0);");
+    println!("    return n < 0 ? -1 : n;");
+    println!("#else");
+    println!("    int n = (int)read(fd, buf, (size_t)max);");
+    println!("    return n < 0 ? -1 : n;");
+    println!("#endif");
+    println!("}");
+    println!("");
+    println!("int tcp_write(int fd, void* buf, int n) {");
+    println!("#ifdef _WIN32");
+    println!("    int w = send((SOCKET)fd, (const char*)buf, n, 0);");
+    println!("    return w < 0 ? -1 : w;");
+    println!("#else");
+    println!("    int w = (int)write(fd, buf, (size_t)n);");
+    println!("    return w < 0 ? -1 : w;");
+    println!("#endif");
+    println!("}");
+    println!("");
+    println!("void tcp_close(int fd) {");
+    println!("#ifdef _WIN32");
+    println!("    closesocket((SOCKET)fd);");
+    println!("#else");
+    println!("    close(fd);");
+    println!("#endif");
+    println!("}");
+    println!("");
+}
+
 // Spawn: collect every spawn site and emit a stub up-front. The same pre-walk
 // order is used at emit time to recover the matching ID.
 fn pre_emit_spawn_stubs_in_stmt(g: *CG, s: *Stmt) {
@@ -3381,6 +3480,7 @@ pub fn emit_program(program: *Vector<Stmt>) {
         collect_chan_in_stmt(g, &s);
     }
     emit_scheduler_runtime();
+    emit_socket_runtime();
     emit_chan_runtime(g);
 
     // ---- Errors-as-values pre-pass: collect Result inner types + emit runtime
