@@ -541,6 +541,16 @@ fn parse_stmt(p: *Parser) -> *Stmt {
         p.expect_op(";");
         return stmt_spawn(e, line, col);
     }
+    if p.at_kw("spawn_thread") {
+        let line: int = p.current.line;
+        let col: int = p.current.column;
+        p.advance();
+        let e: *Expr = parse_expr(p, 0);
+        p.expect_op(";");
+        let s: *Stmt = stmt_spawn(e, line, col);
+        if s != null { s.is_spawn_thread = true; }
+        return s;
+    }
     if p.at_kw("break") {
         let line: int = p.current.line;
         let col: int = p.current.column;

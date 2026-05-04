@@ -252,6 +252,10 @@ pub struct Stmt {
     // variadic). Typer skips the arg-count / arg-type check past `len(params)`
     // so callers can pass any extra args (used for `extern fn printf(...)`).
     is_variadic: bool,
+
+    // ST_SPAWN flag: `spawn` (default) submits a coroutine to the M:N
+    // scheduler; `spawn_thread` keeps the explicit pthread escape hatch.
+    is_spawn_thread: bool,
 }
 
 // ---- Constructors --------------------------------------------------------

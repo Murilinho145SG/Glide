@@ -372,6 +372,218 @@ fn emit_chan_runtime(g: *CG) {
     }
 }
 
+// M:N coroutine scheduler runtime. Emitted once per program. Defines:
+//   __glide_sched_init / __glide_sched_shutdown
+//   __glide_spawn(fn, arg)         submit a coroutine
+//   yield_now()                    cooperative yield from inside a coroutine
+// Backend: Win32 Fibers on Windows; ucontext.h elsewhere. Uses pthread for
+// the worker pool everywhere. Default workers = #cpu cores (override via
+// GLIDE_WORKERS env). v1 has a single global FIFO queue; per-worker deques
+// + work-stealing land in Phase 1.2.
+fn emit_scheduler_runtime() {
+    println!("");
+    println!("// ============================ scheduler runtime ============================");
+    println!("#include <pthread.h>");
+    println!("#include <stdatomic.h>");
+    println!("#include <time.h>");
+    println!("#ifdef _WIN32");
+    println!("# include <windows.h>");
+    println!("typedef void* __glide_coro_handle;");
+    println!("#else");
+    println!("# include <ucontext.h>");
+    println!("# include <unistd.h>");
+    println!("typedef struct { ucontext_t uc; void* stack; size_t stack_size; } __glide_coro_handle;");
+    println!("#endif");
+    println!("");
+    println!("#define __GLIDE_CORO_STACK 65536");
+    println!("");
+    println!("typedef void* (*__glide_task_fn)(void*);");
+    println!("typedef struct __glide_task {");
+    println!("    __glide_coro_handle ctx;");
+    println!("    __glide_task_fn     entry;");
+    println!("    void*               arg;");
+    println!("    int                 state; /* 0=ready 1=running 2=blocked 3=done */");
+    println!("    struct __glide_task* next;");
+    println!("} __glide_task;");
+    println!("");
+    println!("static __glide_task* __glide_q_head = NULL;");
+    println!("static __glide_task* __glide_q_tail = NULL;");
+    println!("static pthread_mutex_t __glide_q_mu;");
+    println!("static pthread_cond_t  __glide_q_cv;");
+    println!("static int __glide_q_inited = 0;");
+    println!("static int __glide_n_workers = 0;");
+    println!("static pthread_t* __glide_workers = NULL;");
+    println!("static atomic_int __glide_pending = 0;");
+    println!("static atomic_int __glide_shutdown = 0;");
+    println!("");
+    // C11 _Thread_local — works on both mingw-gcc and msvc; the older
+    // __declspec(thread) is silently ignored by mingw-gcc which would race
+    // every worker thread on a single global.
+    println!("static _Thread_local __glide_task* __glide_cur_task = NULL;");
+    println!("#ifdef _WIN32");
+    println!("static _Thread_local void* __glide_worker_fiber = NULL;");
+    println!("#else");
+    println!("static _Thread_local ucontext_t __glide_worker_uc;");
+    println!("#endif");
+    println!("");
+    println!("static void __glide_q_push(__glide_task* t) {");
+    println!("    pthread_mutex_lock(&__glide_q_mu);");
+    println!("    t->next = NULL;");
+    println!("    if (__glide_q_tail) __glide_q_tail->next = t;");
+    println!("    else __glide_q_head = t;");
+    println!("    __glide_q_tail = t;");
+    println!("    pthread_cond_signal(&__glide_q_cv);");
+    println!("    pthread_mutex_unlock(&__glide_q_mu);");
+    println!("}");
+    println!("");
+    println!("static __glide_task* __glide_q_pop(void) {");
+    println!("    pthread_mutex_lock(&__glide_q_mu);");
+    println!("    while (__glide_q_head == NULL && !atomic_load(&__glide_shutdown)) {");
+    println!("        pthread_cond_wait(&__glide_q_cv, &__glide_q_mu);");
+    println!("    }");
+    println!("    __glide_task* t = __glide_q_head;");
+    println!("    if (t) {");
+    println!("        __glide_q_head = t->next;");
+    println!("        if (__glide_q_head == NULL) __glide_q_tail = NULL;");
+    println!("    }");
+    println!("    pthread_mutex_unlock(&__glide_q_mu);");
+    println!("    return t;");
+    println!("}");
+    println!("");
+    println!("#ifdef _WIN32");
+    println!("static void __stdcall __glide_coro_entry(void* arg) {");
+    println!("    __glide_task* t = (__glide_task*)arg;");
+    println!("    (void)t->entry(t->arg);");
+    println!("    t->state = 3;");
+    println!("    SwitchToFiber(__glide_worker_fiber);");
+    println!("}");
+    println!("#else");
+    println!("static void __glide_coro_entry_posix(void) {");
+    println!("    __glide_task* t = __glide_cur_task;");
+    println!("    (void)t->entry(t->arg);");
+    println!("    t->state = 3;");
+    println!("    setcontext(&__glide_worker_uc);");
+    println!("}");
+    println!("#endif");
+    println!("");
+    println!("static void __glide_coro_init(__glide_task* t) {");
+    println!("#ifdef _WIN32");
+    println!("    t->ctx = CreateFiber(__GLIDE_CORO_STACK, (LPFIBER_START_ROUTINE)__glide_coro_entry, t);");
+    println!("#else");
+    println!("    t->ctx.stack_size = __GLIDE_CORO_STACK;");
+    println!("    t->ctx.stack = malloc(t->ctx.stack_size);");
+    println!("    getcontext(&t->ctx.uc);");
+    println!("    t->ctx.uc.uc_stack.ss_sp = t->ctx.stack;");
+    println!("    t->ctx.uc.uc_stack.ss_size = t->ctx.stack_size;");
+    println!("    t->ctx.uc.uc_link = &__glide_worker_uc;");
+    println!("    makecontext(&t->ctx.uc, (void(*)(void))__glide_coro_entry_posix, 0);");
+    println!("#endif");
+    println!("}");
+    println!("");
+    println!("static void __glide_coro_destroy(__glide_task* t) {");
+    println!("#ifdef _WIN32");
+    println!("    DeleteFiber(t->ctx);");
+    println!("#else");
+    println!("    free(t->ctx.stack);");
+    println!("#endif");
+    println!("}");
+    println!("");
+    println!("static void* __glide_worker_main(void* unused) {");
+    println!("    (void)unused;");
+    println!("#ifdef _WIN32");
+    println!("    __glide_worker_fiber = ConvertThreadToFiber(NULL);");
+    println!("#endif");
+    println!("    while (!atomic_load(&__glide_shutdown)) {");
+    println!("        __glide_task* t = __glide_q_pop();");
+    println!("        if (!t) break;");
+    println!("        __glide_cur_task = t;");
+    println!("        t->state = 1;");
+    println!("#ifdef _WIN32");
+    println!("        SwitchToFiber(t->ctx);");
+    println!("#else");
+    println!("        swapcontext(&__glide_worker_uc, &t->ctx.uc);");
+    println!("#endif");
+    println!("        __glide_cur_task = NULL;");
+    println!("        if (t->state == 3) {");
+    println!("            __glide_coro_destroy(t);");
+    println!("            free(t);");
+    println!("            atomic_fetch_sub(&__glide_pending, 1);");
+    println!("            pthread_mutex_lock(&__glide_q_mu);");
+    println!("            pthread_cond_broadcast(&__glide_q_cv);");
+    println!("            pthread_mutex_unlock(&__glide_q_mu);");
+    println!("        } else {");
+    println!("            t->state = 0;");
+    println!("            __glide_q_push(t);");
+    println!("        }");
+    println!("    }");
+    println!("#ifdef _WIN32");
+    println!("    ConvertFiberToThread();");
+    println!("#endif");
+    println!("    return NULL;");
+    println!("}");
+    println!("");
+    println!("void __glide_sched_init(void) {");
+    println!("    if (__glide_q_inited) return;");
+    println!("    pthread_mutex_init(&__glide_q_mu, NULL);");
+    println!("    pthread_cond_init(&__glide_q_cv, NULL);");
+    println!("    __glide_q_inited = 1;");
+    println!("    const char* env = getenv(\"GLIDE_WORKERS\");");
+    println!("    if (env) __glide_n_workers = atoi(env);");
+    println!("    if (__glide_n_workers <= 0) {");
+    println!("#ifdef _WIN32");
+    println!("        SYSTEM_INFO si; GetSystemInfo(&si);");
+    println!("        __glide_n_workers = (int)si.dwNumberOfProcessors;");
+    println!("#else");
+    println!("        long n = sysconf(_SC_NPROCESSORS_ONLN);");
+    println!("        __glide_n_workers = (n > 0) ? (int)n : 4;");
+    println!("#endif");
+    println!("    }");
+    println!("    __glide_workers = (pthread_t*)malloc(sizeof(pthread_t) * __glide_n_workers);");
+    println!("    for (int i = 0; i < __glide_n_workers; i++) {");
+    println!("        pthread_create(&__glide_workers[i], NULL, __glide_worker_main, NULL);");
+    println!("    }");
+    println!("}");
+    println!("");
+    println!("void __glide_sched_shutdown(void) {");
+    println!("    if (!__glide_q_inited) return;");
+    println!("    while (atomic_load(&__glide_pending) > 0) {");
+    println!("        struct timespec ts; ts.tv_sec = 0; ts.tv_nsec = 1000000;");
+    println!("        nanosleep(&ts, NULL);");
+    println!("    }");
+    println!("    atomic_store(&__glide_shutdown, 1);");
+    println!("    pthread_mutex_lock(&__glide_q_mu);");
+    println!("    pthread_cond_broadcast(&__glide_q_cv);");
+    println!("    pthread_mutex_unlock(&__glide_q_mu);");
+    println!("    for (int i = 0; i < __glide_n_workers; i++) {");
+    println!("        pthread_join(__glide_workers[i], NULL);");
+    println!("    }");
+    println!("    free(__glide_workers); __glide_workers = NULL;");
+    println!("    __glide_q_inited = 0;");
+    println!("}");
+    println!("");
+    println!("void __glide_spawn(__glide_task_fn fn, void* arg) {");
+    println!("    __glide_task* t = (__glide_task*)calloc(1, sizeof(__glide_task));");
+    println!("    t->entry = fn;");
+    println!("    t->arg = arg;");
+    println!("    t->state = 0;");
+    println!("    __glide_coro_init(t);");
+    println!("    atomic_fetch_add(&__glide_pending, 1);");
+    println!("    __glide_q_push(t);");
+    println!("}");
+    println!("");
+    println!("void yield_now(void) {");
+    println!("    __glide_task* t = __glide_cur_task;");
+    println!("    if (!t) return;");
+    println!("    t->state = 0;");
+    println!("#ifdef _WIN32");
+    println!("    SwitchToFiber(__glide_worker_fiber);");
+    println!("#else");
+    println!("    swapcontext(&t->ctx.uc, &__glide_worker_uc);");
+    println!("#endif");
+    println!("}");
+    println!("");
+}
+
 // Spawn: collect every spawn site and emit a stub up-front. The same pre-walk
 // order is used at emit time to recover the matching ID.
 fn pre_emit_spawn_stubs_in_stmt(g: *CG, s: *Stmt) {
@@ -2274,9 +2486,13 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
                 println!(";");
             }
         }
-        ind(depth + 1); println!("pthread_t __tid;");
-        ind(depth + 1); println!("pthread_create(&__tid, NULL, __glide_spawn_stub_".concat(ids).concat(", __args);"));
-        ind(depth + 1); println!("pthread_detach(__tid);");
+        if s.is_spawn_thread {
+            ind(depth + 1); println!("pthread_t __tid;");
+            ind(depth + 1); println!("pthread_create(&__tid, NULL, __glide_spawn_stub_".concat(ids).concat(", __args);"));
+            ind(depth + 1); println!("pthread_detach(__tid);");
+        } else {
+            ind(depth + 1); println!("__glide_spawn(__glide_spawn_stub_".concat(ids).concat(", __args);"));
+        }
         ind(depth); println!("}");
         return;
     }
@@ -2687,10 +2903,16 @@ fn infer_let_types_in_program(g: *CG, program: *Vector<Stmt>) {
 }
 
 fn emit_fn(g: *CG, s: *Stmt) {
-    emit_fn_signature(s);
-    println!(" {");
-    if s.name.eq("main") {
-        println!("    __glide_args_init(__glide_main_argc, __glide_main_argv);");
+    let is_main: bool = s.name.eq("main");
+    if is_main {
+        // The user's main is renamed to __glide_user_main; a real C `main`
+        // wrapper at the end of this fn handles arg init, scheduler bring-up
+        // and graceful shutdown (which drains pending coroutines). Doing it
+        // inline avoids the libc-teardown ordering bug atexit had.
+        println!("int __glide_user_main(int __glide_main_argc, char** __glide_main_argv) {");
+    } else {
+        emit_fn_signature(s);
+        println!(" {");
     }
     g.scope.clear();
     let saved_ret: *Type = g.current_ret_ty;
@@ -2720,6 +2942,21 @@ fn emit_fn(g: *CG, s: *Stmt) {
     g.auto_drop_stack = saved_drop;
     g.current_ret_ty = saved_ret;
     println!("}");
+
+    // Real C `main` wrapper: runs scheduler init/shutdown around the user's
+    // body. Drains pending coroutines before exiting so `spawn worker(); main`
+    // returns waits for `worker` to finish (predictable for tests; long-running
+    // servers stay in main's loop and never reach this point).
+    if is_main {
+        println!("");
+        println!("int main(int argc, char** argv) {");
+        println!("    __glide_args_init(argc, argv);");
+        println!("    __glide_sched_init();");
+        println!("    int __glide_rc = __glide_user_main(argc, argv);");
+        println!("    __glide_sched_shutdown();");
+        println!("    return __glide_rc;");
+        println!("}");
+    }
 }
 
 fn emit_impl(g: *CG, s: *Stmt) {
@@ -2872,6 +3109,7 @@ pub fn emit_program(program: *Vector<Stmt>) {
         collect_chan_in_stmt(g, &s);
     }
     emit_chan_runtime(g);
+    emit_scheduler_runtime();
 
     // ---- Errors-as-values pre-pass: collect Result inner types + emit runtime
     for let i: int = 0; i < program.len(); i++ {

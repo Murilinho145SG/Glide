@@ -291,6 +291,7 @@ pub fn is_keyword(s: string) -> bool {
     if s.eq("chan") { return true; }
     if s.eq("macro") { return true; }
     if s.eq("in") { return true; }
+    if s.eq("spawn_thread") { return true; }
     return false;
 }
 

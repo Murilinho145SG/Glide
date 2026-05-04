@@ -141,3 +141,21 @@ extern fn read_file(path: string) -> string;
 /// Write `content` to `path`, replacing any existing file. Returns true
 /// on success.
 extern fn write_file(path: string, content: string) -> bool;
+
+// ---- Concurrency: M:N scheduler --------------------------------------------
+
+/// Cooperative yield from inside a coroutine. The current task is pushed
+/// back to the scheduler queue and another ready task runs. No-op outside
+/// of a coroutine context (e.g. when called from main before `spawn`).
+///
+/// Use sparingly - normal blocking ops (`chan.recv`, future `await`,
+/// async I/O) yield automatically. `yield_now()` is for hand-tuned
+/// fairness in tight loops that don't otherwise touch the scheduler.
+///
+/// ```glide
+/// for i in 0..1000 {
+///     do_some_work(i);
+///     if i % 64 == 0 { yield_now(); }
+/// }
+/// ```
+extern fn yield_now();
