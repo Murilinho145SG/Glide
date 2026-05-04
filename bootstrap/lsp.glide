@@ -224,6 +224,18 @@ fn run_analysis_and_publish(uri: string, text: string, state: *LspState) {
     // codebase) resolve. Imports are resolved relative to the user file's dir.
     load_into_str(stmts, text, path, loaded, pdiags);
 
+    // Expand macros and lower surface-syntax sugar (for-in -> for) so the
+    // typer sees the same shapes the build pipeline does. Without this,
+    // anything inside a `for x in expr { ... }` body never gets type-checked
+    // by the LSP.
+    let expanded: *Vector<Stmt> = expand_macros(stmts);
+    let lowered: *Vector<Stmt> = lower_program(expanded);
+    stmts.clear();
+    for let i: int = 0; i < lowered.len(); i++ {
+        let s: Stmt = lowered.get(i);
+        stmts.push(s);
+    }
+
     let t: *Typer = Typer::new();
     merge_parse_diags(t, pdiags);
     check_program(t, stmts);

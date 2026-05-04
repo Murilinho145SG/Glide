@@ -71,3 +71,73 @@ macro format!($($arg:expr),*);
 /// **Caveat:** mismatched specifiers vs argument types are undefined
 /// behaviour at the C level. Glide doesn't validate the format string.
 extern fn printf(fmt: string, ...) -> int;
+
+/// Construct a typed channel. The element type is inferred from the
+/// `let`-annotation; capacity is the number of pending sends the channel
+/// can buffer before `send` blocks.
+///
+/// Channels are bounded MPMC queues backed by a pthread mutex + cond_var.
+/// Use `c.send(x)`, `c.recv()`, `c.close()` for the operations.
+///
+/// # Examples
+///
+/// ```glide
+/// let c: chan<int> = make_chan(8);
+/// spawn worker(c);
+/// for _ in 0..5 {
+///     let n: int = c.recv();
+///     println!(n);
+/// }
+/// ```
+///
+/// For sharing large or owning structures across threads, prefer a
+/// pointer element type (`chan<*Vector<int>>`) so the data isn't copied
+/// per send / recv.
+extern fn make_chan(cap: int);
+
+// ---- C runtime escape hatches --------------------------------------------
+//
+// The Glide compiler relies on libc for memory and IO. These declarations
+// are stubs so hover / goto resolve, and so the typer doesn't complain
+// about implicit calls to the runtime. Codegen / the C linker provides
+// the actual symbols.
+
+/// Allocate `n` uninitialised bytes on the heap. Returns `null` on
+/// failure (out of memory). Pair every `malloc` with a matching `free`
+/// or wrap it in `defer free(p as *void);`.
+///
+/// ```glide
+/// let buf: *u8 = malloc(64) as *u8;
+/// defer free(buf as *void);
+/// ```
+extern fn malloc(n: usize) -> *void;
+
+/// Allocate `count * size` bytes initialised to zero.
+///
+/// ```glide
+/// let arr: *Item = calloc(10, sizeof(Item)) as *Item;
+/// defer free(arr as *void);
+/// ```
+extern fn calloc(count: usize, size: usize) -> *void;
+
+/// Release a pointer previously returned by `malloc` / `calloc`. Passing
+/// `null` is a no-op (per libc); passing the same pointer twice is
+/// undefined behaviour.
+extern fn free(p: *void);
+
+// ---- Glide runtime helpers -----------------------------------------------
+
+/// Number of CLI arguments (mirrors C's `argc`).
+extern fn args_count() -> int;
+
+/// CLI argument at index `i` (mirrors `argv[i]`). Index 0 is the program
+/// path; indices `1..args_count()` are user arguments.
+extern fn args_at(i: int) -> string;
+
+/// Read an entire file into a heap-allocated string. Returns `""` if the
+/// file cannot be opened.
+extern fn read_file(path: string) -> string;
+
+/// Write `content` to `path`, replacing any existing file. Returns true
+/// on success.
+extern fn write_file(path: string, content: string) -> bool;
