@@ -22,6 +22,18 @@ pub fn type_to_string(t: *Type) -> string {
     if t.kind == TY_BORROW { return "&".concat(type_to_string(t.inner)); }
     if t.kind == TY_BORROW_MUT { return "&mut ".concat(type_to_string(t.inner)); }
     if t.kind == TY_SLICE { return "[]".concat(type_to_string(t.inner)); }
+    if t.kind == TY_GENERIC {
+        let mut out: string = t.name.concat("<");
+        if t.args != null {
+            for let i: int = 0; i < t.args.len(); i++ {
+                if i > 0 { out = out.concat(", "); }
+                let a: Type = t.args.get(i);
+                out = out.concat(type_to_string(&a));
+            }
+        }
+        return out.concat(">");
+    }
+    if t.kind == TY_RESULT { return "!".concat(type_to_string(t.inner)); }
     return "<ty?>";
 }
 
@@ -670,6 +682,24 @@ fn check_return(t: *Typer, s: *Stmt) {
 
 // ---- expression inference ------------------------------------------------
 
+// Strip pointer/borrow wrappers, then return the chan's inner type if `t`
+// is a `chan<T>`. Returns null otherwise.
+fn chan_inner(t: *Type) -> *Type {
+    if t == null { return null; }
+    let mut x: *Type = t;
+    while x != null && (x.kind == TY_POINTER || x.kind == TY_BORROW || x.kind == TY_BORROW_MUT) {
+        x = x.inner;
+    }
+    if x == null { return null; }
+    if x.kind != TY_GENERIC { return null; }
+    if !x.name.eq("chan") { return null; }
+    if x.args == null || x.args.len() == 0 { return null; }
+    let inner: Type = x.args.get(0);
+    let p: *Type = malloc(sizeof(Type)) as *Type;
+    *p = inner;
+    return p;
+}
+
 pub fn infer_expr(t: *Typer, e: *Expr) -> *Type {
     if e == null { return null; }
     if e.kind == EX_INT { return ty_named("int"); }
@@ -756,6 +786,66 @@ pub fn infer_expr(t: *Typer, e: *Expr) -> *Type {
         // Borrow check: forbid aliased borrows of the same source within
         // a single call (`&x + &mut x`, `&mut x + &mut x`).
         check_call_aliasing(t, e);
+
+        // ---- chan: `c.send(x)` / `c.recv()` / `c.close()` ------------
+        // Check arity + arg-vs-inner type, and surface the inner as the
+        // recv() return type so subsequent let-init inferences fire.
+        if e.lhs != null && e.lhs.kind == EX_MEMBER && e.lhs.lhs != null {
+            let mname: string = e.lhs.field;
+            let recv_ty: *Type = infer_expr(t, e.lhs.lhs);
+            let inner: *Type = chan_inner(recv_ty);
+            if inner != null {
+                let mut nargs: int = 0;
+                if e.args != null { nargs = e.args.len(); }
+                if mname.eq("send") {
+                    if nargs != 1 {
+                        t.err(e.line, e.column, "`chan.send` takes exactly 1 argument");
+                    } else {
+                        let a: Expr = e.args.get(0);
+                        let at: *Type = infer_expr(t, &a);
+                        if !types_compat(inner, at) {
+                            t.err(a.line, a.column,
+                                "chan.send arg type mismatch: expected ".concat(type_to_string(inner))
+                                .concat(", got ").concat(type_to_string(at)));
+                        }
+                    }
+                    return ty_named("void");
+                }
+                if mname.eq("recv") {
+                    if nargs != 0 {
+                        t.err(e.line, e.column, "`chan.recv` takes no arguments");
+                    }
+                    let p: *Type = malloc(sizeof(Type)) as *Type;
+                    *p = *inner;
+                    return p;
+                }
+                if mname.eq("close") {
+                    if nargs != 0 {
+                        t.err(e.line, e.column, "`chan.close` takes no arguments");
+                    }
+                    return ty_named("void");
+                }
+            }
+        }
+
+        // ---- make_chan(cap) ----------------------------------------
+        if e.lhs != null && e.lhs.kind == EX_IDENT && e.lhs.str_val.eq("make_chan") {
+            let mut nargs: int = 0;
+            if e.args != null { nargs = e.args.len(); }
+            if nargs != 1 {
+                t.err(e.line, e.column, "`make_chan` takes exactly 1 argument (capacity)");
+            } else {
+                let a: Expr = e.args.get(0);
+                let at: *Type = infer_expr(t, &a);
+                let want: *Type = ty_named("int");
+                if !types_compat(want, at) {
+                    t.err(a.line, a.column,
+                        "make_chan capacity must be int, got ".concat(type_to_string(at)));
+                }
+            }
+            return null;
+        }
+
         // Resolve callee. If ident, look up in fn registry.
         if e.lhs != null && e.lhs.kind == EX_IDENT {
             let name: string = e.lhs.str_val;
