@@ -1352,6 +1352,25 @@ fn list_fields_for_type(stmts: *Vector<Stmt>, type_name: string, items: *JsonVal
     }
 }
 
+// Surface the chan API (`send` / `recv` / `close`) on member completion when
+// the receiver is a `chan<T>`. Channels have no impl block to scan so the
+// methods are hardcoded here, matching the typer's special-case lowering.
+fn list_chan_methods_for_type(type_name: string, items: *JsonValue, seen: *HashMap<bool>) {
+    if !type_name.eq("chan") { return; }
+    if !seen.contains("send") {
+        seen.insert("send", true);
+        json_arr_push(items, completion_item("send", 2, "fn send(self: chan<T>, x: T)"));
+    }
+    if !seen.contains("recv") {
+        seen.insert("recv", true);
+        json_arr_push(items, completion_item("recv", 2, "fn recv(self: chan<T>) -> T"));
+    }
+    if !seen.contains("close") {
+        seen.insert("close", true);
+        json_arr_push(items, completion_item("close", 2, "fn close(self: chan<T>)"));
+    }
+}
+
 // `want_self`: true → list instance methods (first param is `self`).
 //              false → list static methods (no `self`).
 fn list_methods_for_type(stmts: *Vector<Stmt>, type_name: string,
@@ -1430,6 +1449,7 @@ fn handle_completion(req: *JsonValue, state: *LspState) {
         if !var_type.eq("") {
             list_fields_for_type(doc.stmts, var_type, items, seen);
             list_methods_for_type(doc.stmts, var_type, items, seen, true);
+            list_chan_methods_for_type(var_type, items, seen);
         }
         seen.free();
         lsp_send_response(id, items);
