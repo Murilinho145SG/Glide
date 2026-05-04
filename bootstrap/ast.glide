@@ -162,6 +162,7 @@ pub const ST_SPAWN: int = 17;
 pub const ST_MACRO_DEF: int = 18;   // `macro name!(matchers) { body }` — user-defined macro
 pub const ST_MACRO_REP: int = 19;   // `$( body );*` repetition inside a macro body
 pub const ST_FOR_IN: int = 20;      // `for x in expr [..[=] hi] { body }` — surface form, lowered to ST_FOR before typer/codegen
+pub const ST_WHILE_RECV: int = 21;  // `while let v [: T] = c.recv() { body }` — chan-aware loop with auto close detection
 
 pub struct Param {
     name: string,

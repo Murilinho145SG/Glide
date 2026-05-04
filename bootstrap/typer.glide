@@ -529,6 +529,41 @@ fn check_stmt(t: *Typer, s: *Stmt) {
         }
         return;
     }
+    if s.kind == ST_WHILE_RECV {
+        // Validate the RHS is `recv_chan.recv()` and infer the binder's type
+        // from the chan's inner T.
+        let mut binder_ty: *Type = s.let_ty;
+        let recv: *Expr = s.let_value;
+        if recv != null && recv.kind == EX_CALL && recv.lhs != null
+           && recv.lhs.kind == EX_MEMBER && recv.lhs.field.eq("recv") {
+            let recv_target_ty: *Type = infer_expr(t, recv.lhs.lhs);
+            let inner: *Type = chan_inner(recv_target_ty);
+            if inner != null {
+                if binder_ty == null { binder_ty = inner; }
+                else if !types_compat(binder_ty, inner) {
+                    t.err(s.line, s.column,
+                        "while-let binder type mismatch: expected ".concat(type_to_string(binder_ty))
+                        .concat(", chan yields ").concat(type_to_string(inner)));
+                }
+            } else {
+                t.err(s.line, s.column,
+                    "while-let RHS must be a `chan<T>.recv()` call");
+            }
+        } else {
+            t.err(s.line, s.column,
+                "while-let RHS must be a `chan<T>.recv()` call");
+        }
+        if binder_ty != null { t.scope.insert(s.name, *binder_ty); }
+        if s.then_body != null {
+            let saved: int = enter_borrow_scope(t);
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                check_stmt(t, &b);
+            }
+            exit_borrow_scope(t, saved);
+        }
+        return;
+    }
     if s.kind == ST_WHILE {
         if s.cond != null {
             let ct: *Type = infer_expr(t, s.cond);

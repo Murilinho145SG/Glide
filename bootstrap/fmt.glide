@@ -315,6 +315,18 @@ fn fmt_stmt_inner(s: *Stmt, depth: int) -> string {
         }
         return out.concat(pad).concat("}\n");
     }
+    if s.kind == ST_WHILE_RECV {
+        let mut out: string = pad.concat("while let ").concat(s.name);
+        if s.let_ty != null { out = out.concat(": ").concat(fmt_type(s.let_ty)); }
+        out = out.concat(" = ").concat(fmt_expr(s.let_value)).concat(" {\n");
+        if s.then_body != null {
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                out = out.concat(fmt_stmt(&b, depth + 1));
+            }
+        }
+        return out.concat(pad).concat("}\n");
+    }
     if s.kind == ST_WHILE {
         let mut out: string = pad.concat("while ").concat(fmt_expr(s.cond)).concat(" {\n");
         if s.then_body != null {

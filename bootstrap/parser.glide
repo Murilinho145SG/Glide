@@ -719,6 +719,36 @@ fn parse_while(p: *Parser) -> *Stmt {
     let line: int = p.current.line;
     let col: int = p.current.column;
     p.advance(); // 'while'
+
+    // chan-aware while-let: `while let v [: T] = recv_expr { body }`.
+    // Lowered at codegen to a __glide_recv_into_<m>(c, &v) loop. Detects
+    // EOF without the zero-value sentinel.
+    if p.at_kw("let") {
+        let nline: int = p.peek.line;
+        let ncol: int = p.peek.column;
+        let nlen: int = p.peek.lexeme.len();
+        p.advance(); // 'let'
+        let var_name: string = p.expect_ident();
+        let mut ty: *Type = null;
+        if p.eat_op(":") { ty = parse_type(p); }
+        p.expect_op("=");
+        let saved: bool = p.no_struct_lit;
+        p.no_struct_lit = true;
+        let recv: *Expr = parse_expr(p, 0);
+        p.no_struct_lit = saved;
+        let body: *Vector<Stmt> = parse_block(p);
+        let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+        s.kind = ST_WHILE_RECV;
+        s.line = line;
+        s.column = col;
+        s.name = var_name;
+        s.name_line = nline; s.name_col = ncol; s.name_len = nlen;
+        s.let_ty = ty;
+        s.let_value = recv;
+        s.then_body = body;
+        return s;
+    }
+
     let saved: bool = p.no_struct_lit;
     p.no_struct_lit = true;
     let cond: *Expr = parse_expr(p, 0);

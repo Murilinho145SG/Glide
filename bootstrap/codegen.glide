@@ -381,6 +381,26 @@ fn emit_chan_runtime(g: *CG) {
         println!("    pthread_mutex_unlock(&c->mu);");
         println!("    return v;");
         println!("}");
+        // Variant of recv that returns a bool: 1 = value written to *out, 0
+        // = chan closed and empty (used by `while let v = c.recv()`).
+        println!("static int __glide_recv_into_".concat(m).concat("(").concat(st).concat("* c, ").concat(tc).concat("* out) {"));
+        println!("    pthread_mutex_lock(&c->mu);");
+        println!("    while (c->len == 0 && !c->closed) {");
+        println!("        if (__glide_park(&c->mu, &c->recv_waiters)) {");
+        println!("            pthread_mutex_lock(&c->mu);");
+        println!("        } else {");
+        println!("            pthread_cond_wait(&c->not_empty, &c->mu);");
+        println!("        }");
+        println!("    }");
+        println!("    if (c->len == 0) { pthread_mutex_unlock(&c->mu); return 0; }");
+        println!("    *out = c->buf[c->head];");
+        println!("    c->head = (c->head + 1) % c->cap;");
+        println!("    c->len--;");
+        println!("    if (c->send_waiters) __glide_unpark_one(&c->send_waiters);");
+        println!("    pthread_cond_signal(&c->not_full);");
+        println!("    pthread_mutex_unlock(&c->mu);");
+        println!("    return 1;");
+        println!("}");
         println!("static void __glide_close_".concat(m).concat("(").concat(st).concat("* c) {"));
         println!("    pthread_mutex_lock(&c->mu);");
         println!("    c->closed = 1;");
@@ -2604,6 +2624,44 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
         } else {
             println!("}");
         }
+        return;
+    }
+    if s.kind == ST_WHILE_RECV {
+        // `while let v [: T] = chan_expr.recv() { body }`
+        // Lower to: { T v; while (__glide_recv_into_<m>(chan_expr, &v)) { body } }
+        let recv: *Expr = s.let_value;
+        let recv_target: *Expr = recv.lhs.lhs;
+        let target_ty: *Type = infer_for_codegen(g, recv_target);
+        let stripped: *Type = strip_ptr(target_ty);
+        if stripped == null || stripped.kind != TY_GENERIC || !stripped.name.eq("chan")
+           || stripped.args == null || stripped.args.len() == 0 {
+            ind(depth); println!("/* while-let: receiver is not a chan<T> */");
+            return;
+        }
+        let inner: Type = stripped.args.get(0);
+        let m: string = mangle_type(&inner);
+        let tc: string = type_to_c(&inner);
+        let var: string = s.name;
+        // Declare the binder. Use the user's annotation when present so the
+        // C type matches their expectation; otherwise the chan inner type.
+        let mut decl_ty: string = tc;
+        if s.let_ty != null { decl_ty = type_to_c(s.let_ty); }
+        ind(depth); println!("{");
+        ind(depth + 1); println!(decl_ty.concat(" ").concat(var).concat(";"));
+        ind(depth + 1); print!("while (__glide_recv_into_".concat(m).concat("("));
+        emit_expr(g, recv_target);
+        println!(", &".concat(var).concat(")) {"));
+        g.declare(var, &inner);
+        if s.then_body != null {
+            let saved: int = g.auto_drop_stack.len();
+            for let i: int = 0; i < s.then_body.len(); i++ {
+                let b: Stmt = s.then_body.get(i);
+                emit_stmt(g, &b, depth + 2);
+            }
+            g.emit_block_drops(saved, depth + 2);
+        }
+        ind(depth + 1); println!("}");
+        ind(depth); println!("}");
         return;
     }
     if s.kind == ST_WHILE {
