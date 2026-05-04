@@ -25,3 +25,7 @@ Thumbs.db
 /vscode-extension/*.vsix
 *.pdb
 a.glide
+
+# Test/bench artifacts
+*.exe
+!~/.cargo/bin/glide.exe
