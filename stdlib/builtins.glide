@@ -48,6 +48,14 @@ macro print!($($arg:expr),*);
 /// let label: string = format!("count: {}, double: {}", n, n * 2);
 /// ```
 ///
+/// Any string literal containing `${expr}` is also lowered to a `format!`
+/// call automatically, so the two snippets below are equivalent:
+///
+/// ```glide
+/// let a: string = format!("count: {}, double: {}", n, n * 2);
+/// let b: string = "count: ${n}, double: ${n * 2}";
+/// ```
+///
 /// Glide doesn't currently expose a `free` helper for the returned string,
 /// so treat lifetimes the same way you would any heap pointer for now.
 macro format!($($arg:expr),*);

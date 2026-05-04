@@ -146,7 +146,11 @@ pub fn fmt_expr(e: *Expr) -> string {
         return fmt_expr(e.lhs).concat("[").concat(fmt_expr(e.rhs)).concat("]");
     }
     if e.kind == EX_CAST {
-        return fmt_expr(e.lhs).concat(" as ").concat(fmt_type(e.cast_to));
+        // Always parenthesize: `as` binds tighter than most binops in the
+        // parser but reads ambiguously to humans, and any wrapping binary
+        // expression already adds its own outer parens, so the round-trip
+        // shape `((x as T) << n)` matches the source.
+        return "(".concat(fmt_expr(e.lhs)).concat(" as ").concat(fmt_type(e.cast_to)).concat(")");
     }
     if e.kind == EX_PATH {
         return e.str_val.concat("::").concat(e.field);
@@ -154,6 +158,10 @@ pub fn fmt_expr(e: *Expr) -> string {
     if e.kind == EX_POSTINC { return fmt_expr(e.lhs).concat("++"); }
     if e.kind == EX_POSTDEC { return fmt_expr(e.lhs).concat("--"); }
     if e.kind == EX_MACRO {
+        // String-interpolation literal — round-trip back to `"…${…}…"`.
+        if e.str_val.eq("format") && e.field != null && !e.field.eq("") {
+            return "\"".concat(e.field).concat("\"");
+        }
         let mut out: string = "";
         if e.macro_recv != null {
             out = fmt_expr(e.macro_recv).concat(".");
@@ -387,8 +395,60 @@ fn fmt_stmt_inner(s: *Stmt, depth: int) -> string {
     if s.kind == ST_ENUM { return fmt_enum(s, depth); }
     if s.kind == ST_IMPL { return fmt_impl(s, depth); }
     if s.kind == ST_MATCH { return fmt_match(s, depth); }
+    if s.kind == ST_ASM { return fmt_asm(s, depth); }
 
     return pad.concat("/* fmt: unknown stmt */\n");
+}
+
+fn fmt_asm(s: *Stmt, depth: int) -> string {
+    let pad: string = fmt_indent(depth);
+    let inner: string = fmt_indent(depth + 1);
+    let mut out: string = pad.concat("asm");
+    if s.is_volatile { out = out.concat(" volatile"); }
+    out = out.concat(" {\n");
+    if s.asm_strings != null {
+        for let i: int = 0; i < s.asm_strings.len(); i++ {
+            out = out.concat(inner).concat("\"").concat(s.asm_strings.get(i)).concat("\"\n");
+        }
+    }
+    let has_out: bool = s.asm_out_constraints != null && s.asm_out_constraints.len() > 0;
+    let has_in:  bool = s.asm_in_constraints  != null && s.asm_in_constraints.len()  > 0;
+    let has_clb: bool = s.asm_clobbers        != null && s.asm_clobbers.len()        > 0;
+    if has_out || has_in || has_clb {
+        out = out.concat(inner).concat(":");
+        if has_out {
+            out = out.concat(" ");
+            for let i: int = 0; i < s.asm_out_constraints.len(); i++ {
+                if i > 0 { out = out.concat(", "); }
+                let e: Expr = s.asm_out_exprs.get(i);
+                out = out.concat("\"").concat(s.asm_out_constraints.get(i))
+                    .concat("\"(").concat(fmt_expr(&e)).concat(")");
+            }
+        }
+        out = out.concat("\n");
+    }
+    if has_in || has_clb {
+        out = out.concat(inner).concat(":");
+        if has_in {
+            out = out.concat(" ");
+            for let i: int = 0; i < s.asm_in_constraints.len(); i++ {
+                if i > 0 { out = out.concat(", "); }
+                let e: Expr = s.asm_in_exprs.get(i);
+                out = out.concat("\"").concat(s.asm_in_constraints.get(i))
+                    .concat("\"(").concat(fmt_expr(&e)).concat(")");
+            }
+        }
+        out = out.concat("\n");
+    }
+    if has_clb {
+        out = out.concat(inner).concat(": ");
+        for let i: int = 0; i < s.asm_clobbers.len(); i++ {
+            if i > 0 { out = out.concat(", "); }
+            out = out.concat("\"").concat(s.asm_clobbers.get(i)).concat("\"");
+        }
+        out = out.concat("\n");
+    }
+    return out.concat(pad).concat("}\n");
 }
 
 fn fmt_for_init(s: *Stmt) -> string {
@@ -411,7 +471,11 @@ fn fmt_type_params(s: *Stmt) -> string {
 fn fmt_fn(s: *Stmt, depth: int) -> string {
     let pad: string = fmt_indent(depth);
     let mut head: string = pad;
+    if s.cfg_target != null && !s.cfg_target.eq("") {
+        head = head.concat("@cfg(\"").concat(s.cfg_target).concat("\")\n").concat(pad);
+    }
     if s.is_pub { head = head.concat("pub "); }
+    if s.is_naked { head = head.concat("naked "); }
     head = head.concat("fn ").concat(s.name).concat(fmt_type_params(s)).concat("(");
     if s.fn_params != null {
         for let i: int = 0; i < s.fn_params.len(); i++ {

@@ -1858,6 +1858,20 @@ fn stmt_uses_name(s: *Stmt, name: string) -> bool {
             if stmt_uses_name(&b, name) { return true; }
         }
     }
+    if s.kind == ST_ASM {
+        if s.asm_out_exprs != null {
+            for let i: int = 0; i < s.asm_out_exprs.len(); i++ {
+                let e: Expr = s.asm_out_exprs.get(i);
+                if expr_uses_name(&e, name) { return true; }
+            }
+        }
+        if s.asm_in_exprs != null {
+            for let i: int = 0; i < s.asm_in_exprs.len(); i++ {
+                let e: Expr = s.asm_in_exprs.get(i);
+                if expr_uses_name(&e, name) { return true; }
+            }
+        }
+    }
     return false;
 }
 
@@ -2206,6 +2220,7 @@ pub fn analysis_missing_return(t: *Typer, program: *Vector<Stmt>) {
         if s.kind != ST_FN { continue; }
         if s.fn_body == null { continue; }
         if s.fn_ret_ty == null { continue; }                 // void -> ok
+        if s.is_naked { continue; }                          // raw asm; `ret` lives in the asm
         // Bool ret is okay-ish but still must return; same logic.
         if !body_always_returns(s.fn_body) {
             t.current_origin = s.origin;
@@ -2271,6 +2286,7 @@ fn check_unused_params_fn(t: *Typer, fnstmt: *Stmt) {
     if fnstmt == null { return; }
     if fnstmt.fn_body == null { return; }
     if fnstmt.fn_params == null { return; }
+    if fnstmt.is_naked { return; }                          // params accessed via raw calling-conv regs
     for let i: int = 0; i < fnstmt.fn_params.len(); i++ {
         let p: Param = fnstmt.fn_params.get(i);
         if p.name.eq("self") { continue; }

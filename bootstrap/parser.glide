@@ -162,6 +162,25 @@ pub fn parse_program(p: *Parser) -> *Vector<Stmt> {
 }
 
 pub fn parse_top_stmt(p: *Parser) -> *Stmt {
+    // `@cfg("windows")` / `@cfg("posix")` — wrap the next decl in a #ifdef
+    // guard so per-platform fns (typically naked asm context switches) can
+    // coexist in the same source file.
+    let mut cfg: string = "";
+    if p.at_op("@") {
+        p.advance();
+        let attr: string = p.expect_ident();
+        if !attr.eq("cfg") { p.err("only `@cfg(\"...\")` attributes are supported"); }
+        p.expect_op("(");
+        if p.current.kind != TOK_STRING { p.err("expected `\"windows\"` or `\"posix\"`"); }
+        let lex: string = p.current.lexeme;
+        cfg = lex.substring(1, lex.len() - 1);
+        p.advance();
+        p.expect_op(")");
+        if !cfg.eq("windows") && !cfg.eq("posix") {
+            p.err("unknown cfg target — expected `windows` or `posix`");
+        }
+    }
+
     let mut is_pub: bool = false;
     if p.eat_kw("pub") { is_pub = true; }
 
@@ -172,7 +191,7 @@ pub fn parse_top_stmt(p: *Parser) -> *Stmt {
     if p.eat_kw("extern") {
         if p.at_kw("fn") {
             let s: *Stmt = parse_fn(p);
-            if s != null { s.is_pub = is_pub; s.fn_body = null; }
+            if s != null { s.is_pub = is_pub; s.fn_body = null; s.cfg_target = cfg; }
             return s;
         }
         // `extern type Foo;` etc — for now, skip the line.
@@ -181,20 +200,27 @@ pub fn parse_top_stmt(p: *Parser) -> *Stmt {
         return null;
     }
 
+    // `naked fn ...` — function emitted with __attribute__((naked)). Body
+    // must contain only `asm { ... }` blocks; calling convention is raw.
+    let mut is_naked_fn: bool = false;
+    if p.eat_kw("naked") { is_naked_fn = true; }
+
     if p.at_kw("fn") {
         let s: *Stmt = parse_fn(p);
-        if s != null { s.is_pub = is_pub; }
+        if s != null { s.is_pub = is_pub; s.is_naked = is_naked_fn; s.cfg_target = cfg; }
         return s;
     }
-    if p.at_kw("let") { let s: *Stmt = parse_let(p); if s != null { s.is_pub = is_pub; } return s; }
-    if p.at_kw("const") { let s: *Stmt = parse_const(p); if s != null { s.is_pub = is_pub; } return s; }
-    if p.at_kw("struct") { let s: *Stmt = parse_struct(p); if s != null { s.is_pub = is_pub; } return s; }
-    if p.at_kw("enum") { let s: *Stmt = parse_enum(p); if s != null { s.is_pub = is_pub; } return s; }
-    if p.at_kw("impl") { return parse_impl(p); }
+    if is_naked_fn { p.err("`naked` only applies to `fn`"); }
+
+    if p.at_kw("let") { let s: *Stmt = parse_let(p); if s != null { s.is_pub = is_pub; s.cfg_target = cfg; } return s; }
+    if p.at_kw("const") { let s: *Stmt = parse_const(p); if s != null { s.is_pub = is_pub; s.cfg_target = cfg; } return s; }
+    if p.at_kw("struct") { let s: *Stmt = parse_struct(p); if s != null { s.is_pub = is_pub; s.cfg_target = cfg; } return s; }
+    if p.at_kw("enum") { let s: *Stmt = parse_enum(p); if s != null { s.is_pub = is_pub; s.cfg_target = cfg; } return s; }
+    if p.at_kw("impl") { let s: *Stmt = parse_impl(p); if s != null { s.cfg_target = cfg; } return s; }
     if p.at_kw("import") { return parse_import(p); }
     if p.at_kw("macro") {
         let s: *Stmt = parse_macro_def(p);
-        if s != null { s.is_pub = is_pub; }
+        if s != null { s.is_pub = is_pub; s.cfg_target = cfg; }
         return s;
     }
 
@@ -484,6 +510,76 @@ fn parse_block(p: *Parser) -> *Vector<Stmt> {
     return stmts;
 }
 
+// `asm [volatile] { "instr" "instr" [: "=c"(out), ...] [: "c"(in), ...] [: "clob", ...] }`
+//
+// Maps directly to GCC's `__asm__ [volatile] ("..." : outs : ins : clobbers)`.
+// Each section after the strings is optional but they are positional — to skip
+// outputs while providing inputs you write `: : "r"(x)`. Trailing `;` after the
+// closing `}` is required (statement terminator).
+fn parse_asm_block(p: *Parser) -> *Stmt {
+    let line: int = p.current.line;
+    let col: int = p.current.column;
+    p.advance(); // 'asm'
+    let mut is_volatile: bool = false;
+    if p.eat_kw("volatile") { is_volatile = true; }
+    p.expect_op("{");
+
+    let s: *Stmt = stmt_asm(line, col);
+    s.is_volatile = is_volatile;
+
+    // Instruction strings: contiguous run of TOK_STRING tokens.
+    while p.current.kind == TOK_STRING {
+        let lex: string = p.current.lexeme;
+        let inner: string = lex.substring(1, lex.len() - 1);
+        s.asm_strings.push(inner);
+        p.advance();
+    }
+
+    // Optional sections: `: outs`, `: ins`, `: clobbers`. Each colon
+    // unconditionally moves to the next slot, so `: : "r"(x)` skips outputs.
+    let mut slot: int = 0; // 0=outs, 1=ins, 2=clobbers
+    while p.eat_op(":") && slot < 3 {
+        // Empty section is fine — just advance the slot.
+        if p.at_op("}") || p.at_op(":") {
+            slot = slot + 1;
+            continue;
+        }
+        if slot == 2 {
+            // Clobber list: just strings.
+            while p.current.kind == TOK_STRING {
+                let lex: string = p.current.lexeme;
+                let inner: string = lex.substring(1, lex.len() - 1);
+                s.asm_clobbers.push(inner);
+                p.advance();
+                if !p.eat_op(",") { break; }
+            }
+        } else {
+            // Operand list: `"constraint"(expr), ...`
+            while p.current.kind == TOK_STRING {
+                let lex: string = p.current.lexeme;
+                let cstr: string = lex.substring(1, lex.len() - 1);
+                p.advance();
+                p.expect_op("(");
+                let e: *Expr = parse_expr(p, 0);
+                p.expect_op(")");
+                if slot == 0 {
+                    s.asm_out_constraints.push(cstr);
+                    if e != null { s.asm_out_exprs.push(*e); }
+                } else {
+                    s.asm_in_constraints.push(cstr);
+                    if e != null { s.asm_in_exprs.push(*e); }
+                }
+                if !p.eat_op(",") { break; }
+            }
+        }
+        slot = slot + 1;
+    }
+
+    p.expect_op("}");
+    p.eat_op(";"); // optional trailing `;` — common style
+    return s;
+}
+
 fn parse_stmt(p: *Parser) -> *Stmt {
     // Macro body repetition: `$( inner_stmts ) sep *` (sep = ';' or ',').
     // Only meaningful inside a macro def's body — outside, the expander will
@@ -513,6 +609,7 @@ fn parse_stmt(p: *Parser) -> *Stmt {
         s.macro_rep_sep = sep;
         return s;
     }
+    if p.at_kw("asm") { return parse_asm_block(p); }
     if p.at_kw("let") { return parse_let(p); }
     if p.at_kw("const") { return parse_const(p); }
     if p.at_kw("return") { return parse_return(p); }
@@ -1030,6 +1127,75 @@ fn peek_binop_bp(p: *Parser) -> int {
     return 0;
 }
 
+// String interpolation: when the literal contains `${expr}` segments, lower
+// to `format!(fmt, args...)` where each `${...}` becomes a `{}` placeholder
+// and the inner source is parsed as a Glide expression. Plain strings (no
+// `${`) are returned as a normal EX_STRING and skip the rewrite.
+fn build_string_or_interp(p: *Parser, raw: string, line: int, col: int) -> *Expr {
+    let n: int = raw.len();
+    let mut has_interp: bool = false;
+    let mut probe: int = 0;
+    while probe + 1 < n {
+        if raw.at(probe).to_int() == 36 && raw.at(probe + 1).to_int() == 123 {
+            has_interp = true;
+            break;
+        }
+        probe = probe + 1;
+    }
+    if !has_interp { return expr_string(raw, line, col); }
+
+    let mut fmt: string = "";
+    let inner_args: *Vector<Expr> = Vector::new();
+    let mut j: int = 0;
+    while j < n {
+        let c0: char = raw.at(j);
+        if c0.to_int() == 36 && j + 1 < n && raw.at(j + 1).to_int() == 123 {
+            let start_expr: int = j + 2;
+            let mut k: int = start_expr;
+            while k < n && raw.at(k).to_int() != 125 { k = k + 1; }
+            if k >= n {
+                p.err("unterminated `${...}` in string literal");
+                return expr_string(raw, line, col);
+            }
+            let expr_src: string = raw.substring(start_expr, k);
+            let sub_lex: *Lexer = Lexer::new(expr_src);
+            let sub_par: *Parser = Parser::new(sub_lex);
+            let e: *Expr = parse_expr(sub_par, 0);
+            for let di: int = 0; di < sub_par.diags.len(); di++ {
+                let d: ParseDiag = sub_par.diags.get(di);
+                let bumped: ParseDiag = ParseDiag {
+                    origin: d.origin,
+                    line: line,
+                    col: col,
+                    msg: "in `${...}`: ".concat(d.msg),
+                };
+                p.diags.push(bumped);
+                p.error_count = p.error_count + 1;
+            }
+            if e == null {
+                return expr_string(raw, line, col);
+            }
+            inner_args.push(*e);
+            fmt = fmt.concat("{}");
+            j = k + 1;
+        } else {
+            fmt = fmt.concat(raw.substring(j, j + 1));
+            j = j + 1;
+        }
+    }
+
+    let final_args: *Vector<Expr> = Vector::new();
+    final_args.push(*expr_string(fmt, line, col));
+    for let i2: int = 0; i2 < inner_args.len(); i2++ {
+        final_args.push(inner_args.get(i2));
+    }
+    let m: *Expr = expr_macro("format", final_args, line, col);
+    // Stash the original `${...}` source so fmt can round-trip back to the
+    // interpolation form instead of `format!("...", x, y, z)`.
+    m.field = raw;
+    return m;
+}
+
 fn parse_prefix(p: *Parser) -> *Expr {
     let tok: Token = p.current;
     let line: int = tok.line;
@@ -1060,7 +1226,7 @@ fn parse_prefix(p: *Parser) -> *Expr {
         // strip quotes
         let len: int = tok.lexeme.len();
         let inner: string = tok.lexeme.substring(1, len - 1);
-        return expr_string(inner, line, col);
+        return build_string_or_interp(p, inner, line, col);
     }
     if tok.kind == TOK_CHAR {
         p.advance();

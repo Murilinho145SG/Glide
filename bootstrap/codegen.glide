@@ -318,94 +318,242 @@ fn emit_chan_runtime(g: *CG) {
         let m: string = mangle_type(&t);
         let tc: string = type_to_c(&t);
         let st: string = "__glide_chan_".concat(m).concat("_t");
+        let cell: string = "__glide_chan_cell_".concat(m);
+        // Vyukov MPMC bounded ring — lock-free fast path, mutex+cv only for blocking.
+        // Each cell carries a sequence counter; producers/consumers race via CAS on
+        // a monotonic position counter, then publish via release-store on the seq.
+        // No false-sharing: enq_pos / deq_pos sit on their own cache lines.
+        println!("typedef struct ".concat(cell).concat(" {"));
+        println!("    atomic_size_t seq;");
+        println!("    ".concat(tc).concat(" data;"));
+        println!("    /* Pad to 64 B so adjacent cells don't share a cache line. */");
+        println!("    char _pad[64 - sizeof(atomic_size_t) - sizeof(".concat(tc).concat(")];"));
+        println!("} __attribute__((aligned(64))) ".concat(cell).concat(";"));
+        println!("");
         println!("struct ".concat(st).concat(" {"));
+        println!("    /* Lock-free ring */");
+        println!("    ".concat(cell).concat("* cells;"));
+        println!("    size_t mask;             /* cap - 1, cap is power of two */");
+        println!("    char _pad1[48];          /* push enq_pos to its own line */");
+        println!("    atomic_size_t enq_pos;");
+        println!("    char _pad2[56];");
+        println!("    atomic_size_t deq_pos;");
+        println!("    char _pad3[56];");
+        println!("    /* Slow path: blocking + close */");
+        println!("    atomic_int closed;");
         println!("    pthread_mutex_t mu;");
         println!("    pthread_cond_t  not_empty;");
         println!("    pthread_cond_t  not_full;");
-        println!("    ".concat(tc).concat("* buf;"));
-        println!("    int cap;");
-        println!("    int len;");
-        println!("    int head;");
-        println!("    int tail;");
-        println!("    int closed;");
-        println!("    /* Coroutine wait lists. When a coro blocks here, the worker");
-        println!("       can pick another task instead of pthread_cond_waiting. */");
-        println!("    struct __glide_task* send_waiters;");
-        println!("    struct __glide_task* recv_waiters;");
+        println!("    /* counts of cv_waiters so fast-path can skip mutex+signal when 0 */");
+        println!("    atomic_int cv_recv_waiters;");
+        println!("    atomic_int cv_send_waiters;");
+        println!("    /* coro waiter lists, walked only under mu */");
+        println!("    struct __glide_task* coro_recv_waiters;");
+        println!("    struct __glide_task* coro_send_waiters;");
         println!("};");
+        println!("");
         println!("static ".concat(st).concat("* __glide_make_chan_").concat(m).concat("(int cap) {"));
         println!("    ".concat(st).concat("* c = (").concat(st).concat("*)malloc(sizeof(").concat(st).concat("));"));
         println!("    if (cap < 1) cap = 1;");
+        println!("    /* Round capacity up to next power of two for the bitmask. */");
+        println!("    size_t pow2 = 1;");
+        println!("    while (pow2 < (size_t)cap) pow2 <<= 1;");
+        println!("    c->mask = pow2 - 1;");
+        println!("    c->cells = (".concat(cell).concat("*)calloc(pow2, sizeof(").concat(cell).concat("));"));
+        println!("    for (size_t i = 0; i < pow2; i++) {");
+        println!("        atomic_store_explicit(&c->cells[i].seq, i, memory_order_relaxed);");
+        println!("    }");
+        println!("    atomic_store(&c->enq_pos, 0);");
+        println!("    atomic_store(&c->deq_pos, 0);");
+        println!("    atomic_store(&c->closed, 0);");
         println!("    pthread_mutex_init(&c->mu, NULL);");
         println!("    pthread_cond_init(&c->not_empty, NULL);");
         println!("    pthread_cond_init(&c->not_full, NULL);");
-        println!("    c->buf = (".concat(tc).concat("*)malloc(sizeof(").concat(tc).concat(") * cap);"));
-        println!("    c->cap = cap; c->len = 0; c->head = 0; c->tail = 0; c->closed = 0;");
-        println!("    c->send_waiters = NULL; c->recv_waiters = NULL;");
+        println!("    atomic_store(&c->cv_recv_waiters, 0);");
+        println!("    atomic_store(&c->cv_send_waiters, 0);");
+        println!("    c->coro_recv_waiters = NULL;");
+        println!("    c->coro_send_waiters = NULL;");
         println!("    return c;");
         println!("}");
-        println!("static void __glide_send_".concat(m).concat("(").concat(st).concat("* c, ").concat(tc).concat(" v) {"));
-        println!("    pthread_mutex_lock(&c->mu);");
-        println!("    while (c->len == c->cap && !c->closed) {");
-        println!("        if (__glide_park(&c->mu, &c->send_waiters)) {");
-        println!("            /* Re-acquire after coro resume; loop re-checks state. */");
-        println!("            pthread_mutex_lock(&c->mu);");
+        println!("");
+        // Lock-free try_send: returns 1 on success, 0 if full.
+        println!("static int __glide_try_send_".concat(m).concat("(").concat(st).concat("* c, ").concat(tc).concat(" v) {"));
+        println!("    ".concat(cell).concat("* cell;"));
+        println!("    size_t pos = atomic_load_explicit(&c->enq_pos, memory_order_relaxed);");
+        println!("    for (;;) {");
+        println!("        cell = &c->cells[pos & c->mask];");
+        println!("        size_t seq = atomic_load_explicit(&cell->seq, memory_order_acquire);");
+        println!("        intptr_t diff = (intptr_t)seq - (intptr_t)pos;");
+        println!("        if (diff == 0) {");
+        println!("            if (atomic_compare_exchange_weak_explicit(");
+        println!("                    &c->enq_pos, &pos, pos + 1,");
+        println!("                    memory_order_relaxed, memory_order_relaxed)) break;");
+        println!("        } else if (diff < 0) {");
+        println!("            return 0;  /* buffer full */");
         println!("        } else {");
-        println!("            pthread_cond_wait(&c->not_full, &c->mu);");
+        println!("            pos = atomic_load_explicit(&c->enq_pos, memory_order_relaxed);");
         println!("        }");
         println!("    }");
-        println!("    if (c->closed) { pthread_mutex_unlock(&c->mu); return; }");
-        println!("    c->buf[c->tail] = v;");
-        println!("    c->tail = (c->tail + 1) % c->cap;");
-        println!("    c->len++;");
-        println!("    if (c->recv_waiters) __glide_unpark_one(&c->recv_waiters);");
-        println!("    pthread_cond_signal(&c->not_empty);");
-        println!("    pthread_mutex_unlock(&c->mu);");
-        println!("}");
-        println!("static ".concat(tc).concat(" __glide_recv_").concat(m).concat("(").concat(st).concat("* c) {"));
-        println!("    pthread_mutex_lock(&c->mu);");
-        println!("    while (c->len == 0 && !c->closed) {");
-        println!("        if (__glide_park(&c->mu, &c->recv_waiters)) {");
-        println!("            pthread_mutex_lock(&c->mu);");
-        println!("        } else {");
-        println!("            pthread_cond_wait(&c->not_empty, &c->mu);");
-        println!("        }");
-        println!("    }");
-        println!("    ".concat(tc).concat(" v;"));
-        println!("    if (c->len == 0) { memset(&v, 0, sizeof(v)); pthread_mutex_unlock(&c->mu); return v; }");
-        println!("    v = c->buf[c->head];");
-        println!("    c->head = (c->head + 1) % c->cap;");
-        println!("    c->len--;");
-        println!("    if (c->send_waiters) __glide_unpark_one(&c->send_waiters);");
-        println!("    pthread_cond_signal(&c->not_full);");
-        println!("    pthread_mutex_unlock(&c->mu);");
-        println!("    return v;");
-        println!("}");
-        // Variant of recv that returns a bool: 1 = value written to *out, 0
-        // = chan closed and empty (used by `while let v = c.recv()`).
-        println!("static int __glide_recv_into_".concat(m).concat("(").concat(st).concat("* c, ").concat(tc).concat("* out) {"));
-        println!("    pthread_mutex_lock(&c->mu);");
-        println!("    while (c->len == 0 && !c->closed) {");
-        println!("        if (__glide_park(&c->mu, &c->recv_waiters)) {");
-        println!("            pthread_mutex_lock(&c->mu);");
-        println!("        } else {");
-        println!("            pthread_cond_wait(&c->not_empty, &c->mu);");
-        println!("        }");
-        println!("    }");
-        println!("    if (c->len == 0) { pthread_mutex_unlock(&c->mu); return 0; }");
-        println!("    *out = c->buf[c->head];");
-        println!("    c->head = (c->head + 1) % c->cap;");
-        println!("    c->len--;");
-        println!("    if (c->send_waiters) __glide_unpark_one(&c->send_waiters);");
-        println!("    pthread_cond_signal(&c->not_full);");
-        println!("    pthread_mutex_unlock(&c->mu);");
+        println!("    cell->data = v;");
+        println!("    atomic_store_explicit(&cell->seq, pos + 1, memory_order_release);");
         println!("    return 1;");
         println!("}");
+        println!("");
+        // Lock-free try_recv: returns 1 on success, 0 if empty.
+        println!("static int __glide_try_recv_".concat(m).concat("(").concat(st).concat("* c, ").concat(tc).concat("* out) {"));
+        println!("    ".concat(cell).concat("* cell;"));
+        println!("    size_t pos = atomic_load_explicit(&c->deq_pos, memory_order_relaxed);");
+        println!("    for (;;) {");
+        println!("        cell = &c->cells[pos & c->mask];");
+        println!("        size_t seq = atomic_load_explicit(&cell->seq, memory_order_acquire);");
+        println!("        intptr_t diff = (intptr_t)seq - (intptr_t)(pos + 1);");
+        println!("        if (diff == 0) {");
+        println!("            if (atomic_compare_exchange_weak_explicit(");
+        println!("                    &c->deq_pos, &pos, pos + 1,");
+        println!("                    memory_order_relaxed, memory_order_relaxed)) break;");
+        println!("        } else if (diff < 0) {");
+        println!("            return 0;  /* buffer empty */");
+        println!("        } else {");
+        println!("            pos = atomic_load_explicit(&c->deq_pos, memory_order_relaxed);");
+        println!("        }");
+        println!("    }");
+        println!("    *out = cell->data;");
+        println!("    atomic_store_explicit(&cell->seq, pos + c->mask + 1, memory_order_release);");
+        println!("    return 1;");
+        println!("}");
+        println!("");
+        // Wake one receiver — coro first, cv fallback. Skips mutex if no waiter.
+        println!("static void __glide_wake_recv_".concat(m).concat("(").concat(st).concat("* c) {"));
+        println!("    if (c->coro_recv_waiters == NULL && atomic_load_explicit(&c->cv_recv_waiters, memory_order_relaxed) == 0) return;");
+        println!("    pthread_mutex_lock(&c->mu);");
+        println!("    if (c->coro_recv_waiters) __glide_unpark_one(&c->coro_recv_waiters);");
+        println!("    if (atomic_load_explicit(&c->cv_recv_waiters, memory_order_relaxed) > 0) pthread_cond_signal(&c->not_empty);");
+        println!("    pthread_mutex_unlock(&c->mu);");
+        println!("}");
+        println!("static void __glide_wake_send_".concat(m).concat("(").concat(st).concat("* c) {"));
+        println!("    if (c->coro_send_waiters == NULL && atomic_load_explicit(&c->cv_send_waiters, memory_order_relaxed) == 0) return;");
+        println!("    pthread_mutex_lock(&c->mu);");
+        println!("    if (c->coro_send_waiters) __glide_unpark_one(&c->coro_send_waiters);");
+        println!("    if (atomic_load_explicit(&c->cv_send_waiters, memory_order_relaxed) > 0) pthread_cond_signal(&c->not_full);");
+        println!("    pthread_mutex_unlock(&c->mu);");
+        println!("}");
+        println!("");
+        println!("static void __glide_send_".concat(m).concat("(").concat(st).concat("* c, ").concat(tc).concat(" v) {"));
+        println!("    if (atomic_load_explicit(&c->closed, memory_order_acquire)) return;");
+        println!("    /* Fast path: lock-free push. */");
+        println!("    if (__glide_try_send_".concat(m).concat("(c, v)) {"));
+        println!("        __glide_wake_recv_".concat(m).concat("(c);"));
+        println!("        return;");
+        println!("    }");
+        println!("    /* Brief spin — consumer may free a slot any nanosecond. */");
+        println!("    for (int s = 0; s < 256; s++) {");
+        println!("#if defined(__x86_64__) || defined(_M_X64)");
+        println!("        __asm__ __volatile__(\"pause\" ::: \"memory\");");
+        println!("#endif");
+        println!("        if (__glide_try_send_".concat(m).concat("(c, v)) {"));
+        println!("            __glide_wake_recv_".concat(m).concat("(c);"));
+        println!("            return;");
+        println!("        }");
+        println!("    }");
+        println!("    /* Slow path: still full. Take mutex, retry, then block. */");
+        println!("    pthread_mutex_lock(&c->mu);");
+        println!("    for (;;) {");
+        println!("        if (atomic_load_explicit(&c->closed, memory_order_acquire)) break;");
+        println!("        if (__glide_try_send_".concat(m).concat("(c, v)) {"));
+        println!("            pthread_mutex_unlock(&c->mu);");
+        println!("            __glide_wake_recv_".concat(m).concat("(c);"));
+        println!("            return;");
+        println!("        }");
+        println!("        if (__glide_park(&c->mu, &c->coro_send_waiters)) {");
+        println!("            pthread_mutex_lock(&c->mu);");
+        println!("        } else {");
+        println!("            atomic_fetch_add_explicit(&c->cv_send_waiters, 1, memory_order_relaxed);");
+        println!("            pthread_cond_wait(&c->not_full, &c->mu);");
+        println!("            atomic_fetch_sub_explicit(&c->cv_send_waiters, 1, memory_order_relaxed);");
+        println!("        }");
+        println!("    }");
+        println!("    pthread_mutex_unlock(&c->mu);");
+        println!("}");
+        println!("");
+        println!("static ".concat(tc).concat(" __glide_recv_").concat(m).concat("(").concat(st).concat("* c) {"));
+        println!("    ".concat(tc).concat(" v;"));
+        println!("    if (__glide_try_recv_".concat(m).concat("(c, &v)) {"));
+        println!("        __glide_wake_send_".concat(m).concat("(c);"));
+        println!("        return v;");
+        println!("    }");
+        println!("    /* Brief spin before paying cv_wait cost — producer may be 1 cell behind. */");
+        println!("    for (int s = 0; s < 256; s++) {");
+        println!("#if defined(__x86_64__) || defined(_M_X64)");
+        println!("        __asm__ __volatile__(\"pause\" ::: \"memory\");");
+        println!("#endif");
+        println!("        if (__glide_try_recv_".concat(m).concat("(c, &v)) {"));
+        println!("            __glide_wake_send_".concat(m).concat("(c);"));
+        println!("            return v;");
+        println!("        }");
+        println!("    }");
+        println!("    pthread_mutex_lock(&c->mu);");
+        println!("    for (;;) {");
+        println!("        if (__glide_try_recv_".concat(m).concat("(c, &v)) {"));
+        println!("            pthread_mutex_unlock(&c->mu);");
+        println!("            __glide_wake_send_".concat(m).concat("(c);"));
+        println!("            return v;");
+        println!("        }");
+        println!("        if (atomic_load_explicit(&c->closed, memory_order_acquire)) break;");
+        println!("        if (__glide_park(&c->mu, &c->coro_recv_waiters)) {");
+        println!("            pthread_mutex_lock(&c->mu);");
+        println!("        } else {");
+        println!("            atomic_fetch_add_explicit(&c->cv_recv_waiters, 1, memory_order_relaxed);");
+        println!("            pthread_cond_wait(&c->not_empty, &c->mu);");
+        println!("            atomic_fetch_sub_explicit(&c->cv_recv_waiters, 1, memory_order_relaxed);");
+        println!("        }");
+        println!("    }");
+        println!("    pthread_mutex_unlock(&c->mu);");
+        println!("    memset(&v, 0, sizeof(v));");
+        println!("    return v;");
+        println!("}");
+        println!("");
+        println!("static int __glide_recv_into_".concat(m).concat("(").concat(st).concat("* c, ").concat(tc).concat("* out) {"));
+        println!("    if (__glide_try_recv_".concat(m).concat("(c, out)) {"));
+        println!("        __glide_wake_send_".concat(m).concat("(c);"));
+        println!("        return 1;");
+        println!("    }");
+        println!("    /* Spin briefly before cv_wait. */");
+        println!("    for (int s = 0; s < 256; s++) {");
+        println!("#if defined(__x86_64__) || defined(_M_X64)");
+        println!("        __asm__ __volatile__(\"pause\" ::: \"memory\");");
+        println!("#endif");
+        println!("        if (__glide_try_recv_".concat(m).concat("(c, out)) {"));
+        println!("            __glide_wake_send_".concat(m).concat("(c);"));
+        println!("            return 1;");
+        println!("        }");
+        println!("    }");
+        println!("    pthread_mutex_lock(&c->mu);");
+        println!("    for (;;) {");
+        println!("        if (__glide_try_recv_".concat(m).concat("(c, out)) {"));
+        println!("            pthread_mutex_unlock(&c->mu);");
+        println!("            __glide_wake_send_".concat(m).concat("(c);"));
+        println!("            return 1;");
+        println!("        }");
+        println!("        if (atomic_load_explicit(&c->closed, memory_order_acquire)) break;");
+        println!("        if (__glide_park(&c->mu, &c->coro_recv_waiters)) {");
+        println!("            pthread_mutex_lock(&c->mu);");
+        println!("        } else {");
+        println!("            atomic_fetch_add_explicit(&c->cv_recv_waiters, 1, memory_order_relaxed);");
+        println!("            pthread_cond_wait(&c->not_empty, &c->mu);");
+        println!("            atomic_fetch_sub_explicit(&c->cv_recv_waiters, 1, memory_order_relaxed);");
+        println!("        }");
+        println!("    }");
+        println!("    pthread_mutex_unlock(&c->mu);");
+        println!("    return 0;");
+        println!("}");
+        println!("");
         println!("static void __glide_close_".concat(m).concat("(").concat(st).concat("* c) {"));
         println!("    pthread_mutex_lock(&c->mu);");
-        println!("    c->closed = 1;");
-        println!("    while (c->send_waiters) __glide_unpark_one(&c->send_waiters);");
-        println!("    while (c->recv_waiters) __glide_unpark_one(&c->recv_waiters);");
+        println!("    atomic_store_explicit(&c->closed, 1, memory_order_release);");
+        println!("    /* Drain coro waiter lists. */");
+        println!("    while (c->coro_send_waiters) __glide_unpark_one(&c->coro_send_waiters);");
+        println!("    while (c->coro_recv_waiters) __glide_unpark_one(&c->coro_recv_waiters);");
+        println!("    /* Wake all cv waiters. */");
         println!("    pthread_cond_broadcast(&c->not_empty);");
         println!("    pthread_cond_broadcast(&c->not_full);");
         println!("    pthread_mutex_unlock(&c->mu);");
@@ -428,48 +576,177 @@ fn emit_scheduler_runtime() {
     println!("#include <pthread.h>");
     println!("#include <stdatomic.h>");
     println!("#include <time.h>");
+    println!("#include <stdint.h>");
+    println!("#include <stdlib.h>");
     println!("#ifdef _WIN32");
-    println!("# include <windows.h>");
-    println!("typedef void* __glide_coro_handle;");
+    println!("# include <windows.h>  /* GetSystemInfo / Sleep / VirtualAlloc */");
     println!("#else");
-    println!("# include <ucontext.h>");
     println!("# include <unistd.h>");
-    println!("typedef struct { ucontext_t uc; void* stack; size_t stack_size; } __glide_coro_handle;");
+    println!("# include <sys/mman.h>");
     println!("#endif");
     println!("");
-    println!("#define __GLIDE_CORO_STACK 65536");
+    println!("/* Spinlock — 5-10× faster than pthread_mutex for the short critical");
+    println!("   sections we use (queue push/pop, pool head update). Falls back to");
+    println!("   `pause` on contention to be hyperthread-friendly. */");
+    println!("typedef atomic_int __glide_spin_t;");
+    println!("static inline void __glide_spin_lock(__glide_spin_t* l) {");
+    println!("    while (atomic_exchange_explicit(l, 1, memory_order_acquire) == 1) {");
+    println!("        while (atomic_load_explicit(l, memory_order_relaxed) == 1) {");
+    println!("#if defined(__x86_64__) || defined(_M_X64)");
+    println!("            __asm__ __volatile__(\"pause\" ::: \"memory\");");
+    println!("#endif");
+    println!("        }");
+    println!("    }");
+    println!("}");
+    println!("static inline void __glide_spin_unlock(__glide_spin_t* l) {");
+    println!("    atomic_store_explicit(l, 0, memory_order_release);");
+    println!("}");
+    println!("");
+    println!("/* Stack defaults: configured size + 4 KB guard, page-rounded up.");
+    println!("   With the default 4 KB the total reservation is 8 KB virtual per coro.");
+    println!("   Linux/Mac mmap commits pages lazily; Windows commits virtual but the");
+    println!("   working-set is bound only on first access. Either way idle coros pay");
+    println!("   ~one 4 KB page in physical RAM.");
+    println!("   Override via GLIDE_CORO_STACK (bytes). Real growable stacks (Go-style)");
+    println!("   need pointer-map metadata + copy/relocate — TBD. */");
+    println!("#define __GLIDE_STACK_GUARD 4096");
+    println!("static int __glide_stack_size = 4096;");
+    println!("");
+    println!("/* Custom assembly context switch — replaces Win32 Fibers and POSIX");
+    println!("   ucontext.h with our own portable, ABI-correct register flip. The");
+    println!("   reason: Fibers crash if the same fiber is SwitchToFiber'd by");
+    println!("   different OS threads over its lifetime, which forces us to pin");
+    println!("   coros to a single worker and rules out work-stealing. With our");
+    println!("   own switch we own the entire state, so a coro can move between");
+    println!("   workers safely.");
+    println!("");
+    println!("   Layout: callee-saved GP regs + (Win64 only) callee-saved XMM6-15.");
+    println!("   Caller-saved registers (rax/rcx/rdx/...) were already flushed to the");
+    println!("   caller's stack frame by the compiler before it called us, so we don't");
+    println!("   touch them. SysV marks XMM as caller-saved → no extra work there. */");
+    println!("typedef struct {");
+    println!("#ifdef _WIN32");
+    println!("    void* rsp; void* rbx; void* rbp;");
+    println!("    void* rdi; void* rsi;");
+    println!("    void* r12; void* r13; void* r14; void* r15;");
+    println!("    char xmm[160];");
+    println!("#else");
+    println!("    void* rsp; void* rbx; void* rbp;");
+    println!("    void* r12; void* r13; void* r14; void* r15;");
+    println!("#endif");
+    println!("} __glide_coro_ctx;");
+    println!("");
+    println!("__attribute__((naked, noinline))");
+    println!("static void __glide_ctx_switch(");
+    println!("    __glide_coro_ctx* from __attribute__((unused)),");
+    println!("    __glide_coro_ctx* to   __attribute__((unused))) {");
+    println!("#ifdef _WIN32");
+    println!("    /* Win64 ABI: from=%rcx, to=%rdx. XMM area starts at offset 72. */");
+    println!("    __asm__(");
+    println!("        \"movq %rsp,   0(%rcx)\\n\\t\"");
+    println!("        \"movq %rbx,   8(%rcx)\\n\\t\"");
+    println!("        \"movq %rbp,  16(%rcx)\\n\\t\"");
+    println!("        \"movq %rdi,  24(%rcx)\\n\\t\"");
+    println!("        \"movq %rsi,  32(%rcx)\\n\\t\"");
+    println!("        \"movq %r12,  40(%rcx)\\n\\t\"");
+    println!("        \"movq %r13,  48(%rcx)\\n\\t\"");
+    println!("        \"movq %r14,  56(%rcx)\\n\\t\"");
+    println!("        \"movq %r15,  64(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm6,   72(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm7,   88(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm8,  104(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm9,  120(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm10, 136(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm11, 152(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm12, 168(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm13, 184(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm14, 200(%rcx)\\n\\t\"");
+    println!("        \"movdqu %xmm15, 216(%rcx)\\n\\t\"");
+    println!("        \"movq  0(%rdx), %rsp\\n\\t\"");
+    println!("        \"movq  8(%rdx), %rbx\\n\\t\"");
+    println!("        \"movq 16(%rdx), %rbp\\n\\t\"");
+    println!("        \"movq 24(%rdx), %rdi\\n\\t\"");
+    println!("        \"movq 32(%rdx), %rsi\\n\\t\"");
+    println!("        \"movq 40(%rdx), %r12\\n\\t\"");
+    println!("        \"movq 48(%rdx), %r13\\n\\t\"");
+    println!("        \"movq 56(%rdx), %r14\\n\\t\"");
+    println!("        \"movq 64(%rdx), %r15\\n\\t\"");
+    println!("        \"movdqu  72(%rdx), %xmm6\\n\\t\"");
+    println!("        \"movdqu  88(%rdx), %xmm7\\n\\t\"");
+    println!("        \"movdqu 104(%rdx), %xmm8\\n\\t\"");
+    println!("        \"movdqu 120(%rdx), %xmm9\\n\\t\"");
+    println!("        \"movdqu 136(%rdx), %xmm10\\n\\t\"");
+    println!("        \"movdqu 152(%rdx), %xmm11\\n\\t\"");
+    println!("        \"movdqu 168(%rdx), %xmm12\\n\\t\"");
+    println!("        \"movdqu 184(%rdx), %xmm13\\n\\t\"");
+    println!("        \"movdqu 200(%rdx), %xmm14\\n\\t\"");
+    println!("        \"movdqu 216(%rdx), %xmm15\\n\\t\"");
+    println!("        \"ret\\n\\t\"");
+    println!("    );");
+    println!("#else");
+    println!("    /* SysV AMD64 ABI: from=%rdi, to=%rsi */");
+    println!("    __asm__(");
+    println!("        \"movq %rsp,   0(%rdi)\\n\\t\"");
+    println!("        \"movq %rbx,   8(%rdi)\\n\\t\"");
+    println!("        \"movq %rbp,  16(%rdi)\\n\\t\"");
+    println!("        \"movq %r12,  24(%rdi)\\n\\t\"");
+    println!("        \"movq %r13,  32(%rdi)\\n\\t\"");
+    println!("        \"movq %r14,  40(%rdi)\\n\\t\"");
+    println!("        \"movq %r15,  48(%rdi)\\n\\t\"");
+    println!("        \"movq  0(%rsi), %rsp\\n\\t\"");
+    println!("        \"movq  8(%rsi), %rbx\\n\\t\"");
+    println!("        \"movq 16(%rsi), %rbp\\n\\t\"");
+    println!("        \"movq 24(%rsi), %r12\\n\\t\"");
+    println!("        \"movq 32(%rsi), %r13\\n\\t\"");
+    println!("        \"movq 40(%rsi), %r14\\n\\t\"");
+    println!("        \"movq 48(%rsi), %r15\\n\\t\"");
+    println!("        \"ret\\n\\t\"");
+    println!("    );");
+    println!("#endif");
+    println!("}");
     println!("");
     println!("typedef void* (*__glide_task_fn)(void*);");
     println!("typedef struct __glide_task {");
-    println!("    __glide_coro_handle ctx;");
+    println!("    __glide_coro_ctx    ctx;     /* register save area */");
+    println!("    void*               stack;   /* mmap/VirtualAlloc base (low addr) */");
+    println!("    size_t              stack_total; /* bytes including guard page */");
     println!("    __glide_task_fn     entry;");
     println!("    void*               arg;");
     println!("    int                 state; /* 0=ready 1=running 2=blocked 3=done */");
-    println!("    int                 home_worker; /* fiber pinned to this worker; -1 = unset */");
+    println!("    int                 home_worker; /* worker that currently owns this coro;");
+    println!("                                       updated on steal so future unparks land");
+    println!("                                       on the thief's queue (cache-warm). */");
+    println!("    int                 has_run;     /* 0 if never run; once 1, we never");
+    println!("                                       migrate the coro across OS threads (Win64");
+    println!("                                       SEH/TIB invariants make resumed-on-other-");
+    println!("                                       thread fragile, so first-run-only steal). */");
     println!("    struct __glide_task* next;       /* link in per-worker ready queue */");
     println!("    struct __glide_task* wait_next;  /* link in chan wait list */");
     println!("    /* Park hand-off: if non-null on switch-back to worker fiber,");
     println!("       worker links self into *park_list and unlocks park_lock.");
-    println!("       Done after the fiber switch so unpark can never race with");
-    println!("       a still-mid-switch fiber. */");
+    println!("       Done after the switch so unpark can never race with a");
+    println!("       still-mid-switch coro. */");
     println!("    pthread_mutex_t*     park_lock;");
     println!("    struct __glide_task** park_list;");
     println!("} __glide_task;");
     println!("");
     println!("/* Forward decls — out-of-order references between sleep_ms / __glide_park /");
-    println!("   __glide_timer_main / sched_init.*/");
+    println!("   __glide_timer_main / sched_init / task pool helpers used by worker_main. */");
     println!("static void* __glide_timer_main(void* unused);");
     println!("int __glide_park(pthread_mutex_t* lock, __glide_task** list);");
+    println!("void __glide_free_task(__glide_task* t);");
     println!("");
     println!("/* Per-worker queue: each worker pops only from its own queue, so a");
     println!("   fiber that first ran on worker A always continues on A. This avoids");
     println!("   cross-thread fiber migration which crashes Win32 Fibers. Stealing");
     println!("   between workers comes in Phase 1.2 (with proper atomic ownership). */");
     println!("typedef struct {");
+    println!("    __glide_spin_t  spin;");
     println!("    pthread_mutex_t mu;");
     println!("    pthread_cond_t  cv;");
     println!("    __glide_task*   head;");
     println!("    __glide_task*   tail;");
+    println!("    atomic_int      idle;");
     println!("} __glide_wq;");
     println!("");
     println!("/* Sorted sleep queue for the timer thread. Coroutines that call");
@@ -498,110 +775,268 @@ fn emit_scheduler_runtime() {
     // every worker thread on a single global.
     println!("static _Thread_local __glide_task* __glide_cur_task = NULL;");
     println!("static _Thread_local int __glide_my_worker = -1;");
+    println!("/* Worker's saved context. Each OS thread has its own — when a coro");
+    println!("   parks/yields, we ctx_switch INTO this so the worker resumes its");
+    println!("   loop right after the call site. */");
+    println!("static _Thread_local __glide_coro_ctx __glide_worker_ctx;");
     println!("#ifdef _WIN32");
-    println!("static _Thread_local void* __glide_worker_fiber = NULL;");
-    println!("#else");
-    println!("static _Thread_local ucontext_t __glide_worker_uc;");
+    println!("/* Original OS-thread stack range — saved on worker entry, restored");
+    println!("   when no coro is running. Win64 SEH walks the stack via TIB, so we");
+    println!("   must point TIB at the coro's stack while it runs and back at the");
+    println!("   OS thread's stack between switches. Without this, any code path that");
+    println!("   raises an exception or probes the stack from a migrated coro reads");
+    println!("   garbage and crashes. */");
+    println!("static _Thread_local void* __glide_orig_stack_base = NULL;");
+    println!("static _Thread_local void* __glide_orig_stack_limit = NULL;");
+    println!("static inline void __glide_tib_set_stack(void* base, void* limit) {");
+    println!("    NT_TIB* tib = (NT_TIB*)NtCurrentTeb();");
+    println!("    tib->StackBase = base;");
+    println!("    tib->StackLimit = limit;");
+    println!("}");
     println!("#endif");
     println!("");
     println!("static void __glide_q_push_to(int wid, __glide_task* t) {");
     println!("    __glide_wq* q = &__glide_wqs[wid];");
-    println!("    pthread_mutex_lock(&q->mu);");
+    println!("    __glide_spin_lock(&q->spin);");
     println!("    t->next = NULL;");
     println!("    if (q->tail) q->tail->next = t; else q->head = t;");
     println!("    q->tail = t;");
-    println!("    pthread_cond_signal(&q->cv);");
-    println!("    pthread_mutex_unlock(&q->mu);");
+    println!("    __glide_spin_unlock(&q->spin);");
+    println!("    if (atomic_load_explicit(&q->idle, memory_order_relaxed)) {");
+    println!("        pthread_mutex_lock(&q->mu);");
+    println!("        pthread_cond_signal(&q->cv);");
+    println!("        pthread_mutex_unlock(&q->mu);");
+    println!("    }");
     println!("}");
     println!("");
     println!("static int __glide_pick_worker(void) {");
     println!("    /* Inside a coro: same worker as caller (cheap, keeps cache hot).");
-    println!("       Outside a coro (e.g. main): round-robin across workers. */");
+    println!("       Outside (main): always W0 — work-stealing redistributes. This avoids");
+    println!("       the per-spawn atomic+cross-thread cache bounce on N target queues. */");
     println!("    if (__glide_cur_task != NULL && __glide_my_worker >= 0) return __glide_my_worker;");
+    println!("    return 0;");
+    println!("}");
+    println!("");
+    println!("/* Work-stealing: when our queue is empty, try grabbing the head of");
+    println!("   another worker's queue (random victim, walk all on miss). On steal");
+    println!("   we adopt the task as our own (home_worker = me) so future unparks");
+    println!("   stay cache-warm here. Now safe to migrate because our custom ctx");
+    println!("   switch is stateless across threads — no Win32 Fiber crash trap. */");
+    println!("static atomic_uint __glide_steal_rr = 0;");
+    println!("static __glide_task* __glide_try_steal(void) {");
     println!("    int n = __glide_n_workers;");
-    println!("    if (n <= 0) return 0;");
-    println!("    return atomic_fetch_add(&__glide_rr, 1) % n;");
+    println!("    if (n <= 1) return NULL;");
+    println!("    int my = __glide_my_worker;");
+    println!("    unsigned int seed = atomic_fetch_add_explicit(&__glide_steal_rr, 1, memory_order_relaxed);");
+    println!("    int start = (int)(seed % (unsigned int)n);");
+    println!("    for (int i = 0; i < n; i++) {");
+    println!("        int v = (start + i) % n;");
+    println!("        if (v == my) continue;");
+    println!("        __glide_wq* q = &__glide_wqs[v];");
+    println!("        __glide_spin_lock(&q->spin);");
+    println!("        /* Walk queue head: only first-run-untouched tasks are stealable. */");
+    println!("        __glide_task* prev = NULL;");
+    println!("        __glide_task* t = q->head;");
+    println!("        while (t && t->has_run) { prev = t; t = t->next; }");
+    println!("        if (t) {");
+    println!("            if (prev) prev->next = t->next; else q->head = t->next;");
+    println!("            if (q->tail == t) q->tail = prev;");
+    println!("            __glide_spin_unlock(&q->spin);");
+    println!("            t->home_worker = my;");
+    println!("            t->next = NULL;");
+    println!("            return t;");
+    println!("        }");
+    println!("        __glide_spin_unlock(&q->spin);");
+    println!("    }");
+    println!("    return NULL;");
     println!("}");
     println!("");
     println!("static __glide_task* __glide_q_pop_my(void) {");
     println!("    __glide_wq* q = &__glide_wqs[__glide_my_worker];");
-    println!("    pthread_mutex_lock(&q->mu);");
-    println!("    while (q->head == NULL && !atomic_load(&__glide_shutdown)) {");
-    println!("        pthread_cond_wait(&q->cv, &q->mu);");
+    println!("    while (!atomic_load_explicit(&__glide_shutdown, memory_order_relaxed)) {");
+    println!("        __glide_spin_lock(&q->spin);");
+    println!("        __glide_task* t = q->head;");
+    println!("        if (t) {");
+    println!("            q->head = t->next;");
+    println!("            if (q->head == NULL) q->tail = NULL;");
+    println!("            __glide_spin_unlock(&q->spin);");
+    println!("            return t;");
+    println!("        }");
+    println!("        __glide_spin_unlock(&q->spin);");
+    println!("        __glide_task* stolen = __glide_try_steal();");
+    println!("        if (stolen) return stolen;");
+    println!("        pthread_mutex_lock(&q->mu);");
+    println!("        if (q->head || atomic_load(&__glide_shutdown)) {");
+    println!("            pthread_mutex_unlock(&q->mu);");
+    println!("            continue;");
+    println!("        }");
+    println!("        struct timespec ts;");
+    println!("        clock_gettime(CLOCK_REALTIME, &ts);");
+    println!("        ts.tv_nsec += 500000;");
+    println!("        if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }");
+    println!("        atomic_store_explicit(&q->idle, 1, memory_order_relaxed);");
+    println!("        pthread_cond_timedwait(&q->cv, &q->mu, &ts);");
+    println!("        atomic_store_explicit(&q->idle, 0, memory_order_relaxed);");
+    println!("        pthread_mutex_unlock(&q->mu);");
     println!("    }");
-    println!("    __glide_task* t = q->head;");
-    println!("    if (t) {");
-    println!("        q->head = t->next;");
-    println!("        if (q->head == NULL) q->tail = NULL;");
-    println!("    }");
-    println!("    pthread_mutex_unlock(&q->mu);");
-    println!("    return t;");
+    println!("    return NULL;");
     println!("}");
     println!("");
-    println!("#ifdef _WIN32");
-    println!("static void __stdcall __glide_coro_entry(void* arg) {");
-    println!("    __glide_task* t = (__glide_task*)arg;");
-    println!("    (void)t->entry(t->arg);");
-    println!("    t->state = 3;");
-    println!("    SwitchToFiber(__glide_worker_fiber);");
-    println!("}");
-    println!("#else");
-    println!("static void __glide_coro_entry_posix(void) {");
+    println!("/* Trampoline reached on a coro's first switch-in. Reads the bound");
+    println!("   task from TLS (worker_main set __glide_cur_task before switching),");
+    println!("   runs the user fn, marks done, then hands control back to the worker");
+    println!("   via ctx_switch. The final switch never returns: we discard the saved");
+    println!("   ctx (worker is going to free us anyway). */");
+    println!("static void __glide_coro_trampoline(void) {");
     println!("    __glide_task* t = __glide_cur_task;");
     println!("    (void)t->entry(t->arg);");
     println!("    t->state = 3;");
-    println!("    setcontext(&__glide_worker_uc);");
+    println!("    __glide_ctx_switch(&t->ctx, &__glide_worker_ctx);");
+    println!("    __builtin_unreachable();");
     println!("}");
-    println!("#endif");
     println!("");
-    println!("static void __glide_coro_init(__glide_task* t) {");
+    println!("/* Stack pool: hold a small free list of recently-freed regions so a");
+    println!("   spawn-burst doesn't pay mmap+munmap (Linux) / VirtualAlloc+VirtualFree");
+    println!("   (Win) per coro. Significant on Windows where these are slow syscalls. */");
+    println!("typedef struct __glide_stack_node {");
+    println!("    void*  base;");
+    println!("    size_t total;");
+    println!("    struct __glide_stack_node* next;");
+    println!("} __glide_stack_node;");
+    println!("static __glide_stack_node* __glide_stack_pool = NULL;");
+    println!("static int __glide_stack_pool_count = 0;");
+    println!("static const int __GLIDE_STACK_POOL_MAX = 256;");
+    println!("static __glide_spin_t __glide_stack_pool_spin = 0;");
+    println!("");
+    println!("/* Stack allocator: mmap (POSIX) or VirtualAlloc (Win) so unused pages");
+    println!("   stay uncommitted (Linux/Mac) and overflow into the guard page raises");
+    println!("   SIGSEGV/EXCEPTION_ACCESS_VIOLATION instead of silently corrupting the");
+    println!("   neighbour stack. Returns the LOW address of the whole region; usable");
+    println!("   stack starts at `base + __GLIDE_STACK_GUARD`. */");
+    println!("static void* __glide_alloc_stack(size_t* out_total) {");
+    println!("    size_t total = (size_t)__glide_stack_size + __GLIDE_STACK_GUARD;");
+    println!("    size_t page = 4096;");
+    println!("    total = (total + page - 1) & ~(page - 1);");
+    println!("    /* Pool fast path. */");
+    println!("    __glide_spin_lock(&__glide_stack_pool_spin);");
+    println!("    __glide_stack_node* n = __glide_stack_pool;");
+    println!("    while (n && n->total != total) n = n->next;");
+    println!("    if (n && n->total == total) {");
+    println!("        /* Unlink first matching node. */");
+    println!("        __glide_stack_node** p = &__glide_stack_pool;");
+    println!("        while (*p != n) p = &(*p)->next;");
+    println!("        *p = n->next;");
+    println!("        __glide_stack_pool_count--;");
+    println!("        __glide_spin_unlock(&__glide_stack_pool_spin);");
+    println!("        void* base = n->base;");
+    println!("        free(n);");
+    println!("        *out_total = total;");
+    println!("        return base;");
+    println!("    }");
+    println!("    __glide_spin_unlock(&__glide_stack_pool_spin);");
+    println!("    void* base;");
     println!("#ifdef _WIN32");
-    println!("    t->ctx = CreateFiber(__GLIDE_CORO_STACK, (LPFIBER_START_ROUTINE)__glide_coro_entry, t);");
+    println!("    base = VirtualAlloc(NULL, total, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);");
+    println!("    if (!base) return NULL;");
+    println!("    DWORD old;");
+    println!("    VirtualProtect(base, __GLIDE_STACK_GUARD, PAGE_NOACCESS, &old);");
     println!("#else");
-    println!("    t->ctx.stack_size = __GLIDE_CORO_STACK;");
-    println!("    t->ctx.stack = malloc(t->ctx.stack_size);");
-    println!("    getcontext(&t->ctx.uc);");
-    println!("    t->ctx.uc.uc_stack.ss_sp = t->ctx.stack;");
-    println!("    t->ctx.uc.uc_stack.ss_size = t->ctx.stack_size;");
-    println!("    t->ctx.uc.uc_link = &__glide_worker_uc;");
-    println!("    makecontext(&t->ctx.uc, (void(*)(void))__glide_coro_entry_posix, 0);");
+    println!("    base = mmap(NULL, total, PROT_READ|PROT_WRITE,");
+    println!("                MAP_ANON|MAP_PRIVATE, -1, 0);");
+    println!("    if (base == MAP_FAILED) return NULL;");
+    println!("    mprotect(base, __GLIDE_STACK_GUARD, PROT_NONE);");
+    println!("#endif");
+    println!("    *out_total = total;");
+    println!("    return base;");
+    println!("}");
+    println!("");
+    println!("static void __glide_free_stack(void* base, size_t total) {");
+    println!("    if (!base) return;");
+    println!("    /* Hand back to pool if there's room. */");
+    println!("    __glide_spin_lock(&__glide_stack_pool_spin);");
+    println!("    if (__glide_stack_pool_count < __GLIDE_STACK_POOL_MAX) {");
+    println!("        __glide_stack_node* n = (__glide_stack_node*)malloc(sizeof(*n));");
+    println!("        n->base = base;");
+    println!("        n->total = total;");
+    println!("        n->next = __glide_stack_pool;");
+    println!("        __glide_stack_pool = n;");
+    println!("        __glide_stack_pool_count++;");
+    println!("        __glide_spin_unlock(&__glide_stack_pool_spin);");
+    println!("        return;");
+    println!("    }");
+    println!("    __glide_spin_unlock(&__glide_stack_pool_spin);");
+    println!("#ifdef _WIN32");
+    println!("    (void)total;");
+    println!("    VirtualFree(base, 0, MEM_RELEASE);");
+    println!("#else");
+    println!("    munmap(base, total);");
+    println!("#endif");
+    println!("}");
+    println!("");
+    println!("/* Plant trampoline address at the top of the stack so the first");
+    println!("   ctx_switch into this ctx pops it and `ret`s into the trampoline.");
+    println!("   16-byte alignment matches the AMD64 call ABI: we save RSP at a");
+    println!("   16-aligned address; `ret` bumps RSP by 8 so trampoline entry sees");
+    println!("   RSP%16==8 (which is what `call` would have left). */");
+    println!("static void __glide_coro_init(__glide_task* t) {");
+    println!("    size_t total = 0;");
+    println!("    t->stack = __glide_alloc_stack(&total);");
+    println!("    t->stack_total = total;");
+    println!("    char* top = (char*)t->stack + total;");
+    println!("    top -= 16;                       /* headroom — never write past top */");
+    println!("    uintptr_t sp = ((uintptr_t)top) & ~(uintptr_t)15;");
+    println!("    *(void**)sp = (void*)__glide_coro_trampoline;");
+    println!("    t->ctx.rsp = (void*)sp;");
+    println!("    t->ctx.rbx = 0; t->ctx.rbp = 0;");
+    println!("    t->ctx.r12 = 0; t->ctx.r13 = 0; t->ctx.r14 = 0; t->ctx.r15 = 0;");
+    println!("#ifdef _WIN32");
+    println!("    t->ctx.rdi = 0; t->ctx.rsi = 0;");
     println!("#endif");
     println!("}");
     println!("");
     println!("static void __glide_coro_destroy(__glide_task* t) {");
-    println!("#ifdef _WIN32");
-    println!("    DeleteFiber(t->ctx);");
-    println!("#else");
-    println!("    free(t->ctx.stack);");
-    println!("#endif");
+    println!("    __glide_free_stack(t->stack, t->stack_total);");
+    println!("    t->stack = NULL;");
+    println!("    t->stack_total = 0;");
     println!("}");
     println!("");
     println!("static void* __glide_worker_main(void* arg) {");
     println!("    __glide_my_worker = (int)(intptr_t)arg;");
     println!("#ifdef _WIN32");
-    println!("    __glide_worker_fiber = ConvertThreadToFiber(NULL);");
+    println!("    /* Snapshot the OS thread's real stack so we can swap TIB.StackBase/Limit");
+    println!("       to the coro's region while it runs and back to ours between switches. */");
+    println!("    {");
+    println!("        NT_TIB* tib = (NT_TIB*)NtCurrentTeb();");
+    println!("        __glide_orig_stack_base = tib->StackBase;");
+    println!("        __glide_orig_stack_limit = tib->StackLimit;");
+    println!("    }");
     println!("#endif");
     println!("    while (!atomic_load(&__glide_shutdown)) {");
     println!("        __glide_task* t = __glide_q_pop_my();");
     println!("        if (!t) break;");
     println!("        __glide_cur_task = t;");
     println!("        t->state = 1;");
+    println!("        t->has_run = 1;  /* stick to this OS thread from now on */");
     println!("#ifdef _WIN32");
-    println!("        SwitchToFiber(t->ctx);");
-    println!("#else");
-    println!("        swapcontext(&__glide_worker_uc, &t->ctx.uc);");
+    println!("        __glide_tib_set_stack((char*)t->stack + t->stack_total, t->stack);");
+    println!("#endif");
+    println!("        __glide_ctx_switch(&__glide_worker_ctx, &t->ctx);");
+    println!("#ifdef _WIN32");
+    println!("        __glide_tib_set_stack(__glide_orig_stack_base, __glide_orig_stack_limit);");
     println!("#endif");
     println!("        __glide_cur_task = NULL;");
     println!("        if (t->state == 3) {");
-    println!("            __glide_coro_destroy(t);");
-    println!("            free(t);");
-    println!("            atomic_fetch_sub(&__glide_pending, 1);");
-    println!("            /* Wake every worker so a sched_shutdown waiting on pending");
-    println!("               can re-check and so other idle workers re-evaluate. */");
-    println!("            for (int i = 0; i < __glide_n_workers; i++) {");
-    println!("                pthread_mutex_lock(&__glide_wqs[i].mu);");
-    println!("                pthread_cond_broadcast(&__glide_wqs[i].cv);");
-    println!("                pthread_mutex_unlock(&__glide_wqs[i].mu);");
+    println!("            __glide_free_task(t);  /* pool reuse — keeps stack mmap'd */");
+    println!("            int rem = atomic_fetch_sub_explicit(&__glide_pending, 1, memory_order_acq_rel) - 1;");
+    println!("            /* Only broadcast when pending hits zero so sched_shutdown's");
+    println!("               polling loop wakes promptly. Per-task broadcast was costing");
+    println!("               N×lock+broadcast per completion (~1 ms on 12 workers / 100K tasks). */");
+    println!("            if (rem == 0) {");
+    println!("                for (int i = 0; i < __glide_n_workers; i++) {");
+    println!("                    pthread_mutex_lock(&__glide_wqs[i].mu);");
+    println!("                    pthread_cond_broadcast(&__glide_wqs[i].cv);");
+    println!("                    pthread_mutex_unlock(&__glide_wqs[i].mu);");
+    println!("                }");
     println!("            }");
     println!("        } else if (t->state == 2) {");
     println!("            /* Parked. Complete the hand-off: link into wait list,");
@@ -621,14 +1056,16 @@ fn emit_scheduler_runtime() {
     println!("            __glide_q_push_to(t->home_worker, t);");
     println!("        }");
     println!("    }");
-    println!("#ifdef _WIN32");
-    println!("    ConvertFiberToThread();");
-    println!("#endif");
     println!("    return NULL;");
     println!("}");
     println!("");
     println!("void __glide_sched_init(void) {");
     println!("    if (__glide_q_inited) return;");
+    println!("    const char* env_stk = getenv(\"GLIDE_CORO_STACK\");");
+    println!("    if (env_stk) {");
+    println!("        int n = atoi(env_stk);");
+    println!("        if (n >= 1024) __glide_stack_size = n;  /* min 1 KB to avoid SIGSEGV on entry */");
+    println!("    }");
     println!("    const char* env = getenv(\"GLIDE_WORKERS\");");
     println!("    if (env) __glide_n_workers = atoi(env);");
     println!("    if (__glide_n_workers <= 0) {");
@@ -683,14 +1120,75 @@ fn emit_scheduler_runtime() {
     println!("    __glide_q_inited = 0;");
     println!("}");
     println!("");
+    println!("/* Task pool: full task structs (stack + ctx already initialized). On reuse");
+    println!("   we just rewind the trampoline pointer at the top of the existing stack —");
+    println!("   no mmap, no calloc, no setup work. Burst spawns become ~1 mutex + 1 push. */");
+    println!("static __glide_task* __glide_task_pool = NULL;");
+    println!("static int __glide_task_pool_count = 0;");
+    println!("static const int __GLIDE_TASK_POOL_MAX = 1024;");
+    println!("static __glide_spin_t __glide_task_pool_spin = 0;");
+    println!("");
+    println!("static void __glide_reset_ctx(__glide_task* t) {");
+    println!("    char* top = (char*)t->stack + t->stack_total;");
+    println!("    top -= 16;");
+    println!("    uintptr_t sp = ((uintptr_t)top) & ~(uintptr_t)15;");
+    println!("    *(void**)sp = (void*)__glide_coro_trampoline;");
+    println!("    t->ctx.rsp = (void*)sp;");
+    println!("    /* GP/XMM regs zeroed via 8-byte stores — faster than memset for");
+    println!("       this fixed-size struct, and the compiler vectorizes if it cares. */");
+    println!("    t->ctx.rbx = 0; t->ctx.rbp = 0;");
+    println!("    t->ctx.r12 = 0; t->ctx.r13 = 0; t->ctx.r14 = 0; t->ctx.r15 = 0;");
+    println!("#ifdef _WIN32");
+    println!("    t->ctx.rdi = 0; t->ctx.rsi = 0;");
+    println!("    /* xmm[160] = 20 × 8 bytes; unrolled clear for branchless write. */");
+    println!("    uint64_t* x = (uint64_t*)t->ctx.xmm;");
+    println!("    x[0]=0; x[1]=0; x[2]=0; x[3]=0; x[4]=0; x[5]=0; x[6]=0; x[7]=0;");
+    println!("    x[8]=0; x[9]=0; x[10]=0; x[11]=0; x[12]=0; x[13]=0; x[14]=0; x[15]=0;");
+    println!("    x[16]=0; x[17]=0; x[18]=0; x[19]=0;");
+    println!("#endif");
+    println!("}");
+    println!("");
+    println!("__glide_task* __glide_alloc_task(void) {");
+    println!("    __glide_spin_lock(&__glide_task_pool_spin);");
+    println!("    __glide_task* t = __glide_task_pool;");
+    println!("    if (t) {");
+    println!("        __glide_task_pool = t->next;");
+    println!("        __glide_task_pool_count--;");
+    println!("        __glide_spin_unlock(&__glide_task_pool_spin);");
+    println!("        t->state = 0; t->has_run = 0;");
+    println!("        t->next = NULL; t->wait_next = NULL;");
+    println!("        t->park_lock = NULL; t->park_list = NULL;");
+    println!("        __glide_reset_ctx(t);");
+    println!("        return t;");
+    println!("    }");
+    println!("    __glide_spin_unlock(&__glide_task_pool_spin);");
+    println!("    t = (__glide_task*)calloc(1, sizeof(__glide_task));");
+    println!("    __glide_coro_init(t);");
+    println!("    return t;");
+    println!("}");
+    println!("");
+    println!("void __glide_free_task(__glide_task* t) {");
+    println!("    __glide_spin_lock(&__glide_task_pool_spin);");
+    println!("    if (__glide_task_pool_count < __GLIDE_TASK_POOL_MAX) {");
+    println!("        t->next = __glide_task_pool;");
+    println!("        __glide_task_pool = t;");
+    println!("        __glide_task_pool_count++;");
+    println!("        __glide_spin_unlock(&__glide_task_pool_spin);");
+    println!("        return;");
+    println!("    }");
+    println!("    __glide_spin_unlock(&__glide_task_pool_spin);");
+    println!("    __glide_coro_destroy(t);");
+    println!("    free(t);");
+    println!("}");
+    println!("");
     println!("void __glide_spawn(__glide_task_fn fn, void* arg) {");
-    println!("    __glide_task* t = (__glide_task*)calloc(1, sizeof(__glide_task));");
+    println!("    __glide_task* t = __glide_alloc_task();");
     println!("    t->entry = fn;");
     println!("    t->arg = arg;");
-    println!("    t->state = 0;");
     println!("    t->home_worker = __glide_pick_worker();");
-    println!("    __glide_coro_init(t);");
-    println!("    atomic_fetch_add(&__glide_pending, 1);");
+    println!("    /* Relaxed: shutdown read uses acquire; the queue mutex/spinlock pair");
+    println!("       gives the visibility we need. seq_cst here would be a cache-bus stall. */");
+    println!("    atomic_fetch_add_explicit(&__glide_pending, 1, memory_order_relaxed);");
     println!("    __glide_q_push_to(t->home_worker, t);");
     println!("}");
     println!("");
@@ -698,11 +1196,7 @@ fn emit_scheduler_runtime() {
     println!("    __glide_task* t = __glide_cur_task;");
     println!("    if (!t) return;");
     println!("    t->state = 0;");
-    println!("#ifdef _WIN32");
-    println!("    SwitchToFiber(__glide_worker_fiber);");
-    println!("#else");
-    println!("    swapcontext(&t->ctx.uc, &__glide_worker_uc);");
-    println!("#endif");
+    println!("    __glide_ctx_switch(&t->ctx, &__glide_worker_ctx);");
     println!("}");
     println!("");
     println!("static long long __glide_monotonic_ns(void) {");
@@ -795,11 +1289,7 @@ fn emit_scheduler_runtime() {
     println!("    t->park_lock = lock;");
     println!("    t->park_list = list;");
     println!("    t->state = 2;");
-    println!("#ifdef _WIN32");
-    println!("    SwitchToFiber(__glide_worker_fiber);");
-    println!("#else");
-    println!("    swapcontext(&t->ctx.uc, &__glide_worker_uc);");
-    println!("#endif");
+    println!("    __glide_ctx_switch(&t->ctx, &__glide_worker_ctx);");
     println!("    return 1;");
     println!("}");
     println!("");
@@ -963,6 +1453,15 @@ fn emit_spawn_stub(g: *CG, call: *Expr, id: int) {
     if fnstmt.fn_params == null { return; }
     let n: int = fnstmt.fn_params.len();
     let ids: string = int_to_str(id);
+    // Zero-arg fast path: no args struct, no malloc, no free in stub.
+    if n == 0 {
+        println!("static void* __glide_spawn_stub_".concat(ids).concat("(void* __raw) {"));
+        println!("    (void)__raw;");
+        println!("    ".concat(fn_name).concat("();"));
+        println!("    return NULL;");
+        println!("}");
+        return;
+    }
     let an: string = "__glide_spawn_args_".concat(ids);
     // Args struct
     println!("typedef struct ".concat(an).concat(" {"));
@@ -1495,6 +1994,10 @@ fn infer_for_codegen(g: *CG, e: *Expr) -> *Type {
         return null;
     }
     if e.kind == EX_CAST { return e.cast_to; }
+    if e.kind == EX_MACRO {
+        if e.str_val.eq("format") { return ty_named("string"); }
+        return null;
+    }
     if e.kind == EX_BINARY {
         let op: int = e.op_code;
         if op == OP_EQ || op == OP_NE || op == OP_LT || op == OP_LE
@@ -2222,6 +2725,17 @@ fn ind(n: int) {
     for let i: int = 0; i < n; i++ { print!("    "); }
 }
 
+// `@cfg("windows")` / `@cfg("posix")` brackets a top-level decl with a cpp
+// guard so per-platform fns (typically naked asm context switches) compile
+// only on the right OS. No-op when cfg is empty.
+fn emit_cfg_open(cfg: string) {
+    if cfg.eq("windows") { println!("#ifdef _WIN32"); }
+    else if cfg.eq("posix") { println!("#ifndef _WIN32"); }
+}
+fn emit_cfg_close(cfg: string) {
+    if cfg.eq("windows") || cfg.eq("posix") { println!("#endif"); }
+}
+
 // ---- expressions ---------------------------------------------------------
 
 pub fn emit_expr(g: *CG, e: *Expr) {
@@ -2610,6 +3124,77 @@ pub fn emit_expr(g: *CG, e: *Expr) {
 
 // ---- statements ----------------------------------------------------------
 
+// Emits a Glide `asm [volatile] { "instr" : outs : ins : clobbers }` block as
+// a GCC-style `__asm__` statement. Each instruction line is wrapped in its
+// own quoted string + "\n\t" so the generated C reads naturally and the
+// assembler sees each line as a separate instruction. Constraints and clobbers
+// pass through verbatim.
+fn emit_asm_stmt(g: *CG, s: *Stmt, depth: int) {
+    ind(depth);
+    print!("__asm__");
+    if s.is_volatile { print!(" volatile"); }
+    print!("(");
+    if s.asm_strings == null || s.asm_strings.len() == 0 {
+        print!("\"\"");
+    } else {
+        for let i: int = 0; i < s.asm_strings.len(); i++ {
+            if i > 0 { println!(""); ind(depth + 1); }
+            let line: string = s.asm_strings.get(i);
+            print!("\"");
+            // escape backslashes and quotes
+            let n: int = line.len();
+            let mut k: int = 0;
+            while k < n {
+                let c: char = line.at(k);
+                if c.to_int() == 34 { print!("\\\""); }
+                else if c.to_int() == 92 { print!("\\\\"); }
+                else { print!(c); }
+                k = k + 1;
+            }
+            print!("\\n\\t\"");
+        }
+    }
+    // Outputs (always emit `:` so positional sections line up if anything follows).
+    let has_out: bool = s.asm_out_constraints != null && s.asm_out_constraints.len() > 0;
+    let has_in:  bool = s.asm_in_constraints  != null && s.asm_in_constraints.len()  > 0;
+    let has_clb: bool = s.asm_clobbers        != null && s.asm_clobbers.len()        > 0;
+    if has_out || has_in || has_clb {
+        print!(" : ");
+        if has_out {
+            for let i: int = 0; i < s.asm_out_constraints.len(); i++ {
+                if i > 0 { print!(", "); }
+                let cstr: string = "\"".concat(s.asm_out_constraints.get(i)).concat("\"(");
+                print!(cstr);
+                let e: Expr = s.asm_out_exprs.get(i);
+                emit_expr(g, &e);
+                print!(")");
+            }
+        }
+    }
+    if has_in || has_clb {
+        print!(" : ");
+        if has_in {
+            for let i: int = 0; i < s.asm_in_constraints.len(); i++ {
+                if i > 0 { print!(", "); }
+                let cstr: string = "\"".concat(s.asm_in_constraints.get(i)).concat("\"(");
+                print!(cstr);
+                let e: Expr = s.asm_in_exprs.get(i);
+                emit_expr(g, &e);
+                print!(")");
+            }
+        }
+    }
+    if has_clb {
+        print!(" : ");
+        for let i: int = 0; i < s.asm_clobbers.len(); i++ {
+            if i > 0 { print!(", "); }
+            let cstr: string = "\"".concat(s.asm_clobbers.get(i)).concat("\"");
+            print!(cstr);
+        }
+    }
+    println!(");");
+}
+
 pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
     if s == null { return; }
     if s.kind == ST_LET || s.kind == ST_CONST {
@@ -2805,19 +3390,31 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
         let id: int = g.spawn_count;
         g.spawn_count = id + 1;
         let ids: string = int_to_str(id);
-        let an: string = "__glide_spawn_args_".concat(ids);
         let call: *Expr = s.expr_value;
+        let mut n_args: int = 0;
+        if call != null && call.args != null { n_args = call.args.len(); }
+
+        // Zero-arg fast path — skip the malloc/free of an empty struct.
+        if n_args == 0 {
+            ind(depth);
+            if s.is_spawn_thread {
+                println!("{ pthread_t __tid; pthread_create(&__tid, NULL, __glide_spawn_stub_".concat(ids).concat(", NULL); pthread_detach(__tid); }"));
+            } else {
+                println!("__glide_spawn(__glide_spawn_stub_".concat(ids).concat(", NULL);"));
+            }
+            return;
+        }
+
+        let an: string = "__glide_spawn_args_".concat(ids);
         ind(depth); println!("{");
         ind(depth + 1);
         println!(an.concat("* __args = (").concat(an).concat("*)malloc(sizeof(").concat(an).concat("));"));
-        if call != null && call.args != null {
-            for let i: int = 0; i < call.args.len(); i++ {
-                ind(depth + 1);
-                print!("__args->a".concat(int_to_str(i)).concat(" = "));
-                let a: Expr = call.args.get(i);
-                emit_expr(g, &a);
-                println!(";");
-            }
+        for let i: int = 0; i < call.args.len(); i++ {
+            ind(depth + 1);
+            print!("__args->a".concat(int_to_str(i)).concat(" = "));
+            let a: Expr = call.args.get(i);
+            emit_expr(g, &a);
+            println!(";");
         }
         if s.is_spawn_thread {
             ind(depth + 1); println!("pthread_t __tid;");
@@ -2837,6 +3434,7 @@ pub fn emit_stmt(g: *CG, s: *Stmt, depth: int) {
     }
     if s.kind == ST_BREAK { ind(depth); println!("break;"); return; }
     if s.kind == ST_CONTINUE { ind(depth); println!("continue;"); return; }
+    if s.kind == ST_ASM { emit_asm_stmt(g, s, depth); return; }
     if s.kind == ST_IF {
         ind(depth); print!("if (");
         emit_expr(g, s.cond);
@@ -3036,6 +3634,7 @@ fn emit_fn_signature(s: *Stmt) {
         print!("int main(int __glide_main_argc, char** __glide_main_argv)");
         return;
     }
+    if s.is_naked { print!("__attribute__((naked)) "); }
     print!(type_to_c(s.fn_ret_ty), " ", s.name, "(");
     if s.fn_params == null || s.fn_params.len() == 0 {
         if s.is_variadic { print!("..."); }
@@ -3608,7 +4207,9 @@ pub fn emit_program(program: *Vector<Stmt>) {
     for let i: int = 0; i < program.len(); i++ {
         let s: Stmt = program.get(i);
         if s.kind == ST_FN && (s.type_params == null || s.type_params.len() == 0) {
+            emit_cfg_open(s.cfg_target);
             emit_fn_signature(&s); println!(";");
+            emit_cfg_close(s.cfg_target);
         }
     }
 
@@ -3717,10 +4318,14 @@ pub fn emit_program(program: *Vector<Stmt>) {
         let s: Stmt = program.get(i);
         if s.kind == ST_FN && (s.type_params == null || s.type_params.len() == 0)
            && s.fn_body != null {
+            emit_cfg_open(s.cfg_target);
             emit_fn(g, &s); println!("");
+            emit_cfg_close(s.cfg_target);
         }
         if s.kind == ST_IMPL && (s.type_params == null || s.type_params.len() == 0) {
+            emit_cfg_open(s.cfg_target);
             emit_impl(g, &s);
+            emit_cfg_close(s.cfg_target);
         }
     }
 

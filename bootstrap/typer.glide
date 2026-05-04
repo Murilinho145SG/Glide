@@ -608,6 +608,24 @@ fn check_stmt(t: *Typer, s: *Stmt) {
     }
     if s.kind == ST_BREAK { return; }
     if s.kind == ST_CONTINUE { return; }
+    if s.kind == ST_ASM {
+        // Operand exprs go through infer_expr so undefined-name diagnostics
+        // still fire; constraint strings and clobbers are GCC syntax and pass
+        // through unchanged.
+        if s.asm_out_exprs != null {
+            for let i: int = 0; i < s.asm_out_exprs.len(); i++ {
+                let e: Expr = s.asm_out_exprs.get(i);
+                infer_expr(t, &e);
+            }
+        }
+        if s.asm_in_exprs != null {
+            for let i: int = 0; i < s.asm_in_exprs.len(); i++ {
+                let e: Expr = s.asm_in_exprs.get(i);
+                infer_expr(t, &e);
+            }
+        }
+        return;
+    }
 }
 
 fn check_let_or_const(t: *Typer, s: *Stmt) {

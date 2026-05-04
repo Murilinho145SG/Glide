@@ -163,6 +163,7 @@ pub const ST_MACRO_DEF: int = 18;   // `macro name!(matchers) { body }` — user
 pub const ST_MACRO_REP: int = 19;   // `$( body );*` repetition inside a macro body
 pub const ST_FOR_IN: int = 20;      // `for x in expr [..[=] hi] { body }` — surface form, lowered to ST_FOR before typer/codegen
 pub const ST_WHILE_RECV: int = 21;  // `while let v [: T] = c.recv() { body }` — chan-aware loop with auto close detection
+pub const ST_ASM: int = 22;         // `asm [volatile] { "..." [: outs] [: ins] [: clobbers] }` — GCC inline asm
 
 pub struct Param {
     name: string,
@@ -257,6 +258,28 @@ pub struct Stmt {
     // ST_SPAWN flag: `spawn` (default) submits a coroutine to the M:N
     // scheduler; `spawn_thread` keeps the explicit pthread escape hatch.
     is_spawn_thread: bool,
+
+    // ST_FN: skip prologue/epilogue, emit __attribute__((naked)). Body must
+    // contain only `asm` blocks. Args are accessed via the platform calling
+    // convention directly.
+    is_naked: bool,
+
+    // ST_FN/ST_STRUCT/ST_IMPL/ST_CONST: optional `@cfg("...")` attribute.
+    // "" = no guard; "windows" wraps decl in `#ifdef _WIN32`; "posix" wraps
+    // it in `#ifndef _WIN32`. Used to write per-platform asm/naked fns.
+    cfg_target: string,
+
+    // ST_ASM payload. `asm_strings` are the instruction lines (each becomes
+    // its own quoted line in the emitted __asm__). The three operand vectors
+    // are parallel arrays (constraint + expr per operand), GCC-style. For
+    // clobbers, only `asm_clobbers` is used.
+    asm_strings: *Vector<string>,
+    asm_out_constraints: *Vector<string>,
+    asm_out_exprs: *Vector<Expr>,
+    asm_in_constraints: *Vector<string>,
+    asm_in_exprs: *Vector<Expr>,
+    asm_clobbers: *Vector<string>,
+    is_volatile: bool,
 }
 
 // ---- Constructors --------------------------------------------------------
@@ -509,6 +532,26 @@ pub fn stmt_match(scrutinee: *Expr, arms: *Vector<MatchArm>, line: int, col: int
     s.column = col;
     s.scrutinee = scrutinee;
     s.arms = arms;
+    return s;
+}
+
+pub fn stmt_asm(line: int, col: int) -> *Stmt {
+    let s: *Stmt = calloc(1, sizeof(Stmt)) as *Stmt;
+    s.kind = ST_ASM;
+    s.line = line;
+    s.column = col;
+    let strs: *Vector<string> = Vector::new();
+    let outc: *Vector<string> = Vector::new();
+    let oute: *Vector<Expr>   = Vector::new();
+    let inc:  *Vector<string> = Vector::new();
+    let ine:  *Vector<Expr>   = Vector::new();
+    let clb:  *Vector<string> = Vector::new();
+    s.asm_strings = strs;
+    s.asm_out_constraints = outc;
+    s.asm_out_exprs = oute;
+    s.asm_in_constraints = inc;
+    s.asm_in_exprs = ine;
+    s.asm_clobbers = clb;
     return s;
 }
 
