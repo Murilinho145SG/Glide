@@ -289,6 +289,31 @@ pub fn pre_register(t: *Typer, program: *Vector<Stmt>) {
                 }
             }
         }
+        // Register impl methods so `Type::method(args)` callers can lookup
+        // their return type via the same `t.fns` path. Stored under
+        // `Type_method` matching the codegen's mangling. Generic params on
+        // the impl/method stay un-substituted (T as TY_NAMED("T")) — good
+        // enough for arity / pointer-vs-value mismatch diagnostics.
+        if s.kind == ST_IMPL && s.impl_target != null && s.impl_methods != null {
+            let mut tname: string = "";
+            if s.impl_target.kind == TY_NAMED { tname = s.impl_target.name; }
+            if s.impl_target.kind == TY_GENERIC { tname = s.impl_target.name; }
+            if !tname.eq("") {
+                for let j: int = 0; j < s.impl_methods.len(); j++ {
+                    let m: Stmt = s.impl_methods.get(j);
+                    if m.kind == ST_FN {
+                        let fname: string = tname.concat("_").concat(m.name);
+                        let sig: FnSig = FnSig {
+                            name: fname,
+                            params: m.fn_params,
+                            ret_type: m.fn_ret_ty,
+                            is_variadic: m.is_variadic,
+                        };
+                        t.fns.insert(fname, sig);
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -895,6 +920,24 @@ pub fn infer_expr(t: *Typer, e: *Expr) -> *Type {
                 return sig.ret_type;
             }
         }
+        // `Type::method(args)` — looked up via the same registry the impl
+        // pre-pass populated. Returns the method's declared ret_type so
+        // surrounding type-checks (let-init, chan.send, etc.) fire on
+        // shape-mismatches even when full generic monomorphization isn't
+        // run in the typer.
+        if e.lhs != null && e.lhs.kind == EX_PATH {
+            let pname: string = e.lhs.str_val.concat("_").concat(e.lhs.field);
+            if t.fns.contains(pname) {
+                let sig: FnSig = t.fns.get(pname);
+                if e.args != null {
+                    for let i: int = 0; i < e.args.len(); i++ {
+                        let a: Expr = e.args.get(i);
+                        let _u: *Type = infer_expr(t, &a);
+                    }
+                }
+                return sig.ret_type;
+            }
+        }
         // Unknown callee or method/macro: just walk args, return null
         if e.args != null {
             for let i: int = 0; i < e.args.len(); i++ {
@@ -922,7 +965,10 @@ pub fn infer_expr(t: *Typer, e: *Expr) -> *Type {
     }
 
     if e.kind == EX_PATH {
-        // Type::method — returns null until we have method registry
+        let pname: string = e.str_val.concat("_").concat(e.field);
+        if t.fns.contains(pname) {
+            return ty_named("__fn__");
+        }
         return null;
     }
 
